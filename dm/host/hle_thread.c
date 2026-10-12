@@ -482,7 +482,12 @@ int svc_thread(int num, uint64_t *regs) {
                  regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? (uint64_t)(uint32_t)t->core : 0; regs[2] = t ? t->mask : 0; return 1; }
     case 0x0F: {  // SetThreadCoreMask(w0, w1 理想核, x2 掩码)：-1 = 用进程缺省、-2/-3 = 不改理想核；宿主只记账 | SetThreadCoreMask(w0, w1 ideal core, x2 mask): -1 = use the process default, -2/-3 = leave the ideal core unchanged; the host only keeps the bookkeeping
         thr_t *t = h_get((uint32_t)regs[0], O_THREAD);
-        if (t) { int c = (int)regs[1]; if (c >= 0) t->core = c; else if (c == -1) t->core = 0; if (regs[2]) t->mask = regs[2]; }
+        if (t) { int c = (int)regs[1]; if (c >= 0) t->core = c; else if (c == -1) t->core = 0; if (regs[2]) t->mask = regs[2];
+            // 理想核不在新掩码里（-2/-3 不改理想核、却把线程钉到别的核）：同 Horizon，理想核改到掩码里最低的核。
+            // 不改的话 GetCurrentProcessorNumber 对钉在 1 / 2 号核的线程也报 0 号，按核分队列的任务系统（SMBW 的 BaseProcExecutor）会去拿 0 号核的活、1 / 2 号核的队列没人取
+            // The ideal core is not in the new mask (-2/-3 keep the ideal core but pin the thread to other cores): as in Horizon, move the ideal core to the lowest core in the mask.
+            // Otherwise GetCurrentProcessorNumber reports core 0 even for threads pinned to cores 1 / 2, and a job system with per-core queues (SMBW's BaseProcExecutor) takes core 0's work while nobody drains the queues of cores 1 / 2
+            if (t->mask && !(t->mask >> t->core & 1)) t->core = __builtin_ctzll(t->mask); }
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
     case 0x10: regs[0] = (uint64_t)(uint32_t)cur()->core; return 1;

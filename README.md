@@ -9,8 +9,8 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 | Step | State |
 |---|---|
 | Rewriter (`dm/tools/patch_nso.py`, `DM_RULESET=native`) | Runs unchanged on Mario `main` / `sdk` |
-| Mac host boot | Boots fully into the game loop: Metal device and 1920x1080 swapchain, about 40 game threads (scene, save data, module workers, UI loading, map units, task executors), silent audio renderer, first render commands. Runs indefinitely without crashing |
-| Current frontier | Main thread waits on job-completion light events (`main+0x83dec`) that never fire. Most likely cause: render commands the host does not implement yet (`CallCommands`, `BindTexture`, `BindVertexBuffer`, `DrawElements`, `WriteTexels` / `FlushTexels`) |
+| Mac host boot | Runs the render loop and presents frames: frame 2 makes about 1,900 NVN calls (25 textures, 257 texture binds, 113 uniform binds, submit and present), and frame 3 is the steady acquire / record / submit / present loop. About 40 game threads; the job system (3 executors) works |
+| Current frontier | 1) Shaders: Mario's shaders are not in the mapping table yet, so draws are skipped ("control section not in mapping table"). 2) A wild-pointer crash in game code (`main+0x107dbc0`) a few frames in |
 | NVN | 534 functions fetched, 236 called. About 45 state-only functions added this round; the command-recording ones (binds, draws, queries, conditional render, ...) are still missing |
 | Audio | Silent AudioRenderer (`hle_audren.c`): open / start / stop / update and device queries, event fired every 5 ms. Config editing (180 library imports) runs natively. Real mixing comes later |
 | Shaders | `Shader/SecredUber...bfsha.zs` (BFSHA v9, plain zstd) needs a container reader feeding the existing translation chain |
@@ -24,6 +24,10 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 - `hle_offline.c` (new): offline stubs for play reports, local wireless, sockets (C++ and C APIs), SSL, nifm, nsd, friends, ngc and err.
 - `hle_fs.c`, `hle_account.c`: newer-SDK overloads (`MountRom(name)`, `ReadFile` variants, `GetDirectoryEntryCount`, user enumeration, ...).
 - `loader.c`: forced hooks that a game never references are now only logged (`DM_FORCE_STRICT=1` restores the abort).
+- `patch_nso.py`, two fixes:
+  - **Exclusive-window bug, inherited from d2r-mobile.** When an ldxr/stxr window contained a branch out (`ldxr; cmp; b.ne out; stxr; cbnz`), a successful stxr fell into the branch-out exit. Every enqueue in Mario's job system retried forever and the job system hung. The fall-through exit is now emitted first. D2R's windows had no branch out, so D2R never hit it.
+  - `mrs xN, ctr_el0` is rewritten to a constant (macOS traps it; SDK 16's `FlushDataCache` reads it).
+- `hle_thread.c`: SetThreadCoreMask moves the ideal core into the new mask, as Horizon does, so `GetCurrentProcessorNumber` is right for pinned threads.
 - NVN:
   - API version reported as 55.15 (`DM_NVN_API` overrides it).
   - 13 newer names were added to the table.

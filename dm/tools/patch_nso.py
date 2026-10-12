@@ -474,7 +474,13 @@ def site_window(seg):
     start = here()
     emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
     copy0 = here(); n = len(seg)
-    exits = copy0 + 4 * n
+    # 出口段：紧跟窗口的第一段必须是「顺序落下」（窗口末条之后，hi），窗口内跳出去的目标排在它后面。
+    # 原先顺序落下排在最后：窗口里一有跳出去的条件分支（如 ldxr; cmp; b.ne 外; stxr; cbnz），stxr 成功后就落进第一个跳出口，
+    # 等于走了「比较不等」那条路（SMBW main 0x81c40：入队永远重试，尾指针涨满、一个任务也没存进去，任务系统卡死）。D2R 的窗口里没有跳出分支，没碰到。
+    # Exit stubs: the first stub right after the window must be the fall-through one (after the last window instruction, hi); targets of branches leaving the window come after it.
+    # Previously the fall-through stub came last: as soon as a window contains a conditional branch out (e.g. ldxr; cmp; b.ne out; stxr; cbnz), a successful stxr fell into the
+    # first branch-out stub, i.e. took the "compare not equal" path (SMBW main 0x81c40: the enqueue retried forever, the tail index filled up without storing a single task, and the job system hung). D2R's windows had no branch out, so it never hit this.
+    exits = copy0 + 4 * n + 16
     ex_targets = []; words = []
     for k, x in enumerate(seg):
         w = struct.unpack('<I', x.bytes)[0]
@@ -492,8 +498,7 @@ def site_window(seg):
             assert m not in ('adr', 'adrp', 'b', 'bl', 'br', 'blr', 'ret') and not (m == 'ldr' and '[' not in x.op_str), hex(x.address)
         words.append(w)
     for w in words: emit(w)
-    ex_targets.append(hi)
-    for t in ex_targets:
+    for t in [hi] + ex_targets:   # 顺序落下在前 | fall-through first
         emit(STRX(S, T)); emit(LDP(S, T, 31, -16)); emit(B(here(), t)); emit(NOP)
     return start, lo, hi
 
@@ -531,6 +536,9 @@ for o in range(0, TEXT_END, 4):
     if w & 0xFFFFFFE0 == 0xD53BD060: kinds[o] = ('tpidrro_r', None); continue
     if w & 0xFFFFFFE0 == 0xD53BE020: kinds[o] = ('cntpct', w & 31); continue
     if w & 0xFFFFFFE0 == 0xD53BE040: kinds[o] = ('cntvct', w & 31); continue
+    # mrs xN, ctr_el0（缓存类型）：苹果内核不放给用户态（SIGILL）；SDK 16 的 nn::os::FlushDataCache 读它取缓存行长
+    # mrs xN, ctr_el0 (cache type): the Apple kernel does not expose it to user mode (SIGILL); SDK 16's nn::os::FlushDataCache reads it for the cache line size
+    if w & 0xFFFFFFE0 == 0xD53B0020: kinds[o] = ('ctr', w & 31); continue
     for ins in md.disasm(IMG[o:o + 4], o):
         if has18(ins): kinds[o] = ('x18', None)
 
@@ -590,6 +598,9 @@ for a in sorted(kinds):
     elif k == 'tpidr_w': st = site_tpidr_write(ins); stat(k)
     elif k == 'svc': st = site_gate(ins, 'svc', arg); stat(k)
     elif k in ('cntpct', 'cntvct'): st = site_gate(ins, k, arg); stat(k)
+    elif k == 'ctr':   # 就地换成常数：DminLine = IminLine 字段只填 DminLine = 4（64 字节行）；movz xN, #4, lsl #16 | replaced in place by a constant: DminLine = 4 (64-byte lines); movz xN, #4, lsl #16
+        assert arg != 18, f'{a:x} mrs x18, ctr_el0'
+        struct.pack_into('<I', IMG, a, 0xD2A00080 | arg); stat(k); continue
     put_branch(a, st)
 
 # 私有视觉分支；非OBS，0x85只读查询。只有本实验构建显式opt-in；原Qty/children和Update不变。
