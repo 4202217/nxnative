@@ -727,3 +727,8 @@ HLE_FORCE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", "fsp-srv
 // 存档是否已建：宿主的存档目录在挂载时建，游戏视角里恒已存在（EnsureSaveData 也恒成功）
 // Whether save data exists: the host's save directory is created at mount time, so from the game's point of view it always exists (EnsureSaveData always succeeds too)
 HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", "fsp-srv；存档恒已建（返回 bool）", unsigned, h_fs_SaveExists, const void *uid) { (void)uid; return 1; }
+// 文件系统访问日志与线程优先级：真机都要问 fsp-srv（访问日志开关在服务端）；宿主没有访问日志，优先级不影响 pread
+// File system access log and thread priority: on the real device both ask fsp-srv (the access log switch lives in the service); the host has no access log and priority does not affect pread
+HLE_FORCE("_ZN2nn2fs26SetPriorityOnCurrentThreadENS0_8PriorityE", "fsp-srv；文件读优先级，宿主忽略", void, h_fs_SetPrio, int prio) { (void)prio; }
+HLE_FORCE("_ZN2nn2fs6detail18IsEnabledAccessLogEj", "fsp-srv；访问日志恒关（返回 bool）", unsigned, h_fs_AccessLogMask, unsigned mask) { (void)mask; return 0; }
+HLE_FORCE("_ZN2nn2fs6detail18IsEnabledAccessLogEv", "fsp-srv；访问日志恒关（返回 bool）", unsigned, h_fs_AccessLog, void) { return 0; }

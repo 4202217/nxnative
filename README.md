@@ -9,10 +9,10 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 | Step | State |
 |---|---|
 | Rewriter (`dm/tools/patch_nso.py`, `DM_RULESET=native`) | Runs unchanged on Mario `main` / `sdk` |
-| Mac host boot | `nnMain` runs. Graphics device setup completes (Metal), the 1920x1080 swapchain is created, game threads start, and the frame loop is entered |
-| Current frontier | Null read at `main+0x64763c`, 12 frames deep in the frame loop |
+| Mac host boot | Boots fully into the game loop: Metal device and 1920x1080 swapchain, about 40 game threads (scene, save data, module workers, UI loading, map units, task executors), silent audio renderer, first render commands. Runs indefinitely without crashing |
+| Current frontier | Main thread waits on job-completion light events (`main+0x83dec`) that never fire. Most likely cause: render commands the host does not implement yet (`CallCommands`, `BindTexture`, `BindVertexBuffer`, `DrawElements`, `WriteTexels` / `FlushTexels`) |
 | NVN | 534 functions fetched, 236 called. About 45 state-only functions added this round; the command-recording ones (binds, draws, queries, conditional render, ...) are still missing |
-| Audio | `nn::audio` AudioRenderer (197 imports) not implemented yet |
+| Audio | Silent AudioRenderer (`hle_audren.c`): open / start / stop / update and device queries, event fired every 5 ms. Config editing (180 library imports) runs natively. Real mixing comes later |
 | Shaders | `Shader/SecredUber...bfsha.zs` (BFSHA v9, plain zstd) needs a container reader feeding the existing translation chain |
 | iOS bundle | Not started. Plan: reuse `dm/ios` from d2r-mobile, bundle the RomFS (3.5 GB) inside the app, standard-controller virtual gamepad |
 

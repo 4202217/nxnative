@@ -20,7 +20,7 @@
 // about 4.2 GB in total; on iOS without the "extended virtual addressing" entitlement a single reservation can be at most 6 GB
 // (read on a real device: 6 GB succeeds, 7 GB fails), so it cannot be made any wider --
 // with an 8 GB reservation, builds from developer accounts that cannot sign that entitlement (free accounts) would exit at this step.
-#define RESERVE (5ull << 30)
+#define RESERVE (6ull << 30)   // SMBW（SDK 16）：别名区要容下 VammManager 固定占的约 1 GB 节点区，整块由 5 GB 加到 iOS 免权限上限 6 GB | SMBW (SDK 16): the alias region must hold the ~1 GB node area VammManager always takes, so the block grows from 5 GB to the 6 GB no-entitlement iOS limit
 static uint8_t *g_as;              // ASLR 区基址 = 整块 | ASLR region base = the whole block
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap;
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
@@ -33,11 +33,14 @@ static void mem_init(void) {
     if (g_as) return;
     g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
-    // 固定划分（都在预留块内）：alias 512MB、stack 256MB、heap 其余从 2GB 处起
+    // 固定划分（都在预留块内）：alias 1.25 GB、stack 256MB、heap 其余。较新 SDK 的 AddressRegionManager 在别名区开头固定占 0x3fe00000（约 1 GB）
+    // 作节点区（sdk 0x134728），之后才给游戏分区域；别名区只有 512 MB 时第一次 AllocateAddressRegion 就失败（0x1803）。
+    // Fixed partition (all inside the reserved block): alias 1.25 GB, stack 256MB, heap the rest. In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB)
+    // at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
     // Fixed partition (all inside the reserved block): alias 512MB, stack 256MB, heap the rest starting at 2GB
-    g_alias = g_as + 0x10000000; g_alias_cap = 0x20000000;
-    g_stack = g_as + 0x30000000; g_stack_cap = 0x10000000;
-    g_heap  = g_as + 0x40000000; g_heap_cap  = RESERVE - 0x40000000;   // 4 GB，容得下游戏那一整块约 3.2 GB 的堆 | 4 GB, enough to hold the game's single heap block of about 3.2 GB
+    g_alias = g_as + 0x10000000; g_alias_cap = 0x50000000;
+    g_stack = g_as + 0x60000000; g_stack_cap = 0x10000000;
+    g_heap  = g_as + 0x70000000; g_heap_cap  = RESERVE - 0x70000000;   // 4 GB，容得下游戏那一整块约 3.2 GB 的堆 | 4 GB, enough to hold the game's single heap block of about 3.2 GB
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
 }
 
@@ -160,8 +163,15 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     case 0x2C: case 0x2D: {  // MapPhysicalMemory / UnmapPhysicalMemory(addr, size)：只许在 alias 区内（SDK 的 VammManager 用） | MapPhysicalMemory / UnmapPhysicalMemory(addr, size): only allowed inside the alias region (used by the SDK's VammManager)
         uint8_t *a = (uint8_t *)regs[0]; size_t size = regs[1];
         if (a < g_alias || a + size > g_alias + g_alias_cap) { LOG("SVC %#x 越出 alias 区 %p+%#zx", num, a, size); regs[0] = 0xD401; return 0; }
-        int rc = num == 0x2C ? mprotect(a, size, PROT_READ | PROT_WRITE)
-                             : (madvise(a, size, MADV_FREE), mprotect(a, size, PROT_NONE));
+        // 宿主页 16 KB、Horizon 页 4 KB：映射向外取整到宿主页（多开的相邻 4K 页在别名区内，只是提前可写，无害）；
+        // 解除只收回整页都落在区间里的宿主页（部分覆盖的页可能还有相邻映射在用，保持可写）
+        // Host pages are 16 KB, Horizon pages 4 KB: a map is rounded out to host pages (the extra neighboring 4K pages are inside the alias region and merely become writable early, harmless);
+        // an unmap only reclaims host pages lying entirely inside the range (a partly covered page may still be used by an adjacent mapping, so it stays writable)
+        uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)a, hi = (uintptr_t)a + size;
+        uintptr_t mlo = num == 0x2C ? lo & ~(pg - 1) : (lo + pg - 1) & ~(pg - 1), mhi = num == 0x2C ? (hi + pg - 1) & ~(pg - 1) : hi & ~(pg - 1);
+        int rc = 0;
+        if (mhi > mlo) rc = num == 0x2C ? mprotect((void *)mlo, mhi - mlo, PROT_READ | PROT_WRITE)
+                                        : (madvise((void *)mlo, mhi - mlo, MADV_FREE), mprotect((void *)mlo, mhi - mlo, PROT_NONE));
         if (rc) die("SVC %#x mprotect %p+%#zx errno=%d", num, a, size, errno);
         if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", num == 0x2C ? "Map" : "Unmap", a, size);
         regs[0] = 0; return 0;
@@ -194,9 +204,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
         case I_DebuggerAttached: v = 0; break;
         case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
-        case I_ProgramId: v = 0x0100726014352000ull; break;
+        case I_ProgramId: { static uint64_t pid; if (!pid) { const char *e = getenv("DM_PROGRAM_ID"); pid = e ? strtoull(e, NULL, 16) : 0x010015100B514000ull; } v = pid; break; }   // 缺省 SMBW；DM_PROGRAM_ID=十六进制 可改 | default SMBW; DM_PROGRAM_ID=hex overrides
         case I_IsApplication: v = 1; break;
-        case I_UserExcAddr: v = 0; break;
+        case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // 用户异常上下文区：较新 SDK 的 SetDyingMessageRegion 往 +0x1c0 写（给 0 会写空指针）| user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
         default: v = 0; break;
         }
         regs[0] = 0; regs[1] = v; return 0;

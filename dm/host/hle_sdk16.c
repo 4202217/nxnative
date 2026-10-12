@@ -93,7 +93,25 @@ HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7Displa
 HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "游戏日志 → 宿主日志", void, h_diag_Put, const void *meta, const char *s, size_t n) {
     (void)meta; while (n && (s[n - 1] == '\n' || s[n - 1] == '\0')) n--; if (n) LOG("[game] %.*s", (int)n, s);
 }
-HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "游戏中止", void, h_diag_Abort0, void) { die("游戏调用 nn::diag 中止（lr=%p）", __builtin_return_address(0)); }
-HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "游戏中止（带 Result）", void, h_diag_AbortR, const uint32_t *r) { die("游戏调用 nn::diag 中止：Result %#x（lr=%p）", r ? *r : 0, __builtin_return_address(0)); }
+// 中止：报出调用点（模块 + 偏移）与客体回溯再退出
+// Abort: report the call site (module + offset) and the guest backtrace, then exit
+static void diag_abort(uint32_t res, void *lr) {
+    module_t *m = module_of(lr);
+    LOG("游戏调用 nn::diag 中止：Result %#x，调用点 %s+%#llx", res, m ? m->name : "?", m ? (unsigned long long)((uint8_t *)lr - m->base) : (unsigned long long)(uintptr_t)lr);
+    dm_backtrace((uint64_t)__builtin_frame_address(1));
+    die("游戏中止");
+}
+HLE_FORCE("_ZN2nn4diag6detail9AbortImplEv", "游戏中止", void, h_diag_Abort0, void) { diag_abort(0, __builtin_return_address(0)); }
+HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "游戏中止（带 Result）", void, h_diag_AbortR, const uint32_t *r) { diag_abort(r ? *r : 0, __builtin_return_address(0)); }
 HLE_FORCE("_ZN2nn4diag12GetBacktraceEPmi", "回溯；宿主不提供（0 帧）", int, h_diag_Bt, uint64_t *out, int n) { (void)out; (void)n; return 0; }
 HLE_FORCE("_ZN2nn4diag13GetSymbolNameEPcmm", "符号名；宿主不提供（空串）", uint64_t, h_diag_SymName, char *buf, size_t n, uint64_t addr) { (void)addr; if (buf && n) buf[0] = 0; return 0; }
+
+// ---------- settings：语言枚举 ↔ 语言代码 ----------
+// 真机 MakeLanguageCode 问 settings 服务；表是公开固定的（nn::settings::Language 顺序）。LanguageCode = char[8]
+// ---------- settings: language enum <-> language code ----------
+// On the real device MakeLanguageCode asks the settings service; the table is public and fixed (nn::settings::Language order). LanguageCode = char[8]
+static const char *const k_lang_code[] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
+HLE_FORCE("_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE", "语言枚举与语言代码比较（返回 bool）", unsigned, h_set_LangEq, const int32_t *lang, const char *code) {
+    if ((unsigned)*lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
+    return strncmp(k_lang_code[*lang], code, 8) == 0;
+}

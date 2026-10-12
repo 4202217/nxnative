@@ -1294,3 +1294,15 @@ NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w;
 NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c; return m->begin && m->cur >= m->begin ? (size_t)(m->cur - m->begin) : 0; }
 NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { (void)c; return 0; }
 NVN_NOPROTO(nvnCommandBufferSetCommandMemoryCallbackEnabled, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }
+
+// nvnProgramSetShadersExt（NVN 55）：每阶段 0x18 字节 = NVNshaderData{data, control} + 一个 8 字节扩展字段（SMBW main 0x1074ff0 起填）。
+// 宿主按控制段认阶段，扩展字段不用：换成普通 NVNshaderData 交给 SetShaders。
+// nvnProgramSetShadersExt (NVN 55): each stage is 0x18 bytes = NVNshaderData{data, control} + one 8-byte extension field (filled from SMBW main 0x1074ff0).
+// The host identifies stages by the control section and does not use the extension field: convert to plain NVNshaderData and hand it to SetShaders.
+typedef struct { NVNbufferAddress data; const void *control; uint64_t ext; } shader_data_ext;
+NVN_NOPROTO(nvnProgramSetShadersExt, NVNboolean, NVNprogram *p, int n, const shader_data_ext *sd) {
+    if (n < 0 || n > 6) { LOG("【红】ProgramSetShadersExt 阶段数 %d", n); return 0; }
+    NVNshaderData plain[6];
+    for (int i = 0; i < n; i++) { plain[i].data = sd[i].data; plain[i].control = sd[i].control; if (sd[i].ext) ONCE_LOG("ProgramSetShadersExt 扩展字段非 0（%#llx）：宿主不用", (unsigned long long)sd[i].ext); }
+    return h_nvnProgramSetShaders(p, n, plain);
+}
