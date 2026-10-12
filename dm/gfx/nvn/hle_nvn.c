@@ -180,10 +180,12 @@ NVN(nvnMemoryPoolInitialize, NVNboolean, NVNmemoryPool *p, const NVNmemoryPoolBu
     o->magic = MAGIC('P', 'O', 'O', 'L'); o->flags = s->flags; o->mem = s->mem; o->size = s->size;
     if (o->mem) { mtl_pool_add(o->mem, o->size); nvn_dirty_add_range(o->mem, o->size); }
     if (!o->mem && !(o->flags & 0x200)) LOG("【红】MemoryPoolInitialize 非虚拟池没有存储 flags=%#x size=%#llx", o->flags, o->size);
+    if (getenv("DM_NVN_VLOG")) { LOG("[nvn] MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, (unsigned long long)o->size, o->flags); void dm_backtrace(uint64_t fp); dm_backtrace((uint64_t)__builtin_frame_address(0)); }
     OLOG("MemoryPool %p mem=%p size=%#llx flags=%#x", (void *)p, (void *)o->mem, o->size, o->flags);
     return 1;
 }
-NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { if (((pool_t *)p)->mem) { nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); } ((pool_t *)p)->magic = 0; }
+NVN(nvnMemoryPoolFinalize, void, NVNmemoryPool *p) { if (((pool_t *)p)->mem && !(((pool_t *)p)->flags & 0x200)) {   // 虚拟池的存储借自物理池，不退登记 | A virtual pool's storage is borrowed from a physical pool; do not unregister it
+ nvn_dirty_remove_range(((pool_t *)p)->mem); mtl_pool_del(((pool_t *)p)->mem); } ((pool_t *)p)->magic = 0; }
 NVN(nvnMemoryPoolFlushMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
 NVN(nvnMemoryPoolGetBufferAddress, NVNbufferAddress, const NVNmemoryPool *p) { return (NVNbufferAddress)((const pool_t *)p)->mem; }
 
@@ -475,6 +477,7 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } cmd_new_segment(CB(c), hostseg_take(), HOSTSEG_SZ); return; }
     if (!pl->mem) { LOG("【红】AddCommandMemory 池没有 CPU 存储"); return; }
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
+    { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p 池 %p +%#lx 长 %#zx（录制中 %d）", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);
 }
 NVN(nvnCommandBufferAddControlMemory, void, NVNcommandBuffer *c, void *m, size_t n) { (void)c; (void)m; (void)n; }
@@ -490,6 +493,8 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
             cmd_new_segment(o, hostseg_take(), HOSTSEG_SZ); break;
         }
         if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.cbs++; pthread_mutex_unlock(&g_cs_mu); }
+        { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ncb;
+          if (cblog && (++ncb <= 40 || ncb % 1000 == 0)) LOG("[nvn] 命令内存回调 #%llu cmd=%p 需 %u（本段已用 %ld）", (unsigned long long)ncb, (void *)o, size + OP_RESERVE, o->cur && o->end ? (long)(o->cur - (o->end - 1)) : -1L); }
         o->cb((NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY, size + OP_RESERVE, o->cb_data);
     }
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.bytes += size; g_cs.recs++; pthread_mutex_unlock(&g_cs_mu); }
@@ -1228,7 +1233,7 @@ NVN(nvnBufferBuilderSetDevice, void, NVNbufferBuilder *b, NVNdevice *d) { BB(b)-
 NVN(nvnBufferBuilderSetStorage, void, NVNbufferBuilder *b, NVNmemoryPool *p, ptrdiff_t off, size_t n) { BB(b)->pool = (const pool_t *)p; BB(b)->off = off; BB(b)->size = n; }
 NVN(nvnBufferInitialize, NVNboolean, NVNbuffer *buf, const NVNbufferBuilder *b) {
     const buf_builder_t *bb = (const buf_builder_t *)b;
-    if (!bb->pool || !bb->pool->mem) { LOG("【红】BufferInitialize：池没有存储"); return 0; }
+    if (!bb->pool || !bb->pool->mem) { LOG("【红】BufferInitialize：池没有存储（池 %p flags %#x 偏移 %#llx 大小 %#llx）", (const void *)bb->pool, bb->pool ? bb->pool->flags : 0, (unsigned long long)bb->off, (unsigned long long)bb->size); return 0; }
     if ((uint64_t)bb->off + bb->size > bb->pool->size) LOG("【红】BufferInitialize：越过池尾（偏移 %#llx 大小 %#llx 池 %#llx）", (unsigned long long)bb->off, (unsigned long long)bb->size, (unsigned long long)bb->pool->size);
     *(buf_t *)buf = (buf_t){MAGIC('B', 'U', 'F', 0), bb->pool, bb->off, bb->size};
     OLOG("BufferInitialize %p pool=%p off=%#llx size=%#llx", (void *)buf, (const void *)bb->pool, (unsigned long long)bb->off, (unsigned long long)bb->size);
@@ -1247,7 +1252,30 @@ NVN(nvnMemoryPoolGetFlags, NVNmemoryPoolFlags, const NVNmemoryPool *p) { return 
 NVN(nvnMemoryPoolMap, void *, const NVNmemoryPool *p) { return ((const pool_t *)p)->mem; }
 NVN(nvnMemoryPoolInvalidateMappedRange, void, const NVNmemoryPool *p, ptrdiff_t off, size_t n) { (void)p; (void)off; (void)n; }
 NVN(nvnMemoryPoolSetDebugLabel, void, NVNmemoryPool *p, const char *s) { (void)p; (void)s; }
-NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *r) { (void)p; (void)r; ONCE_LOG("【红】MemoryPoolMapVirtual（稀疏 / 虚拟池）宿主不支持：%d 条映射请求忽略", n); return 0; }
+// 虚拟池（flags 0x200）：只有 GPU 地址区间、没有存储，靠 MapVirtual 把物理池的页映射进来。请求 0x28 字节：{物理池, 物理偏移, 虚拟偏移, 大小, 存储类}。
+// 宿主做法：所有请求若能用同一个「基址」描述（同一物理池、物理偏移 − 虚拟偏移相同），虚拟池的存储就直接指向物理池那段内存——与真机同一份物理页的语义一致，
+//   缓冲地址 / Metal 缓冲查找都落在物理池已登记的那块上。SMBW 只有一个 128 MB 虚拟池、一条请求整池映射到一个物理池偏移 0。
+//   不一致的映射（真稀疏）未实现：报红、返回失败。原先一律返回失败：游戏把这个池当不可用，之后从它分出的缓冲拿到空池，MemoryPoolGetFlags 读 NULL+4 崩
+// Virtual pool (flags 0x200): a GPU address range with no storage; MapVirtual maps pages of physical pools into it. A request is 0x28 bytes: {physical pool, physical offset, virtual offset, size, storage class}.
+// Host approach: if every request can be described by one "base" (same physical pool, same physical offset - virtual offset), the virtual pool's storage points straight at that memory of the physical pool -- the same semantics as one set of physical pages on the real device,
+//   and buffer addresses / Metal buffer lookups land on the block the physical pool already registered. SMBW has a single 128 MB virtual pool, mapped whole by one request onto one physical pool at offset 0.
+//   Inconsistent mappings (true sparse) are not implemented: reported red, returns failure. It used to always fail: the game treated the pool as unusable, a buffer later carved from it got a null pool, and MemoryPoolGetFlags read NULL+4 and crashed
+typedef struct { NVNmemoryPool *phys; int64_t poff, voff; uint64_t size; int32_t storage_class, _pad; } map_req;
+_Static_assert(sizeof(map_req) == 0x28, "NVNmappingRequest");
+NVN(nvnMemoryPoolMapVirtual, NVNboolean, NVNmemoryPool *p, int n, const NVNmappingRequest *rq) {
+    pool_t *o = (pool_t *)p; const map_req *r = (const map_req *)rq;
+    for (int i = 0; i < n; i++) {
+        const pool_t *ph = (const pool_t *)r[i].phys;
+        if (!ph) continue;   // 解除映射（物理池为空）：宿主不回收，保持原样 | Unmapping (null physical pool): the host keeps the storage as is
+        if (!ph->mem) { LOG("【红】MapVirtual：物理池 %p 没有存储", (const void *)ph); return 0; }
+        uint8_t *base = ph->mem + r[i].poff - r[i].voff;
+        if (r[i].voff < 0 || (uint64_t)r[i].voff + r[i].size > o->size || (uint64_t)r[i].poff + r[i].size > ph->size) { LOG("【红】MapVirtual：请求越界（虚拟 %#llx+%#llx / 池 %#llx，物理 %#llx / 池 %#llx）", (unsigned long long)r[i].voff, (unsigned long long)r[i].size, (unsigned long long)o->size, (unsigned long long)r[i].poff, (unsigned long long)ph->size); return 0; }
+        if (o->mem && o->mem != base) { LOG("【红】MapVirtual：映射不连续（真稀疏）未实现：虚拟池 %p 已对 %p，本条要 %p", (void *)o, (void *)o->mem, (void *)base); return 0; }
+        if (!o->mem) LOG("[nvn] MapVirtual：虚拟池 %p（%#llx 字节）的存储指向物理池 %p + %#llx", (void *)o, (unsigned long long)o->size, (const void *)ph, (unsigned long long)(r[i].poff - r[i].voff));
+        o->mem = base;
+    }
+    return 1;
+}
 
 // 采样器：归约（min / max）Metal 采样器没有，只记一次；取值函数照对象里的参数
 // Samplers: reduction (min / max) does not exist on Metal samplers, logged once; the getters read the parameters in the object

@@ -49,6 +49,7 @@ Consequence: any optimization that infers "which textures a draw reads" from bou
 - **Transient render targets**: the game builds new texture objects every frame over the same storage and never finalizes them. Host textures are shared by `(pool, offset, description)`; otherwise each new object allocates a new private Metal texture (≈13 MB/frame leak).
 - **Inline uniform updates** (`CommandBufferUpdateUniformBuffer`) are replayed as in-order GPU copies; reading the uniform buffer from the CPU at encode time gives the frame's *last* value, not the draw's.
 - **Compute code areas have a header** in Mario (`0x12345679`), not in D2R; `dmsh_build.py` strips it.
+- **Virtual memory pools** (flag 0x200): aliased onto the physical pool named by `MapVirtual` when all requests share one base (Mario's case); otherwise unimplemented.
 - **Image atomics**: 7 agl compute shaders produce SPIR-V that SPIRV-Cross can't parse (`nullptr` exception). Open issue.
 
 ## 7. Diagnostic switches (host)

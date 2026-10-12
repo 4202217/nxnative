@@ -54,6 +54,9 @@ Each entry: symptom → root cause → fix (where the fix lives). Check these fi
 - **Font engine runs on garbage** → the system shared font must look like BFTTF: the SDK calls `ScalableFontEngineHelper::Decode(ptr, size)`, which XOR-decodes in place unless the first word is the "already decoded" marker (LE `0x18029a7f`) → serve `marker + bswap(size ^ 0x49621806) + TTF` (`hle_sdk16.c`).
 - **File-not-found noise** → games probe many optional paths (debug parameters, other-language voice files); with `DM_FS=1` these show as `fs … 不存在`. Only a missing file followed by a failure matters.
 
+- **A buffer is created with a null pool right after a scene change** → NVN *virtual* memory pools (flag 0x200) have no storage until `nvnMemoryPoolMapVirtual` maps physical pool pages in; if the host returns failure, the game treats the pool as unusable. Mario maps its single 128 MB virtual pool onto one physical pool in one request, so the host aliases it (`hle_nvn.c`). True sparse mappings are still unimplemented.
+- **A null-pool buffer even with virtual pools working** → the game's own heap ran out. Trace it with probes ([05](05-debugging.md)): the gsys GPU allocator at `main+0x4290c0` and the heap's `tryAlloc` (vtable slot +0x30) show which heap, its size (resource heaps are sized from the resource-size table + 0x1008) and every allocation into it. Open in Mario: `Model/NpcCommonerA.bfres`'s heap overflows when the opening course creates its instances.
+
 ### NVN object sizes (memory corruption)
 
 The game allocates NVN objects with the sizes of *its* SDK's headers, which shrank in newer SDKs. A host record larger than the game's allocation overwrites neighbouring memory:

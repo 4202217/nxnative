@@ -2,7 +2,7 @@ DM_ROOT ?= $(HOME)/dm-work
 CFLAGS=-O1 -g -Wall -Wno-unused-function
 # 服务层接管 hle_*.c 按通配纳入：新增文件不改这一行（免合并冲突）
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
-SRC=main.c loader.c hle.c host_stubs.c crash.c thread.c memstat.m ../ios/Sources/dm_touch_controls.c $(sort $(wildcard hle_*.c)) front_mac.m entry.S dm_i18n.c
+SRC=main.c loader.c hle.c host_stubs.c crash.c probe.c thread.c memstat.m ../ios/Sources/dm_touch_controls.c $(sort $(wildcard hle_*.c)) front_mac.m entry.S dm_i18n.c
 # NVN 空设备 + nn::vi（dm/gfx/）
 # 按通配纳入 dm/gfx 与 dm/gfx/nvn 下的源（tests/ metal/ 不进宿主）：新增文件不改这一行
 # NVN null device + nn::vi (dm/gfx/)

@@ -29,6 +29,12 @@ objdump -d --start-address=0x2ea1c0 --stop-address=0x2ea2b0 ~/<title>-work/elf/<
 
 Map GOT slots to NVN names with the survey table (`census/*_nvn_slots.tsv`): a call through `[x8, #0x3e8]` after `adrp x8, 0x35ad000` is GOT entry 0x35ad3e8.
 
+## Probes without a debugger (`DM_PROBE`)
+
+`DM_PROBE=main:4290c0,main:9712c` (module:offset, comma-separated; `host/probe.c`, Mac only) replaces the instruction with `brk`, and on every hit prints x0–x7 (and strings they point to), x19–x23, lr, x8 and a backtrace, then runs the original instruction from a trampoline. Put probes at function entries or where x16 is dead; the probed instruction must not be PC-relative. `DM_PROBE_X2=<bytes>` also dumps the memory x2 points to (object fields). Output from several threads interleaves; parse it with a regex rather than by line. Probes slow the game, which can shift heap addresses between runs.
+
+Use it when lldb is unavailable: after macOS revokes the debugger authorization (`DevToolsSecurity -status` says developer mode is disabled), `lldb` launches hang waiting for a GUI approval prompt. `sudo DevToolsSecurity -enable` (run by the user) restores it.
+
 ## lldb
 
 The host uses SIGSEGV for dirty-page tracking, so lldb must pass it through without stopping. Address randomization is off under lldb, so guest addresses repeat across runs. Template (`~/<title>-work/dbg/*.py`, run with `perl -e 'alarm 240; exec @ARGV' lldb -b -o "command script import x.py"`):

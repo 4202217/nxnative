@@ -7,6 +7,10 @@
 #include "hle.h"
 #include "dm_input.h"
 #include <stdatomic.h>
+#include <unistd.h>
+#include <strings.h>
+#include <pthread.h>
+#include <time.h>
 
 enum { NPAD_NO1 = 0, NPAD_HANDHELD = 0x20 };
 enum { STYLE_FULLKEY = 1u << 0, STYLE_HANDHELD = 1u << 1, STYLE_JOYDUAL = 1u << 2, STYLE_JOYLEFT = 1u << 3, STYLE_JOYRIGHT = 1u << 4 };
@@ -34,7 +38,37 @@ void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
-void hid_keys_init(void) {}
+// DM_KEYS 脚本输入（测试用）："秒:键[+键][~按住秒],…"，例 "8:A,12:A,15:Down~0.5,16:A+B"。键名 A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down；
+//   缺省按住 0.15 s。走手柄那一路（dm_pad_set），与键盘 / 触屏按位或，不互相覆盖。时间从宿主启动算起
+// DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B". Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down;
+//   held 0.15 s by default. Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start
+typedef struct { double at, hold; uint64_t btn; } key_step;
+static key_step g_steps[64]; static int g_nsteps;
+static void *keys_main(void *arg) {
+    (void)arg; struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int i = 0; i < g_nsteps; i++) {
+        for (;;) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double el = (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9; if (el >= g_steps[i].at) break; usleep(10000); }
+        LOG("DM_KEYS：%.2f s 按 %#llx（按住 %.2f s）", g_steps[i].at, (unsigned long long)g_steps[i].btn, g_steps[i].hold);
+        dm_pad_set(g_steps[i].btn, 0, 0, 0, 0); usleep((useconds_t)(g_steps[i].hold * 1e6)); dm_pad_set(0, 0, 0, 0, 0);
+    }
+    return NULL;
+}
+void hid_keys_init(void) {
+    const char *e = getenv("DM_KEYS"); if (!e || !*e) return;
+    static const char *names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
+    char buf[1024]; snprintf(buf, sizeof buf, "%s", e);
+    for (char *tok = strtok(buf, ","); tok && g_nsteps < 64; tok = strtok(NULL, ",")) {
+        char *c = strchr(tok, ':'); if (!c) { LOG("【红】DM_KEYS 步骤缺「秒:」：%s", tok); continue; }
+        *c = 0; key_step st = {atof(tok), 0.15, 0};
+        char *h = strchr(c + 1, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
+        for (char *k = c + 1; k && *k;) { char *plus = strchr(k, '+'); if (plus) *plus = 0;
+            int found = 0; for (int b = 0; b < 16; b++) if (!strcasecmp(k, names[b])) { st.btn |= 1ull << b; found = 1; }
+            if (!found) LOG("【红】DM_KEYS 不认识的键名：%s", k);
+            k = plus ? plus + 1 : NULL; }
+        g_steps[g_nsteps++] = st;
+    }
+    pthread_t th; if (g_nsteps && !pthread_create(&th, NULL, keys_main, NULL)) { pthread_detach(th); LOG("DM_KEYS：%d 步", g_nsteps); }
+}
 
 static uint32_t connected_id(void) { return dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1; }
 static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }

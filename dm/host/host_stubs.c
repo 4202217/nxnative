@@ -7,7 +7,6 @@
 
 void crash_sample_self(void) {}
 void inflate_bench_maybe(void) {}
-void probe_install(void) {}
 void ticks_install(void) {}
 void target_rank_install(void) {}
 void dm_padmode_boot(void) {}

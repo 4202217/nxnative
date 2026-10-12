@@ -11,7 +11,9 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 | Rewriter (`dm/tools/patch_nso.py`, `DM_RULESET=native`) | Runs unchanged on Mario `main` / `sdk` |
 | Mac host | **Reaches the title screen and renders it correctly at 60 fps** (deferred G-buffer, shadow map, post passes, layout UI, final copy into the window). Memory stays flat (about 900 MB physical footprint) |
 | Shaders | All 12,811 shaders the game ships (bfsha archives, particle effects, engine `agl` packages, UI layouts, `main`) are extracted by `shader_split.py` and translated offline; 12,804 compile. 7 `agl` post-effect compute shaders with image atomics make SPIRV-Cross throw |
-| Known gaps | Input not wired to the title screen yet; partial / mid-pass clears; sparse (virtual) memory pools; conditional render; TBDR optimizations are off by default (they don't understand bindless textures yet) |
+| Input | Scripted input `DM_KEYS="12:A,14:A"` (seconds:button); `DM_WINDOW=1` for a window with keyboard input. Pressing A on the title screen starts a new game and loads the opening course |
+| Current frontier | Loading the opening course crashes: the resource heap of `Model/NpcCommonerA.bfres` (sized from the resource-size table) overflows when its model instances are created, the game gets a null pool and dereferences it (`h_nvnMemoryPoolGetFlags`). Under investigation with `DM_PROBE` |
+| Known gaps | Partial / mid-pass clears; sparse virtual-pool mappings; conditional render; TBDR optimizations are off by default (they don't understand bindless textures yet) |
 | Audio | Silent AudioRenderer (`hle_audren.c`); real mixing comes later |
 | iOS bundle | Not started. Plan: reuse `dm/ios` from d2r-mobile, bundle the RomFS (3.5 GB) inside the app, standard-controller virtual gamepad |
 
