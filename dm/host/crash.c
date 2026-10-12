@@ -142,6 +142,22 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     for (int i = 0; i < 29; i++) fprintf(stderr, "x%d=%#llx%s", i, uc->uc_mcontext->__ss.__x[i], i % 6 == 5 ? "\n" : " ");
     fprintf(stderr, "\n");
     dm_backtrace(uc->uc_mcontext->__ss.__fp);
+    // 栈扫描：帧链断了（返回地址被写坏、pc = lr 落在垃圾值上）时，回溯打不出东西；从 sp 往上扫 512 个字，能解析成模块 / 宿主符号的都列出来（最近的调用者在前）
+    // Stack scan: when the frame chain is broken (a return address was overwritten, pc = lr lands on garbage) the backtrace prints nothing; scan 512 words up from sp and list everything that resolves to a module / host symbol (nearest callers first)
+    {   uint64_t sp = uc->uc_mcontext->__ss.__sp;   // 刚弹掉的那一帧（返回地址被写坏时，坏值与写坏它的残留都在 sp 下方） | The frame just popped (when a return address was overwritten, the bad value and the leftovers of whatever overwrote it sit below sp)
+        fprintf(stderr, "[dm] fp=%#llx  sp 下方 0x100 字节:", (unsigned long long)uc->uc_mcontext->__ss.__fp);
+        for (int i = -32; i < 0 && sp && !(sp & 7); i++) fprintf(stderr, "%s%llx", (i + 32) % 4 ? " " : "\n[dm]   ", (unsigned long long)((uint64_t *)sp)[i]);
+        fputc('\n', stderr); }
+    {   uint64_t sp = uc->uc_mcontext->__ss.__sp; int n = 0;
+        fprintf(stderr, "[dm] 栈扫描 sp=%#llx:", (unsigned long long)sp);
+        for (int i = -32; i < 512 && n < 24 && sp && !(sp & 7); i++) {
+            uint64_t v = ((uint64_t *)sp)[i]; Dl_info di;
+            if (v < 0x100000000ull || (v & 3)) continue;
+            int mod = -1; for (int k = 0; k < g_nmod; k++) { uint64_t b = (uint64_t)(uintptr_t)g_mod[k].base; if (v >= b && v < b + g_mod[k].size) mod = k; }
+            if (mod >= 0) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, g_mod[mod].name, (unsigned long long)(v - (uint64_t)(uintptr_t)g_mod[mod].base)); n++; }
+            else if (dladdr((void *)v, &di) && di.dli_sname && di.dli_fname && strstr(di.dli_fname, "dmhost")) { fprintf(stderr, " [%+d]%s+%#llx", i * 8, di.dli_sname, (unsigned long long)(v - (uint64_t)di.dli_saddr)); n++; }
+        }
+        fputc('\n', stderr); }
     if (g_dump_hook) g_dump_hook();
     _exit(128 + sig);
 }

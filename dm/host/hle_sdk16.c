@@ -51,22 +51,34 @@ HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9GetResultEv", "�
 // ---------- pl：共享字体 ----------
 // 系统共享字体（标准 / 简中 / 繁中 / 韩文 / 任天堂扩展）宿主没有原版；一律给一份宿主字体（DM_SHARED_FONT 指定 TTF，缺省 macOS 的 Arial Unicode）。
 // 游戏自己的文字用 RomFS 里的字体，共享字体只在系统名字等少数地方用。
-// ---------- pl: shared fonts ----------
-// The host does not have the original system shared fonts (standard / Simplified Chinese / Traditional Chinese / Korean / Nintendo extension); every type gets one host font (DM_SHARED_FONT names a TTF, default macOS Arial Unicode).
+// 格式：原版共享内存里是 BFTTF——8 字节头 + 按字异或混淆的 TTF；游戏拿到地址后先调 nn::fontll::ScalableFontEngineHelper::Decode(地址, 大小)
+//   （SMBW sdk +0x3093c0）就地解混淆并返回地址 + 8。Decode 先看头一个字：已是「解过」标记（小端 0x18029a7f）就直接返回地址 + 8、不动数据。
+//   所以宿主给「解过」标记 + 原样 TTF；第二个字照原版写混淆后的长度（键 0x49621806：存的是 bswap(长度 ^ 键)）。给裸 TTF 会被当密文异或成乱码，
+//   字体引擎随后用野指针崩（SMBW main +0x107dbc0）。
 // The game's own text uses the fonts in its RomFS; shared fonts are only used in a few places such as system names.
-static const void *g_font; static size_t g_font_size;
+// Format: the original shared memory holds BFTTF - an 8-byte header + a TTF obfuscated by per-word XOR; after getting the address the game calls nn::fontll::ScalableFontEngineHelper::Decode(address, size)
+//   (SMBW sdk +0x3093c0), which deobfuscates in place and returns address + 8. Decode first checks the first word: if it is already the "decoded" marker (little-endian 0x18029a7f) it returns address + 8 without touching the data.
+//   So the host provides the "decoded" marker + the TTF as is; the second word holds the obfuscated length as in the original (key 0x49621806: stored as bswap(length ^ key)). A raw TTF would be XORed into garbage as if it were ciphertext,
+//   and the font engine then crashes on a wild pointer (SMBW main +0x107dbc0).
+static uint8_t *g_font; static size_t g_font_size;
 static void font_load(void) {
     if (g_font) return;
     const char *p = getenv("DM_SHARED_FONT"); if (!p) p = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
     int fd = open(p, O_RDONLY); struct stat st;
     if (fd < 0 || fstat(fd, &st)) { LOG("【红】共享字体打不开：%s（DM_SHARED_FONT 指一个 TTF）", p); if (fd >= 0) close(fd); return; }
-    void *m = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0); close(fd);
-    if (m == MAP_FAILED) { LOG("【红】共享字体映射失败：%s", p); return; }
-    g_font_size = (size_t)st.st_size; g_font = m; LOG("共享字体：%s（%zu 字节，各类型共用）", p, g_font_size);
+    size_t n = (size_t)st.st_size;
+    uint8_t *m = mmap(NULL, n + 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { LOG("【红】共享字体内存分配失败（%zu 字节）", n + 8); close(fd); return; }
+    size_t got = 0; while (got < n) { ssize_t r = pread(fd, m + 8 + got, n - got, (off_t)got); if (r <= 0) break; got += (size_t)r; }
+    close(fd);
+    if (got != n) { LOG("【红】共享字体读不全：%s（%zu / %zu 字节）", p, got, n); munmap(m, n + 8); return; }
+    uint32_t done = 0x18029a7fu, len = __builtin_bswap32((uint32_t)n ^ 0x49621806u);
+    memcpy(m, &done, 4); memcpy(m + 4, &len, 4);
+    g_font_size = n + 8; g_font = m; LOG("共享字体：%s（%zu 字节，各类型共用；BFTTF「已解」头 + 原样 TTF）", p, n);
 }
 HLE_FORCE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", "共享字体装载状态：已装（1）", int, h_pl_LoadState, int type) { (void)type; font_load(); return g_font ? 1 : 0; }
-HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "共享字体地址 → 宿主字体映射", const void *, h_pl_Addr, int type) { (void)type; font_load(); return g_font; }
-HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "共享字体大小 → 宿主字体文件大小", size_t, h_pl_Size, int type) { (void)type; font_load(); return g_font_size; }
+HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "共享字体地址 → BFTTF 头（宿主字体）", const void *, h_pl_Addr, int type) { (void)type; font_load(); return g_font; }
+HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "共享字体大小 → 头 8 字节 + 宿主字体文件大小", size_t, h_pl_Size, int type) { (void)type; font_load(); return g_font_size; }
 
 // ---------- vi：垂直同步事件 ----------
 // 游戏给一个 SystemEventType，宿主绑定后由一条宿主线程按 60 Hz 触发（DM_VSYNC_HZ 可改）

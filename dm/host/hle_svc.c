@@ -33,14 +33,19 @@ static void mem_init(void) {
     if (g_as) return;
     g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
-    // 固定划分（都在预留块内）：alias 1.25 GB、stack 256MB、heap 其余。较新 SDK 的 AddressRegionManager 在别名区开头固定占 0x3fe00000（约 1 GB）
-    // 作节点区（sdk 0x134728），之后才给游戏分区域；别名区只有 512 MB 时第一次 AllocateAddressRegion 就失败（0x1803）。
-    // Fixed partition (all inside the reserved block): alias 1.25 GB, stack 256MB, heap the rest. In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB)
-    // at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
-    // Fixed partition (all inside the reserved block): alias 512MB, stack 256MB, heap the rest starting at 2GB
-    g_alias = g_as + 0x10000000; g_alias_cap = 0x50000000;
-    g_stack = g_as + 0x60000000; g_stack_cap = 0x10000000;
-    g_heap  = g_as + 0x70000000; g_heap_cap  = RESERVE - 0x70000000;   // 4 GB，容得下游戏那一整块约 3.2 GB 的堆 | 4 GB, enough to hold the game's single heap block of about 3.2 GB
+    // 固定划分（都在预留块内）：alias 2.875 GB、stack 256 MB、heap 其余 2.625 GB。
+    // 较新 SDK 的 AddressRegionManager 在别名区开头固定占 0x3fe00000（约 1 GB）作节点区（sdk 0x134728），之后才给游戏分区域；别名区只有 512 MB 时第一次 AllocateAddressRegion 就失败（0x1803）。
+    // SMBW 还在 HeapDef（System/HeapSize）里定了 1792000 KB（1.75 GB）的 VirtualAddressMemory：开堆时先从内存池里扣掉它（SetHeapSize 只要 0x5be00000），
+    //   资源加载再按需 MapPhysicalMemory 到别名区节点区之后。别名区只给 1.25 GB 时那里只剩约 256 MB，3 MB 级的布局归档（WipeCourseIn / WipeWarp）
+    //   分不到地址就被跳过，用到时空指针崩（main +0x373e04）。所以别名区 = 节点区 + 1.75 GB + 余量；堆只要 1.47 GB，给 2.625 GB 足够。
+    // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 2.625 GB.
+    // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
+    // SMBW also defines a 1792000 KB (1.75 GB) VirtualAddressMemory in HeapDef (System/HeapSize): it is subtracted from the memory pool before the heap is opened (SetHeapSize asks for only 0x5be00000),
+    //   and resource loading then MapPhysicalMemory's into the alias region after the node area on demand. With a 1.25 GB alias region only about 256 MB was left there, and 3 MB-class layout archives (WipeCourseIn / WipeWarp)
+    //   got no address, were skipped, and crashed on a null pointer when used (main +0x373e04). So alias = node area + 1.75 GB + slack; the heap needs only 1.47 GB, and 2.625 GB is plenty.
+    g_alias = g_as + 0x10000000; g_alias_cap = 0xB8000000;
+    g_stack = g_as + 0xC8000000; g_stack_cap = 0x10000000;
+    g_heap  = g_as + 0xD8000000; g_heap_cap  = RESERVE - 0xD8000000;
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
 }
 

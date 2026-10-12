@@ -29,18 +29,26 @@ FITS(dpool_t, NVNtexturePool); FITS(dpool_t, NVNsamplerPool);
 typedef struct {
     NVNdevice *dev; nvn_texdesc d; pool_t *pool; int64_t off;
     uint8_t has_layout, layout[8];
+    uint8_t set_swz; uint16_t swz;       // TextureBuilderSetSwizzle：r | g << 3 | b << 6 | a << 9（NVN 与 Metal 的通道枚举同值：0 零 1 一 2 R 3 G 4 B 5 A） | TextureBuilderSetSwizzle: r | g << 3 | b << 6 | a << 9 (NVN and Metal channel enums have the same values: 0 zero 1 one 2 R 3 G 4 B 5 A)
 } tex_builder_t;                                                                             FITS(tex_builder_t, NVNtextureBuilder);
 // 字段顺序压到 0x80：较新 SDK（SMBW，NVN 55）按 0x80 字节分配 NVNtexture（main 0x978c3c 起分配、0x978cd4 初始化），
 // 原先 0x88 会写出对象尾、改坏紧邻的堆块链表。has_layout 放进 d 之后的对齐空位，layout 与 serial 补齐到 0x80。
 // Field order packed to 0x80: newer SDKs (SMBW, NVN 55) allocate NVNtexture as 0x80 bytes (allocated from main 0x978c3c, initialized at 0x978cd4);
 // the former 0x88 wrote past the object's end and corrupted the adjacent heap block's free list. has_layout sits in the alignment gap after d, layout and serial fill up to 0x80.
 typedef struct {
-    uint32_t magic; nvn_texdesc d; uint8_t has_layout; nvn_texlayout L; uint8_t *mem; pool_t *pool; int64_t off; uint8_t layout[8];
+    // set_swz / swz（同 tex_builder_t）占 d 之后的对齐空位，大小仍是 0x80 | set_swz / swz (as in tex_builder_t) take the alignment gap after d; the size is still 0x80
+    uint32_t magic; nvn_texdesc d; uint8_t has_layout, set_swz; uint16_t swz; nvn_texlayout L; uint8_t *mem; pool_t *pool; int64_t off; uint8_t layout[8];
     uint64_t serial;                     // 初始化序号：回放层按它在宿主表里找 MTLTexture（游戏可能按值拷贝对象，不能存对象指针） | Initialization serial: the replay layer uses it to find the MTLTexture in the host table (the game may copy the object by value, so object pointers cannot be stored)
 } tex_t;                                                                                     FITS(tex_t, NVNtexture);
 _Static_assert(sizeof(tex_t) <= 0x80, "tex_t 超出较新 SDK 的 NVNtexture（0x80）");
-typedef struct { uint8_t set_levels, set_layers, set_format, set_target; int32_t base_level, nlevels, min_layer, nlayers, format, target; } view_t;
+// 较新 SDK（NVN 55，SMBW）的 NVNtextureView 只有 16 字节：游戏把它放在 16 字节的栈槽里（main +0x5796c），原先 28 字节的记录写出界、盖掉保存的 fp / lr，
+//   函数返回到 0x100000000 崩。压成 16 字节：级 / 层 / 格式 / 目标 + 通道重排与深度模板模式（后两项先只记下）
+// The newer SDK's (NVN 55, SMBW) NVNtextureView is only 16 bytes: the game keeps it in a 16-byte stack slot (main +0x5796c), and the former 28-byte record wrote out of bounds over the saved fp / lr,
+//   so the function returned to 0x100000000 and crashed. Packed into 16 bytes: levels / layers / format / target + swizzle and depth-stencil mode (the last two only recorded for now)
+typedef struct { uint8_t set_levels : 1, set_layers : 1, set_format : 1, set_target : 1, set_swizzle : 1, set_dsmode : 1, dsmode : 2;
+                 uint8_t target, base_level, nlevels; uint16_t format, min_layer, nlayers; uint8_t swz[4]; uint16_t _rsv; } view_t;
 FITS(view_t, NVNtextureView);
+_Static_assert(sizeof(view_t) <= 16, "view_t 超出较新 SDK 的 NVNtextureView（16 字节）");
 
 // 采样器参数（builder 与对象共用一份）
 // Sampler parameters (one copy shared by builder and object)

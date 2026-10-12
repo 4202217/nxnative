@@ -26,7 +26,7 @@ CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
 if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'【红】nvn/dmsh_chain.h 不是当前翻译链版本 {CHAIN}：先跑 dmsh_chain.py --header（否则宿主找不到这批库）')
 XLATE = os.environ.get('XLATE', f'{DM_ROOT}/build/gfx/dmsh_xlate/dmsh_xlate')
 FACTS = dmsh_facts.load()
-if not FACTS: sys.exit('【红】没有作答表 nvn/shader_facts.tsv（随仓库；维护者用 dmsh_facts.py --freeze 重出）')
+if not os.path.exists(dmsh_facts.TABLE): sys.exit('【红】没有作答表 nvn/shader_facts.tsv（随仓库；空表 = 全部按缺省作答）')
 IOSOUT = os.environ.get('IOSOUT')   # 设了就同时出 iOS 版（iphoneos metallib + 反射）到该目录 | if set, also build the iOS version (iphoneos metallib + reflection) into that directory
 if IOSOUT:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
@@ -40,7 +40,11 @@ CAS = os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
 CAS_LOCKS, CAS_LOCKS_GUARD = {}, threading.Lock()
 PRE_STATS = collections.Counter()
 MAC_RECORD = 'xcrun -sdk macosx metal -c; xcrun -sdk macosx metallib'
-TEX_BASE, SAMP_BASE, IMG_BASE = 0x168, 0x568, 0x120   # c[2]：图像句柄表 0x120 + 8 r（8 槽，紧接贴图表之前；cs_lut_combine_c 写 u4 = 0x140 反推，u5 = 0x148 核对） | c[2]: image handle table 0x120 + 8 r (8 slots, immediately before the texture table; inferred from cs_lut_combine_c writing u4 = 0x140, checked with u5 = 0x148)
+# 贴图句柄表（贴图指令立即数句柄所在的驱动段）：马力欧（NVN 55）是 0x20 + 8 r、32 槽——全库 4888 个着色器的立即数句柄恰是 0x20..0xF0、步长 8（D2R 的旧驱动是 0x168）。
+#   本作只用合并句柄（nvnCommandBufferBindTexture），没有分离采样器；图像句柄表仍在 0x120 + 8 r（8 槽，紧接贴图表之后；agl 的 10 个计算着色器实测 0x120 / 0x128 / 0x130，与 D2R 同址）。
+# Texture handle table (the driver segment holding texture instructions' immediate handles): Mario (NVN 55) uses 0x20 + 8 r, 32 slots - the immediate handles of all 4888 shaders are exactly 0x20..0xF0 in steps of 8 (D2R's older driver used 0x168).
+#   This game uses only combined handles (nvnCommandBufferBindTexture), with no separate samplers; the image handle table is still at 0x120 + 8 r (8 slots, right after the texture table; measured 0x120 / 0x128 / 0x130 on agl's 10 compute shaders, the same address as D2R).
+TEX_BASE, TEX_SLOTS, SAMP_BASE, IMG_BASE, IMG_SLOTS = 0x20, 32, 0x568, 0x120, 8
 
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
@@ -249,7 +253,7 @@ def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = stage_of.get(key, name[:2])
     c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # 控制段 +0x700：c1 相对指令区起点、+0x704：指令区总长（c1 = 两者之间；全库长度 0 / 256 / 512 / 768） | control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
     c1 = rec[0x38 + c1o:0x38 + c1t]
-    if stage != 'cs': code = code[0x30:]
+    if stage != 'cs' or code[:4] == bytes.fromhex('79563412'): code = code[0x30:]   # 去 0x30 头：图形阶段都有；计算阶段本作有（魔数 0x12345679），D2R 的包记录没有 | strip the 0x30 header: every graphics stage has one; compute has one in this game (magic 0x12345679), D2R's package records do not
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
     j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(),
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # 翻译选项（见 dmsh_xlate/Program.cs）；放宽精度缺省开（GPU 浮点末位误差不进游戏状态，mini 整帧 −26%）   # c1：翻译器读间接跳转表用 | translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables
@@ -313,10 +317,23 @@ def decode_tex(name):
     def slot(word, base, cb): return (word * 4 - base) // 8 if cb == 2 and word * 4 >= base and (word * 4 - base) % 8 == 0 else None
     words = [o0] + ([o1] if ty else [])
     if re.match(r'[a-z]+_i', name):   # 图像 | image
-        return next((slot(x, IMG_BASE, tb) for x in words if IMG_BASE <= x * 4 < TEX_BASE and slot(x, IMG_BASE, tb) is not None), None), None, ty
-    t = next((slot(x, TEX_BASE, tb) for x in words if slot(x, TEX_BASE, tb) is not None and x * 4 < SAMP_BASE), None)
+        return next((slot(x, IMG_BASE, tb) for x in words if IMG_BASE <= x * 4 < IMG_BASE + 8 * IMG_SLOTS and slot(x, IMG_BASE, tb) is not None), None), None, ty
+    t = next((slot(x, TEX_BASE, tb) for x in words if slot(x, TEX_BASE, tb) is not None and x * 4 < TEX_BASE + 8 * TEX_SLOTS), None)
     s = next((slot(x, SAMP_BASE, sb) for x in words if x * 4 >= SAMP_BASE and slot(x, SAMP_BASE, sb) is not None), None)
     return t, s, ty
+
+def decode_ubo_tex(name):
+    """无绑定贴图：句柄由游戏写在自己的 uniform 缓冲里（fp_t_cb7_2A = c[7] 第 0x2A 字）。返回 (贴图: (uniform 槽, 字节偏移), 采样器: (槽, 偏移))；
+    句柄类型 0 = 合并句柄（同一个 32 位字：低 20 位贴图号、高 12 位采样器号），1 = 采样器句柄在另一个字（槽取 slots 高 16 位 − 1）。本作全库只有类型 0（1850 个着色器）
+    Bindless texture: the handle is written by the game into its own uniform buffer (fp_t_cb7_2A = c[7] word 0x2A). Returns (texture: (uniform slot, byte offset), sampler: (slot, offset));
+    handle type 0 = combined handle (one 32-bit word: low 20 bits texture ID, high 12 bits sampler ID), 1 = the sampler handle is in another word (its slot is the high 16 bits of slots − 1). This game's whole library uses only type 0 (1850 shaders)"""
+    m = re.match(r'[a-z]+_t\w*?_cb(\d+)_([0-9A-F]+)', name)
+    if not m: return None
+    slots, h = int(m.group(1)), int(m.group(2), 16)
+    tb = slots & 0xffff; sb = (slots >> 16) - 1 if slots >> 16 else tb
+    o0, o1, ty = h & 0x3fff, (h >> 14) & 0x3fff, h >> 28
+    if not 3 <= tb <= 16 or ty not in (0, 1) or (ty and not 3 <= sb <= 16): return None
+    return (tb - 3, o0 * 4), ((sb - 3, o1 * 4) if ty else (tb - 3, o0 * 4))
 
 def reflect(key, stage, msl, res):
     """MSL 参数缓冲结构体成员 → 回放反射：kind（同 nvn_refl.h）+ NVN 槽号 + 参数缓冲成员号 | MSL argument buffer struct member → replay reflection: kind (same as nvn_refl.h) + NVN slot number + argument buffer member index"""
@@ -332,6 +349,11 @@ def reflect(key, stage, msl, res):
             e.update(kind='cbuf', reg=n - 3) if 3 <= n <= 16 else e.update(kind='c1' if n == 1 else 'drvcb', bank=n)
         elif re.fullmatch(r'[a-z]+_s(\d+)', nm):
             e.update(kind='sbuf', index=int(re.fullmatch(r'[a-z]+_s(\d+)', nm).group(1)))
+        elif decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm):   # 无绑定：句柄在 uniform 缓冲里（reg = uniform 槽，off = 字节偏移） | bindless: the handle is in a uniform buffer (reg = uniform slot, off = byte offset)
+            ut, us = decode_ubo_tex(nm[:-5] if nm.endswith('Smplr') else nm)
+            if nm.endswith('Smplr'): e.update(kind='samp_ubo', reg=us[0], off=us[1])
+            elif 'texture_buffer' in ty: e.update(kind='?')   # 无绑定类型化缓冲：回放层未实现 | bindless typed buffer: not implemented in the replay layer
+            else: e.update(kind='tex_ubo', reg=ut[0], off=ut[1])
         elif nm.endswith('Smplr'):   # 句柄类型 0 = 贴图与采样器合在同一句柄：采样器号取该贴图槽句柄的高位 | handle type 0 = texture and sampler combined in one handle: the sampler index is taken from the high bits of that texture slot's handle
             t, s, ty = decode_tex(nm[:-5]); e.update(kind='samp', reg=s) if ty else e.update(kind='samp_tex', reg=t)
         else:
@@ -354,7 +376,7 @@ def reflect(key, stage, msl, res):
     return binds
 
 DRV_FILL = {0: [(0x110, 0x210), (0x310, 0x410), (0x510, 0x610)],   # c0：存储缓冲地址表（顶点 / 计算 / 像素，各 16 槽 × 0x10） | c0: storage buffer address tables (vertex / compute / pixel, 16 slots × 0x10 each)
-            2: [(0x168, 0x568), (0x568, 0x968)]}                     # c2：贴图句柄表、采样器句柄表（各 128 槽 × 8） | c2: texture handle table, sampler handle table (128 slots × 8 each)
+            2: [(TEX_BASE, TEX_BASE + 8 * TEX_SLOTS), (IMG_BASE, IMG_BASE + 8 * IMG_SLOTS)]}   # c2：贴图句柄表（本作 0x20 + 8 r，32 槽）、图像句柄表（0x120 + 8 r，8 槽） | c2: texture handle table (this game: 0x20 + 8 r, 32 slots), image handle table (0x120 + 8 r, 8 slots)
 
 def drv_reads(src):
     """MSL 里对驱动段 c0 / c2 的读取：常量下标 → 字节区间；非常量下标记为动态 | Reads of driver segments c0 / c2 in the MSL: constant index → byte range; non-constant indices are recorded as dynamic"""
@@ -473,7 +495,7 @@ ok = [r[3] for r in res if r[1] == 'ok']
 rd = [x for x in ok if x['drv_reads']]
 print(f'运行时读驱动段的着色器 {len(rd)}（c0 {sum("0" in x["drv_reads"] for x in rd)}，c2 {sum("2" in x["drv_reads"] for x in rd)}）；读到回放层填不了的 {sum(bool(x["drv_unfillable"]) for x in ok)}')
 for e, n in collections.Counter(u for x in ok for u in x['drv_unfillable']).most_common(15): print(f'  填不了 {n:5d}  {e}')
-SLOTK = {'cbuf', 'samp', 'samp_tex', 'tex', 'img', 'tbuf', 'sbuf', 'ubo_ptr'}
+SLOTK = {'cbuf', 'samp', 'samp_tex', 'tex', 'img', 'tbuf', 'sbuf', 'ubo_ptr', 'tex_ubo', 'samp_ubo'}
 noreg = [x for x in ok if any(b['kind'] in SLOTK and b.get('reg') is None for b in x['bindings'])]
 unk = [x for x in ok if any(b['kind'] == '?' for b in x['bindings'])]
 print(f'绑定没解出槽号的着色器 {len(noreg)}，种类认不出的 {len(unk)}（运行时加载会报红）')

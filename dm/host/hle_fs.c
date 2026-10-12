@@ -230,7 +230,7 @@ static int set_guest_name(const char *hp, const char *path) {
     return -1;
 }
 static Result err_res(const char *op, const char *path) {
-    if (errno == ENOENT || errno == ENOTDIR) return RES_PATH_NOT_FOUND;
+    if (errno == ENOENT || errno == ENOTDIR) { if (g_flag.fs) LOG("fs %s 不存在：%s", op, path); return RES_PATH_NOT_FOUND; }   // DM_FS=1 时记录（游戏常拿「不存在」探路，缺省不记） | Logged under DM_FS=1 (the game often probes with "not found", not logged by default)
     if (errno == EEXIST) return RES_PATH_EXISTS;
     LOG("fs %s %s 失败 errno=%d", op, path, errno); return RES_FAIL;
 }
