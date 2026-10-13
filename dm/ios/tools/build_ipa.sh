@@ -38,7 +38,10 @@ mkdir -p "$O"
 xcodebuild -project DmIOS.xcodeproj -scheme DmIOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath "$DD" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= build > "$O/build.log" 2>&1 \
   || { grep -E 'error:' "$O/build.log" | head -20; die "xcodebuild, log $O/build.log"; }
-APP=$DD/Build/Products/Release-iphoneos/DmIOS.app; [ -d "$APP" ] || die "no built app"
+# Xcode 的 Locations 设成自定义位置时，产物不进 -derivedDataPath：从本次构建日志里取实际路径
+# When Xcode's Locations setting is a custom location, products ignore -derivedDataPath: take the actual path from this build's log
+APP=$DD/Build/Products/Release-iphoneos/DmIOS.app; [ -d "$APP" ] || APP=$(grep -o '/[^ ]*/Release-iphoneos/DmIOS\.app' "$O/build.log" | tail -1)
+[ -n "$APP" ] && [ -d "$APP" ] || die "no built app"; t "app: $APP"
 
 t "assemble Payload (app + RomFS)"
 rm -rf "$O/Payload" && mkdir -p "$O/Payload" && cp -cR "$APP" "$O/Payload/DmIOS.app" || die "copy app"

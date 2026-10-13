@@ -72,7 +72,9 @@ dm/ios/tools/build_ipa.sh [out.ipa]
 DM_ENV_FILE=diag_env.txt dm/ios/tools/build_ipa.sh
 ```
 
-If Xcode's Locations setting puts build products in a custom location, `xcodebuild` ignores the script's `-derivedDataPath` for the products and the script stops at `FAIL: no built app` after `BUILD SUCCEEDED`. The app is then under that location (here `~/Library/Developer/Xcode/DerivedData/Build/Products/Release-iphoneos/DmIOS.app`). Finish by hand the way the script does: copy it into `Payload/`, delete `_CodeSignature` and `embedded.mobileprovision`, `cp -cR` the RomFS to `Payload/DmIOS.app/romfs`, then `zip -qry -n .zs:.bwav:.metallib out.ipa Payload`.
+If Xcode's Locations setting puts build products in a custom location, the script takes the app's path from the build log.
+
+`dm/ios/tools/build_ipa_from_nsp.py` runs the whole chain (extract, rewrite, shaders, IPA) from only this repository, a folder with the v0 and 1.2.1 NSPs, and `prod.keys`. Settings are at the top of the file, and it runs in Spyder or with `python3`. Every intermediate file goes to `smbw_build/` in the NSP folder. The shader translator it uses is `dm/gfx/tools/dmsh_xlate_bin`, the build whose fingerprints match `dmsh_chain.lock` (a rebuilt one does not).
 
 Sign and install it with your own tool (AltStore, Sideloadly, ...), which replaces the placeholder bundle ID `org.smbwmobile.app`. The app shell is `dm/ios/Sources`:
 
