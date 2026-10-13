@@ -12,7 +12,7 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 | Mac host | **Plays through the menus (player count, character select) into the opening course**: the course, effects, HUD, menu and dialogue text render in Chinese or English. Title screen at 60 fps, memory flat (about 900 MB physical footprint on the title screen) |
 | Shaders | All 12,811 shaders the game ships (bfsha archives, particle effects, engine `agl` packages, UI layouts, `main`) are extracted by `shader_split.py` and translated offline; 12,809 compile. 2 `agl` post-effect compute shaders make SPIRV-Cross throw |
 | Input | Scripted input `DM_KEYS="12:A,14:A,20:A,26:A,32:A"` (seconds:button) reaches the opening course; `DM_WINDOW=1` for a window with keyboard input |
-| Current frontier | In the opening course the sky is black and no character models (player, NPCs) are visible; controller-button icons in text show as `?` (the host's stand-in system font has no Nintendo-extension glyphs) |
+| Current frontier | **The opening course is playable** (run, jump, collect coins; characters, NPCs, sky, text all render). Open: an intermittent water / refraction effect over the fountain draws as tall blue panels (sometimes with a wrong texture); controller-button icons in text show as `?` (the host's stand-in system font has no Nintendo-extension glyphs); no audio |
 | Known gaps | Partial / mid-pass clears; sparse virtual-pool mappings; conditional render; `DrawElementsIndirect`; TBDR optimizations are off by default (they don't understand bindless textures yet); resource heaps get +16 KB slack because one model's setup came up 0x70 bytes short of the size table (cause unknown) |
 | Audio | Silent AudioRenderer (`hle_audren.c`); real mixing comes later |
 | iOS bundle | Not started. Plan: reuse `dm/ios` from d2r-mobile, bundle the RomFS (3.5 GB) inside the app, standard-controller virtual gamepad |
@@ -44,9 +44,11 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
   - Linear textures in CPU-visible pools are created directly on the pool buffer (zero copy). Mario's glyph cache (2048×8192 R8) is filled by the CPU; as a private GPU texture all menu and dialogue text was blank.
   - Host command-memory segments (lent when a command buffer outgrows the memory the game gave it) grow on demand instead of a fixed 64 × 1 MB.
   - `RGB10A2SN` vertex format; instanced `DrawArrays`.
+  - Vertex formats follow the shader input type (integer inputs get integer formats of the matching sign).
 - Shader chain:
   - `dm/gfx/tools/shader_split.py` (new) scans RomFS and `main` for BNSH and BAHS (agl `sharcb`) containers and writes the package directory, the shader map and the answer table (compute thread-group size from control +0x748, shared memory from +0x754).
   - The translator uses GL depth (`-1..1`) and no depth clip control, so vertex shaders remap z' = z/2 + w/2: Mario sets `nvnDeviceSetDepthMode` to near = -w, and without the remap its full-screen copy was clipped away.
+  - Vertex shaders whose inputs are only used as integers are re-translated with `uint` inputs (`int_inputs`): skinned models read bone indices as raw integer bits, and the float default made every character invisible.
   - Compute code areas (magic 0x12345679) start their instructions at +0x100 (0x30 header + zero padding); `dmsh_build.py` strips all of it. Stripping only 0x30 misaligned the translator's 32-byte instruction groups: 12 particle / post-effect compute shaders became endless loops and hung the GPU at the first gameplay scene.
 - Host:
   - Guest address space repartitioned: alias region 2.875 GB, heap 2.625 GB. Mario reserves 1.75 GB of `VirtualAddressMemory` (HeapDef) that it maps into the alias region on demand; with 1.25 GB, large layout archives got no address and were skipped.

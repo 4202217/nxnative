@@ -411,13 +411,53 @@ RULES = []   # 按着色器名挂的 MSL 改写规则（函数, 适用判定）�
 CODE_FP = hashlib.sha256(source_without_rule_bodies().encode() + b''.join(b'\0' + open(m.__file__, 'rb').read() for m in (dmsh_chain,) + ((ios_metal,) if IOSOUT else ()))).hexdigest()
 TOOL_FP = tool_fingerprint().encode()
 
+_CAST = ('as_type<int>(', 'as_type<uint>(')
+def int_inputs(src):
+    """顶点着色器里只按整数用的输入（float 声明下每次使用都是 as_type<int/uint> 位转换，或原样拷走）→ {位置: 'uint'}。
+    Maxwell 读顶点属性寄存器不做类型转换：整数格式（骨骼索引 R8UI / RG8UI / RGBA8UI 等）的位模式原样进寄存器，着色器再按整数用。
+    本作没有 PC 版反射可配对，翻译器的属性类型查询缺省全答 float：Metal 把整数格式转成浮点值送进来，位转换后成了乱值——骨骼索引全错，蒙皮模型（角色）的顶点被拉成长条或飞出画面。
+    Inputs that a vertex shader only uses as integers (under a float declaration every use is an as_type<int/uint> bit cast, or a plain copy) → {location: 'uint'}.
+    Maxwell does no type conversion when reading vertex attribute registers: the bit pattern of integer formats (bone indices R8UI / RG8UI / RGBA8UI etc.) goes into the register as is and the shader uses it as an integer.
+    This game has no PC version to pair reflection with, so the translator's attribute type queries all defaulted to float: Metal converts the integer format to a float value, and after the bit cast it is garbage - every bone index is wrong and skinned models (the characters) are stretched into streaks or thrown off screen."""
+    ins = {m.group(2): int(m.group(3)) for m in re.finditer(r'(\w+)\s+(\w+)\s*\[\[attribute\((\d+)\)\]\]', src)}
+    i = src.find('vertex main0_out main0(')
+    if i < 0: return {}
+    body = src[i:]; out = {}
+    for name, loc_ in ins.items():
+        uses = list(re.finditer(r'in\.%s\b' % re.escape(name), body))
+        nint = 0; bad = False
+        for u in uses:
+            ls = body.rfind('\n', 0, u.start()) + 1; le = body.find('\n', u.end())
+            m = re.match(r'\s*float\s+(_\w+)\s*=\s*in\.%s\.[xyzw];$' % re.escape(name), body[ls:le])
+            if not m:
+                if body[:u.start()].endswith(_CAST): nint += 1; continue
+                bad = True; break
+            v = m.group(1)
+            for o in list(re.finditer(r'\b%s\b' % re.escape(v), body))[1:]:
+                if body[:o.start()].endswith(_CAST): nint += 1; continue
+                l2s = body.rfind('\n', 0, o.start()) + 1; l2e = body.find('\n', o.end())
+                if re.match(r'\s*[\w.\[\]]+\s*=\s*%s;$' % re.escape(v), body[l2s:l2e]): continue   # 原样拷走：两种声明下位模式都不变 | plain copy: the bit pattern is the same under either declaration
+                bad = True; break
+            if bad: break
+        if not bad and nint: out[str(loc_)] = 'uint'
+    return out
+
 def finish(key, w, j, c1):
     name, k = loc[key]
-    res = json.load(open(os.path.join(w, key + '.res.json')))
     msl = os.path.join(w, key + '.metal'); air = msl[:-6] + '.air'; lib = os.path.join(out, key + '_b.metallib')
     r = subprocess.run(['spirv-cross', *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
     if r.returncode: return 'MSL 失败', r.stderr.strip()[:160], None
     src = open(msl).read()
+    if j['stage'] == 'vs':   # 第二遍：只按整数用的输入改报 uint 重新翻译（见 int_inputs） | second pass: re-translate with inputs that are only used as integers reported as uint (see int_inputs)
+        extra = {l: t for l, t in int_inputs(src).items() if l not in j['attr']}
+        if extra:
+            j['attr'].update(extra); jp = os.path.join(w, f'job1_{key}.json'); json.dump([j], open(jp, 'w'))
+            rx = subprocess.run([XLATE, jp, w], capture_output=True, text=True)
+            if rx.returncode or not os.path.exists(os.path.join(w, key + '.spv')): return '翻译失败', ('整数输入重翻：' + rx.stderr.strip())[:160], None
+            r = subprocess.run(['spirv-cross', *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
+            if r.returncode: return 'MSL 失败', r.stderr.strip()[:160], None
+            src = open(msl).read()
+    res = json.load(open(os.path.join(w, key + '.res.json')))
     try:
         subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', msl, '-o', air], check=True)
         tmp_lib = lib + '.tmp-' + str(os.getpid())
