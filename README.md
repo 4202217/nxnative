@@ -78,7 +78,7 @@ Sign and install it with your own tool (AltStore, Sideloadly, ...), which replac
 
 - `main.m`: environment, log, boot thread.
 - `front_ios.m`: the `front.h` functions and a centred 16:9 Metal view.
-- `DmGamepad.m`: touch gamepad (left stick anywhere in the lower left, D-pad, A/B/X/Y in Nintendo positions, ZL/L, ZR/R, −/+). Hidden while a physical controller is connected; physical buttons map by position.
+- `DmGamepad.m`: translucent touch gamepad drawn over the picture and kept close to the edges: ZL above L and ZR above R in the top corners, −/+ in the bottom corners with the D-pad and A/B/X/Y (Nintendo positions) just above them, left and right sticks (fixed rings) just inside those. Hidden while a physical controller is connected; physical buttons map by position.
 
 The host log goes to the app's Documents (`log.txt`, previous run `log.prev.txt`), visible in the Files app. Game files are also accepted at `Documents/romfs`. Environment switches can also be put in `Documents/env.txt` (same format as `DM_ENV_FILE`; it takes precedence over the bundled file), so a sideloaded app can be switched without rebuilding.
 

@@ -1,6 +1,6 @@
-// iOS 前端（front.h 的 iOS 实现）：16:9 的 Metal 视图居中（两侧留黑边，虚拟手柄的按键多半落在黑边上）+ 全屏的虚拟手柄层（DmGamepad.m）。
+// iOS 前端（front.h 的 iOS 实现）：16:9 的 Metal 视图居中（两侧留黑边）+ 全屏的虚拟手柄层（DmGamepad.m，按键叠在画面上）。
 // 宿主在 main.m 起的大栈线程上跑；front_run 直接在调用线程跑客体。
-// iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides, where most virtual gamepad buttons land) + a full-screen virtual gamepad layer (DmGamepad.m).
+// iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
