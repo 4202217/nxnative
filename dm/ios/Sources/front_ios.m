@@ -5,6 +5,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
+#import <AVFAudio/AVFAudio.h>
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -103,6 +104,21 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     return 1;
 }
 
+// 音频会话：RemoteIO 每次回调要的帧数跟着 I/O 缓冲时长走，iOS 缺省约 21 ms（48 kHz 下 1024 帧）。游戏在途只有 4 块 × 5 ms = 20 ms，
+// 每次回调都差 1.3 ms、补零，每秒约 47 次断续（爆破音；Mac 上把回调改成 1024 帧可复现：2000 次回调欠载 1999 次）。要 5 ms，系统取它支持的最近值；
+// 类别仍是缺省的 SoloAmbient（静音键、打断其他 App 声音的行为不变）。启动时设一次，回前台再设（打断之后系统可能复原）
+// Audio session: the frames RemoteIO asks for in each callback follow the I/O buffer duration, about 21 ms by default on iOS (1024 frames at 48 kHz). The game keeps only 4 blocks × 5 ms = 20 ms in flight,
+// so every callback came up 1.3 ms short and was zero-filled, about 47 gaps per second (crackling; reproducible on the Mac by forcing 1024-frame callbacks: 1999 underruns in 2000 callbacks). Ask for 5 ms and the system picks the nearest it supports;
+// the category stays the default SoloAmbient (silent switch and interrupting other apps' audio behave as before). Set once at boot and again on return to the foreground (the system may reset it after an interruption)
+void front_ios_audio_session(void) {
+    AVAudioSession *s = AVAudioSession.sharedInstance; NSError *e = nil;
+    if (![s setCategory:AVAudioSessionCategorySoloAmbient error:&e]) LOG("【红】音频会话类别设不上：%s", e.localizedDescription.UTF8String);
+    [s setPreferredSampleRate:48000 error:nil];
+    if (![s setPreferredIOBufferDuration:0.005 error:&e]) LOG("【红】音频会话 I/O 缓冲时长设不上：%s", e.localizedDescription.UTF8String);
+    if (![s setActive:YES error:&e]) LOG("【红】音频会话激活失败：%s", e.localizedDescription.UTF8String);
+    LOG("音频会话：采样率 %.0f Hz，I/O 缓冲 %.2f ms（要 5 ms）", s.sampleRate, s.IOBufferDuration * 1000);
+}
+
 // 场景生命周期（main.m 的 SceneDelegate 调）：0 失活 1 进后台 2 回前台 3 激活。进后台时冻结客体时钟、等在途 GPU 完成后挂起（后台提交 GPU 会被系统杀）
 // Scene lifecycle (called by SceneDelegate in main.m): 0 resign active, 1 enter background, 2 return to foreground, 3 become active. On entering background, freeze the guest clock and suspend after in-flight GPU work completes (submitting GPU work in background gets the process killed)
 void front_ios_focus_event(int ev) {
@@ -110,7 +126,7 @@ void front_ios_focus_event(int ev) {
     switch (ev) {
         case 0: dm_gamepad_reset(); dm_focus_set(2); break;
         case 1: dm_focus_set(3); dm_audio_suspend(1); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); break;
-        case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); dm_audio_suspend(0); dm_focus_set(2); break;
+        case 2: dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); front_ios_audio_session(); dm_audio_suspend(0); dm_focus_set(2); break;
         case 3: dm_focus_set(1); break;
     }
 }

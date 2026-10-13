@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 // NVN 接口层：接管 main 导入的 nvnBootstrapLoader，sdk 里的 NVN 驱动整块不执行。
 // 523 个 NVN 名字一律返回计数跳板（nvn_thunks.S），跳板再转到这里的实现：
 //   · 有语义的（设备 / 内存池 / 贴图与采样器 / 队列 / 窗口 / 同步 / 事件 / 命令缓冲内存）按 NVN 语义实现，对象是真的；
@@ -419,7 +420,9 @@ NVN(nvnCommandBufferInitialize, NVNboolean, NVNcommandBuffer *c, NVNdevice *d) {
     memset(c, 0, sizeof(cmd_t)); CB(c)->magic = MAGIC('C', 'M', 'D', 'B'); CB(c)->dev = d; return 1;
 }
 NVN(nvnCommandBufferFinalize, void, NVNcommandBuffer *c) { CB(c)->magic = 0; }
-NVN(nvnCommandBufferSetMemoryCallback, void, NVNcommandBuffer *c, PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb) { CB(c)->cb = cb; }
+NVN(nvnCommandBufferSetMemoryCallback, void, NVNcommandBuffer *c, PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb) { CB(c)->cb = cb;
+    { static void *seen[16]; static int ns; int k = 0; while (k < ns && seen[k] != (void *)cb) k++;   // [DEBUG-flk1] 游戏的命令内存回调地址 | the game's command memory callback addresses
+      if (k == ns && ns < 16) { seen[ns++] = (void *)cb; module_t *m = module_of((void *)cb), *r = module_of(__builtin_return_address(0)); LOG("[DEBUG-flk1] SetMemoryCallback 回调 %s+%#lx（调用者 %s+%#lx）", m ? m->name : "?", (unsigned long)(m ? (uintptr_t)cb - (uintptr_t)m->base : (uintptr_t)cb), r ? r->name : "?", (unsigned long)(r ? (uintptr_t)__builtin_return_address(0) - (uintptr_t)r->base : 0)); } } }
 NVN(nvnCommandBufferSetMemoryCallbackData, void, NVNcommandBuffer *c, void *d) { CB(c)->cb_data = d; }
 static uint8_t *align8(uint8_t *p) { return (uint8_t *)(((uintptr_t)p + 7) & ~(uintptr_t)7); }
 // 诊断 DM_NVN_CMDSTAT=1：每 300 帧记一行命令录制的用量——每帧录了多少字节 / 多少条、游戏每次给多大一段命令内存、每帧补内存回调几次、宿主补段几次、
@@ -445,7 +448,8 @@ static void put_hdr(uint8_t *p, uint32_t op, uint32_t size) { op_hdr h = {op, si
 // New segment: if recording is in progress, write a JUMP at the end of the old segment to link it
 static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
     uint8_t *start = align8(mem), *end = mem + n;
-    if (o->recording && o->cur) { if (cs_on() && o->end > o->cur) { pthread_mutex_lock(&g_cs_mu); g_cs.waste += (uint64_t)(o->end - o->cur); pthread_mutex_unlock(&g_cs_mu); } put_hdr(o->cur, OP_JUMP, 16); memcpy(o->cur + 8, &start, 8); }
+    if (o->recording && o->cur) { if (cs_on() && o->end > o->cur) { pthread_mutex_lock(&g_cs_mu); g_cs.waste += (uint64_t)(o->end - o->cur); pthread_mutex_unlock(&g_cs_mu); } put_hdr(o->cur, OP_JUMP, 16); memcpy(o->cur + 8, &start, 8);
+        o->used += 16; }   // JUMP 也占本次录制的客体内存：计进 used，游戏按 used 紧挨着排下一段时不会盖住它 | the JUMP also occupies guest memory of this recording: count it in used, so the game packing the next recording right behind by used does not overwrite it
     o->cur = start; o->end = end;
 }
 // 游戏自己的命令内存用完时的宿主补段：游戏的补内存回调在它那块命令内存池分不出来时，会拿空池（p = NULL、n = 0）调 AddCommandMemory
@@ -454,36 +458,67 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 // Host-supplied segment when the game's own command memory runs out: when the game's out-of-memory callback cannot allocate from its command memory pool, it calls AddCommandMemory with an empty pool (p = NULL, n = 0)
 // (opening the advanced stats page on the level 88 sorceress save: many list items in one frame, and the original implementation segfaulted here reading NULL+8). Our records are larger than real-device NVN commands, so the budget the game reserved for real-device usage is not necessarily enough,
 // so this is not an error state of the game but something we must catch: provide a segment of host memory to keep recording. The segment is replayed in place at submit and reclaimed after being kept for 8 frames (submit is in the same frame as recording or the next one).
+// 回收时机跟着游戏的命令内存块走，不按帧数：游戏会缓存录好的命令句柄、每帧 CALL 直到自己重录（SMBW 的物体设置句柄），
+// 句柄录进宿主补段后，原先「借出 8 帧就回收」会在游戏还在 CALL 时把段改写掉（Mac 上逼溢出时回放出乱命令：RGBA16F 被当成深度格式建管线）。
+// 补段经段尾的 JUMP 接在一次录制后面：那次录制在客体内存里占 [BEGIN, JUMP 尾)，游戏只在这些字节作废后才会把它们重新给出去
+// （原地重录那个材质时；按 used 紧挨着排下一段时不会碰到，used 已含 JUMP）。所以补段记下这段客体范围，游戏再给出与之重叠的内存时回收；
+// 从补段接着溢出的补段沿用同一范围。（不能拿整块游戏内存当范围：SMBW 从一大块里连续分出很多次录制，后面在同一块里再给内存时会把仍在用的补段收掉）
+// (Do not use the whole game chunk as the range: SMBW sub-allocates many recordings out of one big chunk, and a later grant inside that chunk freed segments still in use.)
+// Reclaim follows the game's command memory chunks, not a frame count: the game caches recorded command handles and CALLs them every frame until it re-records them itself (SMBW's object setup handles);
+// once a handle was recorded into a host segment, the old "reclaim 8 frames after lending" rewrote the segment while the game still CALLed it (with overflow forced on the Mac, the replay read garbage commands: RGBA16F used as a depth format for a pipeline).
+// A segment hangs off one recording through the JUMP at the end of its guest part: that recording occupies [BEGIN, end of JUMP) in guest memory, and the game only gives those bytes out again once they are dead
+// (when it re-records that material in place; packing the next recording right behind by used never touches them, since used includes the JUMP). So a segment remembers that guest range and is reclaimed when the game gives out memory
+// overlapping it; segments overflowing from a host segment keep the same range.
 // 段池按需增长（SMBW 开场关：很多小命令缓冲每帧各溢出一次，旧版固定 64 段 × 1 MB 在 8 帧内用完）；总量超过 HOSTSEG_CAP 才中止。
 // The segment pool grows on demand (SMBW opening course: many small command buffers each overflow once per frame, and the old fixed 64 segments × 1 MB ran out within 8 frames); abort only beyond HOSTSEG_CAP in total.
 #define HOSTSEG_SZ (256u << 10)
 #define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
-typedef struct { uint8_t *mem; uint64_t frame; int busy; } hostseg_t;
+typedef struct { uint8_t *mem; uint64_t frame; int busy; uintptr_t org_lo, org_hi; } hostseg_t;   // org：它所接的那次录制在客体内存里占的范围（0 = 未知，不回收） | org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
 static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg;
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
-static uint8_t *hostseg_take(void) {
+// 取一段：来源 = 当前录制的客体字节 [BEGIN, JUMP 尾)；写指针已在补段里（接着溢出）则沿用那段的来源
+// Take a segment: origin = the current recording's guest bytes [BEGIN, end of JUMP); if the write pointer is already in a host segment (overflowing again), keep that segment's origin
+static uint8_t *hostseg_take(const cmd_t *o) {
     static unsigned total; uint64_t f = dm_nvn_frame_count(); uint8_t *m = NULL;
+    uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
-    for (int i = 0; i < g_nhostseg && !m; i++) {
-        if (g_hostseg[i].busy && g_hostseg[i].frame + 8 < f) g_hostseg[i].busy = 0;
-        if (!g_hostseg[i].busy) { g_hostseg[i].busy = 1; g_hostseg[i].frame = f; m = g_hostseg[i].mem; }
-    }
+    int in_seg = 0;
+    for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && cur <= (uintptr_t)g_hostseg[i].mem + HOSTSEG_SZ) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
+    if (!in_seg && o && o->recording && o->cur) { lo = o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
+    for (int i = 0; i < g_nhostseg && !m; i++)
+        if (!g_hostseg[i].busy) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, f, 1, lo, hi }; m = g_hostseg[i].mem; }
     if (!m && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SZ <= HOSTSEG_CAP) {
         if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
         m = malloc(HOSTSEG_SZ);
-        g_hostseg[g_nhostseg++] = (hostseg_t){ m, f, 1 };
+        g_hostseg[g_nhostseg++] = (hostseg_t){ m, f, 1, lo, hi };
     }
     unsigned t = ++total; int n = g_nhostseg;
     pthread_mutex_unlock(&g_hostseg_mu);
-    if (!m) die("NVN 命令内存：游戏池已空，宿主补段已达 %u MB（8 帧内）", HOSTSEG_CAP >> 20);
+    if (!m) die("NVN 命令内存：游戏池已空，宿主补段已达 %u MB 仍未被游戏的块回收", HOSTSEG_CAP >> 20);
     if (t == 1 || t % 1024 == 0) LOG("[nvn] 游戏的命令内存不够，宿主补段（累计 %u 次，帧 %llu，段池 %d 段 × %u KB）", t, (unsigned long long)f, n, HOSTSEG_SZ >> 10);
     return m;
 }
+// 游戏给出 [lo, hi)：所接录制的客体字节与它重叠的补段都已作废，收回 | The game gives out [lo, hi): segments whose recording's guest bytes overlap it are dead, reclaim them
+static void hostseg_release(uintptr_t lo, uintptr_t hi) {
+    pthread_mutex_lock(&g_hostseg_mu);
+    for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_hi > lo && g_hostseg[i].org_lo < hi) g_hostseg[i].busy = 0;
+    pthread_mutex_unlock(&g_hostseg_mu);
+}
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
     const pool_t *pl = (const pool_t *)p;
-    if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } cmd_new_segment(CB(c), hostseg_take(), HOSTSEG_SZ); return; }
+    if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } cmd_new_segment(CB(c), hostseg_take(CB(c)), HOSTSEG_SZ); return; }
     if (!pl->mem) { LOG("【红】AddCommandMemory 池没有 CPU 存储"); return; }
+    {   // [DEBUG-flk1] DM_DBG_GRANTS=1：按（调用者, 长度档）统计游戏给命令内存，每 600 帧打一次 | DM_DBG_GRANTS=1: count the game's command memory grants by (caller, size class), printed every 600 frames
+        static int on = -1; if (on < 0) on = getenv("DM_DBG_GRANTS") != NULL;
+        if (on) { static uintptr_t ra[64]; static size_t sz[64]; static uint64_t cnt[64]; static int nr; static uint64_t last_f; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+            uintptr_t r = (uintptr_t)__builtin_return_address(0); size_t cls = n >= 0x100000 ? (n + 0xfffff) & ~(size_t)0xfffff : n >= 0x1000 ? (n + 0xfff) & ~(size_t)0xfff : n;
+            pthread_mutex_lock(&mu); int k = 0; while (k < nr && !(ra[k] == r && sz[k] == cls)) k++; if (k == nr && nr < 64) { ra[nr] = r; sz[nr] = cls; nr++; } if (k < 64) cnt[k]++;
+            if (dm_nvn_frame_count() / 600 != last_f / 600) { last_f = dm_nvn_frame_count(); for (int i = 0; i < nr; i++) { module_t *m = module_of((void *)ra[i]); LOG("[DEBUG-flk1] 给命令内存 调用者 %s+%#lx 长度档 %#zx 累计 %llu 次（帧 %llu）", m ? m->name : "?", (unsigned long)(m ? ra[i] - (uintptr_t)m->base : ra[i]), sz[i], (unsigned long long)cnt[i], (unsigned long long)last_f); } }
+            pthread_mutex_unlock(&mu); } }
+    hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
+    { static long shrink = -1; if (shrink < 0) { const char *e = getenv("DM_DBG_CMDMEM_SHRINK"); shrink = e ? atol(e) : 0; }   // [DEBUG-flk1] 把游戏给的每段命令内存截短，逼录制溢出到宿主补段（在 Mac 上复现 iPhone 的溢出） | cut every game command memory chunk short to force overflow into host segments (reproduces the iPhone overflow on the Mac)
+      if (shrink && n > (size_t)shrink + 256) n -= (size_t)shrink; }
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p 池 %p +%#lx 长 %#zx（录制中 %d）", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);
@@ -498,7 +533,10 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
         if (!o->cb || tries == 2) {
             static int once; if (!once++) LOG("[nvn] 命令内存：游戏回调补不够（cb=%p，需 %u 字节），改用宿主补段", (void *)o->cb, size + OP_RESERVE);
-            cmd_new_segment(o, hostseg_take(), HOSTSEG_SZ); break;
+            { static int nlog; if (dm_nvn_frame_count() > 600 && nlog < 30) { nlog++;   // [DEBUG-flk1] 局内溢出明细 | in-game overflow details
+                LOG("[DEBUG-flk1] 溢出 帧 %llu cmd=%p 本次录制已写 %llu 字节，本条要 %u（+留 %d），段内剩 %ld，段尾 %p",
+                    (unsigned long long)dm_nvn_frame_count(), (void *)o, (unsigned long long)o->used, size, OP_RESERVE, (long)(o->end - o->cur), (void *)o->end); } }
+            cmd_new_segment(o, hostseg_take(o), HOSTSEG_SZ); break;
         }
         if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.cbs++; pthread_mutex_unlock(&g_cs_mu); }
         { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ncb;
@@ -506,22 +544,32 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
         o->cb((NVNcommandBuffer *)o, NVN_COMMAND_BUFFER_MEMORY_EVENT_OUT_OF_COMMAND_MEMORY, size + OP_RESERVE, o->cb_data);
     }
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.bytes += size; g_cs.recs++; pthread_mutex_unlock(&g_cs_mu); }
-    uint8_t *p = o->cur; o->cur += size; put_hdr(p, 0, size); return p;
+    uint8_t *p = o->cur; o->cur += size; o->used += size; put_hdr(p, 0, size); return p;
 }
 NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
     if (o->recording) LOG("【红】BeginRecording 重入");
-    o->recording = 1;
+    o->recording = 1; o->used = 0;
     uint8_t *p = cmd_alloc(o, 8); put_hdr(p, OP_BEGIN, 8); o->begin = p;
 }
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
+    { static int seen; if (o->nvn_flag10 && !seen++) LOG("[DEBUG-flk1] 游戏写了 +0x10：%#llx（cmd=%p）", (unsigned long long)o->nvn_flag10, (void *)o); }   // [DEBUG-flk1]
     uint8_t *p = cmd_alloc(o, 8); put_hdr(p, OP_END, 8);
     o->recording = 0;
     return (NVNcommandHandle)o->begin;
 }
 NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->recording != 0; }
 NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
+    {   // [DEBUG-flk1] DM_DBG_CALLSITES=1：记下调用者（客体返回地址）与次数，每 600 帧打一次 | DM_DBG_CALLSITES=1: record callers (guest return addresses) and counts, printed every 600 frames
+        static int on = -1; if (on < 0) on = getenv("DM_DBG_CALLSITES") != NULL;
+        if (on) { static uintptr_t ra[64]; static uint64_t cnt[64]; static int nra; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t last_f;
+            uintptr_t r = (uintptr_t)__builtin_return_address(0); pthread_mutex_lock(&mu);
+            int k = 0; while (k < nra && ra[k] != r) k++; if (k == nra && nra < 64) ra[nra++] = r; if (k < 64) cnt[k] += n;
+            if (dm_nvn_frame_count() / 600 != last_f / 600) { last_f = dm_nvn_frame_count(); for (int i = 0; i < nra; i++) { module_t *m = module_of((void *)ra[i]); LOG("[DEBUG-flk1] CallCommands 调用者 %s+%#lx 累计 %llu 个句柄", m ? m->name : "?", (unsigned long)(m ? ra[i] - (uintptr_t)m->base : ra[i]), (unsigned long long)cnt[i]); } }
+            pthread_mutex_unlock(&mu);
+            { static int tab; if (!tab++) { module_t *m = module_of((void *)r);   // [DEBUG-flk1] 一次性：打出 main+0x35ad800..0x35adc00 的 NVN 函数指针表（解析成宿主符号） | one-off: print the NVN function pointer table at main+0x35ad800..0x35adc00 (resolved to host symbols)
+                if (m) for (uint64_t o = 0x35ad800; o < 0x35adc00; o += 8) { void *fp = *(void **)(m->base + o); Dl_info di; if (fp && dladdr(fp, &di) && di.dli_sname) LOG("[DEBUG-flk1] 表 main+%#llx → %s", (unsigned long long)o, di.dli_sname); } } } } }
     for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
 }
 NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVNeventSignalMode m, NVNeventSignalLocation loc, int flags, uint32_t v) {
@@ -1337,9 +1385,17 @@ NVN(nvnDeviceRegisterFastClearColor, NVNboolean, NVNdevice *d, const float *c, N
 NVN_NOPROTO(nvnWindowBuilderSetNumActiveTextures, void, NVNwindowBuilder *b, int n) { (void)b; ONCE_LOG("WindowBuilderSetNumActiveTextures %d（宿主按 SetTextures 的张数轮转）", n); }
 NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w; ONCE_LOG("WindowSetNumActiveTextures %d（宿主按 SetTextures 的张数轮转）", n); }
 
-// 命令缓冲内存用量：当前段内已写字节（控制内存宿主不用，恒 0）；内存回调开关忽略
-// Command buffer memory usage: bytes written in the current segment (the host does not use control memory, always 0); the memory callback switch is ignored
-NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c; return m->begin && m->cur >= m->begin ? (size_t)(m->cur - m->begin) : 0; }
+// 命令缓冲内存用量：本次录制累计写下的记录字节（跨段累计；控制内存宿主不用，恒 0）；内存回调开关忽略。
+// 原先按 cur - begin 算：录制溢出到宿主补段后 cur 在宿主内存（地址低于客体的 begin），返回 0。SMBW 录完每个材质设置句柄就问这个值，
+// 0（且控制内存也是 0）就当录了个空的、把句柄标无效（main+0x4bb6c 起清材质项 +0x50 位 0）；之后的绘制不再 CALL 它，沿用上一个物体的顶点缓冲 / 贴图：
+// iPhone 上开场关奇数帧一批绘制越界取顶点，出大三角形和 NaN（黑带、黑边光晕、灰条纹）。没溢出时累计值与 cur - begin 相同
+// Command buffer memory usage: record bytes written in this recording (accumulated across segments; the host does not use control memory, always 0); the memory callback switch is ignored.
+// It used to be cur - begin: once a recording overflowed into a host segment, cur is in host memory (an address below the guest begin) and it returned 0. SMBW asks for this value after recording each material setup handle,
+// and on 0 (with control memory also 0) treats the recording as empty and marks the handle invalid (from main+0x4bb6c it clears bit 0 of the material entry +0x50); later draws no longer CALL it and inherit the previous object's vertex buffers / textures:
+// on the iPhone a batch of draws on odd frames of the opening course fetched vertices out of bounds, giving huge triangles and NaN (black band, black-edged glow, grey stripes). Without overflow the accumulated value equals cur - begin
+NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c;
+    { static int old = -1; if (old < 0) old = getenv("DM_DBG_OLD_USED") != NULL; if (old) return m->begin && m->cur >= m->begin ? (size_t)(m->cur - m->begin) : 0; }   // [DEBUG-flk1] 旧算法（对照） | the old computation (for comparison)
+    return m->begin ? (size_t)m->used : 0; }
 NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { (void)c; return 0; }
 NVN_NOPROTO(nvnCommandBufferSetCommandMemoryCallbackEnabled, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }
 

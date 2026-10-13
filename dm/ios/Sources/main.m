@@ -72,6 +72,7 @@ static void *boot_thread(void *p) {
 }
 void front_ios_boot(void) {   // 窗口与 Metal 视图建好后由 front_ios.m 调 | Called by front_ios.m once the window and Metal view exist
     static int once; if (once++ || !g_boot_ok) return;
+    void front_ios_audio_session(void); front_ios_audio_session();   // 游戏开声卡之前把 I/O 缓冲设短（front_ios.m） | set a short I/O buffer before the game opens audio output (front_ios.m)
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);   // Switch 主线程栈由 npdm 定，宿主给足 | the Switch main thread stack is set by npdm; the host gives plenty
     pthread_t t; pthread_create(&t, &a, boot_thread, NULL); pthread_detach(t);
 }

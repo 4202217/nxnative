@@ -73,11 +73,17 @@ FITS(win_t, NVNwindow);
 // Command buffer: commands are written into the command memory given by the game (AddCommandMemory), handle = segment start address; when it runs out, the game is called back for more memory
 typedef struct {
     uint32_t magic, recording;
-    uint8_t *cur, *end;                  // 当前命令内存段的写指针 / 段尾 | Write pointer / end of the current command memory segment
+    uint8_t *cur;                        // 当前命令内存段的写指针 | Write pointer of the current command memory segment
+    uint64_t nvn_flag10;                 // +0x10 留给游戏：它内联的 NVN 头文件代码在 AddCommandMemory 之后、BeginRecording / CallCommands 之前往这里写字节 1（真机 NVN 的内部标志；main+0x4da5c、main+0xb8dec 等）。
+                                         // 原先这里是 end 的低字节：被改成 01 后段尾缩短最多 254 字节，SMBW 的材质设置句柄（最小 512 字节一块）在 iPhone 的地址上频频溢出到宿主补段 |
+                                         // +0x10 is left to the game: its inlined NVN header code writes byte 1 here after AddCommandMemory and before BeginRecording / CallCommands (an internal flag of real NVN; main+0x4da5c, main+0xb8dec etc.).
+                                         // This used to be the low byte of end: rewritten to 01 it cut the segment end by up to 254 bytes, and SMBW's material setup handles (512-byte blocks at minimum) kept overflowing into host segments at the iPhone's addresses
+    uint8_t *end;                        // 当前命令内存段的段尾 | End of the current command memory segment
     uint8_t *begin;                      // 本次录制的 BEGIN 记录 | BEGIN record of this recording
     PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb; void *cb_data;
     NVNdevice *dev;
-} cmd_t;                                                                                     FITS(cmd_t, NVNcommandBuffer);
+    uint64_t used;                       // 本次录制累计写下的字节（跨段，含换段的 JUMP；GetCommandMemoryUsed 返回它） | Bytes written in this recording (across segments, including segment-switch JUMPs; returned by GetCommandMemoryUsed)
+} cmd_t;                                                                                   FITS(cmd_t, NVNcommandBuffer);
 
 // ---------- 状态对象（默认值按 NVN / GL 默认） ----------
 // ---------- State objects (defaults follow the NVN / GL defaults) ----------
