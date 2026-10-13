@@ -14,7 +14,9 @@
 #   （SecredUber 16600 个阶段着色器只有 3079 种控制段，其中 6367 处同控制段而代码不同），只哈希控制段会拿错库。
 # 输出：<包目录>/<阶段>_<来源组>.bin，每条记录 = 'BTCDBTCD' + 头（+0x28 控制段长、+0x2c 代码区长）补到 0x38 + 代码区 + 控制段，同键只出一份；
 #   映射表行与 D2R 的 shader_map.tsv 同列（第 5 列记首次出现的位置）；作答表每个计算着色器一行 {"local", "shared"}（共享内存按 16 字节向上取整，同 D2R 口径）。
-# 用法：shader_split.py <RomFS 目录> <ExeFS main> <输出包目录> <输出映射表> <输出作答表>   （解 main 要 lz4：用 dm 的 venv python 跑）   环境 J=并发（缺省 8）
+# 用法：shader_split.py <RomFS 目录> <ExeFS main> <输出包目录> <输出映射表> <输出作答表> [<输出配对表>]   （解 main 要 lz4：用 dm 的 venv python 跑）   环境 J=并发（缺省 8）
+#   带更新包：RomFS 与 main 都写成逗号分隔的列表（基础版在前，如 data/v0/RomFS,data/v327680/RomFS），输出两版的并集（见 main()）
+# 配对表：BNSH 每个变体的（顶点键, 像素键），dmsh_build 据此给顶点着色器补上像素着色器读而它没写的输出（见 dmsh_build.py vs_pad）
 # All of Mario's shaders → the "package directory" dmsh_build.py understands + the shader map + the translation query answer table (thread group / shared memory of compute shaders).
 # Sources (a full scan, not relying on file names): every file under RomFS (.zs is zstd-decompressed first, SARC is expanded member by member) and ExeFS main (NSO, lz4-decompressed), looking for
 #   · BNSH ('BNSH\0\0\0\0', carried by bfsha / particle effect esetb / UI layout blarc / embedded in main):
@@ -30,7 +32,9 @@
 #   (SecredUber's 16600 stage shaders have only 3079 distinct control sections, with 6367 cases of same control, different code), so hashing the control alone picks the wrong library.
 # Output: <package dir>/<stage>_<source group>.bin, each record = 'BTCDBTCD' + header (+0x28 control length, +0x2c code length) padded to 0x38 + code area + control section, one copy per key;
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
-# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table>   (decompressing main needs lz4: run with dm's venv python)   Environment J=concurrency (default 8)
+# Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table>]   (decompressing main needs lz4: run with dm's venv python)   Environment J=concurrency (default 8)
+#   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
+# Pair table: (vertex key, pixel key) of every BNSH variation; dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
@@ -106,17 +110,24 @@ def group(label):
         if k in label: return g
     return 'other'
 
+def var_pairs(found):
+    """BNSH 同一变体里的（顶点键, 像素键） | (vertex key, pixel key) within the same BNSH variation"""
+    var = collections.defaultdict(dict)
+    for where, st, ctl, code in found:
+        if '#var' in where: var[where][st] = hashlib.sha256(ctl[:0x880] + code).hexdigest()[:16]
+    return {(v['vs'], v['ps']) for v in var.values() if 'vs' in v and 'ps' in v}
+
 def scan_file(args):
     path, rel = args
     d = subprocess.run(['zstd', '-d', '-c', '-q', path], capture_output=True, check=True).stdout if path.endswith('.zs') else open(path, 'rb').read()
-    if b'BNSH\0\0\0\0' not in d and b'BAHS' not in d: return rel, {}
+    if b'BNSH\0\0\0\0' not in d and b'BAHS' not in d: return rel, {}, set()
     found = []; scan_blob(d, '/' + rel, found)
     uniq = {}
     for where, st, ctl, code in found:
         key = hashlib.sha256(ctl[:0x880] + code).hexdigest()[:16]
         if key in uniq and (uniq[key][2] != ctl or uniq[key][3] != code): red(f'键 {key} 相同而控制段或代码区不同（{where}）')
         uniq.setdefault(key, (where, st, ctl, code))
-    return rel, uniq
+    return rel, uniq, var_pairs(found)
 
 def nso_image(path):
     import lz4.block
@@ -129,14 +140,25 @@ def nso_image(path):
     return bytes(img)
 
 def main():
-    romfs, mainnso, pkg, mapout, factsout = sys.argv[1:6]
-    files = sorted((os.path.join(dp, f), os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+    romfs_l, main_l, pkg, mapout, factsout = sys.argv[1:6]
+    pairsout = sys.argv[6] if len(sys.argv) > 6 else None
+    # 多个版本（基础版 + 更新）：RomFS 与 main 各用逗号分隔、一一对应，输出取并集（键是内容哈希，各版共用的只出一份）。
+    # 第一个版本的来源列不变；之后的版本以其工作区目录名（如 v327680）为前缀：/v327680/Shader/…、main@v327680，排在第一个版本之后，原有行的包内序号不变。
+    # Several versions (base game + update): the RomFS and main arguments are comma-separated and paired one to one; the output is their union (keys are content hashes, shaders shared by versions appear once).
+    # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
+    romfs_v, main_v = romfs_l.split(','), main_l.split(',')
+    if len(romfs_v) != len(main_v): red(f'RomFS {len(romfs_v)} 个、main {len(main_v)} 个，要一一对应')
+    files, results = [], []
+    for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
+        tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
+        files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
+        found = []; scan_blob(nso_image(mainnso), 'main' + ('@' + tag if tag else ''), found)
+        results.append(('main', {hashlib.sha256(c[:0x880] + k).hexdigest()[:16]: (w, s, c, k) for w, s, c, k in found}, var_pairs(found)))
     keys = {}
-    found = []; scan_blob(nso_image(mainnso), 'main', found)
-    results = [('main', {hashlib.sha256(c[:0x880] + k).hexdigest()[:16]: (w, s, c, k) for w, s, c, k in found})]
     with cf.ProcessPoolExecutor(int(os.environ.get('J', '8'))) as ex: results += list(ex.map(scan_file, files, chunksize=16))
-    per_src = collections.Counter()
-    for rel, uniq in results:
+    per_src = collections.Counter(); pairs = set()
+    for rel, uniq, pr in results:
+        pairs |= pr
         for key, v in uniq.items():
             if key in keys:
                 if keys[key][2] != v[2] or keys[key][3] != v[3]: red(f'键 {key} 相同而控制段或代码区不同（{v[0]} / {keys[key][0]}）')
@@ -167,6 +189,10 @@ def main():
     with open(factsout, 'w') as f:
         f.write('# 翻译查询的作答表（dm/gfx/tools/shader_split.py 生成，勿手改）：键 <TAB> 事实 JSON。本作没有 PC 版可配对：只有计算着色器的线程组 / 共享内存（取自控制段），其余查询按翻译器缺省\n')
         for k in sorted(facts): f.write(k + '\t' + json.dumps(facts[k], sort_keys=True, separators=(',', ':')) + '\n')
-    print(f'着色器 {len(rows)} 个（' + '，'.join(f'{ZH[s]} {n}' for s, n in sorted(stat.items())) + '）；来源 ' + '，'.join(f'{g} {n}' for g, n in per_src.most_common()) + f'；计算着色器作答 {len(facts)} 行')
+    if pairsout:
+        with open(pairsout, 'w') as f:
+            f.write('# kind: evidence  BNSH 变体里的顶点 / 像素着色器配对（dm/gfx/tools/shader_split.py 生成，勿手改）：顶点键 <TAB> 像素键 | vertex / pixel shader pairs within BNSH variations (generated, do not edit): vertex key <TAB> pixel key\n')
+            for a, b in sorted(pairs): f.write(f'{a}\t{b}\n')
+    print(f'着色器 {len(rows)} 个（' + '，'.join(f'{ZH[s]} {n}' for s, n in sorted(stat.items())) + '）；来源 ' + '，'.join(f'{g} {n}' for g, n in per_src.most_common()) + f'；计算着色器作答 {len(facts)} 行' + (f'；变体配对 {len(pairs)} 对' if pairsout else ''))
 
 if __name__ == '__main__': main()

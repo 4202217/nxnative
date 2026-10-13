@@ -442,6 +442,31 @@ def int_inputs(src):
         if not bad and nint: out[str(loc_)] = 'uint'
     return out
 
+# 顶点 / 像素配对（shader_split.py 从 BNSH 变体取出）：顶点键 → 配对的像素键 | vertex / pixel pairs (taken from BNSH variations by shader_split.py): vertex key → paired pixel keys
+PAIRS = collections.defaultdict(set)
+for _ln in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../nvn/shader_pairs.tsv')):
+    if _ln.strip() and not _ln.startswith('#'): _v, _p = _ln.split(); PAIRS[_v].add(_p)
+
+def vs_pad(key, src):
+    """顶点着色器补上配对像素着色器读、它却没写的输出，值 (0,0,0,1)。
+    Maxwell 的属性是无类型的 32 位槽，像素着色器读到顶点没写的位置只得到缺省值；Ryujinx 连接阶段时也是补成 (0,0,0,1)。这里逐个着色器离线翻译，不知道下一阶段读什么，
+    Metal 又要求像素着色器的每个输入顶点都有输出：9043 对里有 331 对链接失败、这次绘制不画（iPhone 开场关之后一局 1 万多次「Fragment input(s) user(locnN) ... not written by vertex shader」）。
+    返回 (新源码, 补上的位置)；读不到像素着色器的 MSL 的配对略过。
+    Give a vertex shader the outputs its paired pixel shaders read but it does not write, with the value (0,0,0,1).
+    Maxwell attributes are untyped 32-bit slots, and a pixel shader reading a location the vertex shader did not write only gets a default; Ryujinx also fills them with (0,0,0,1) when it links stages. Here every shader is translated
+    offline on its own without knowing what the next stage reads, and Metal requires every pixel shader input to be a vertex output: 331 of 9043 pairs failed to link and their draws were skipped
+    (over 10,000 "Fragment input(s) user(locnN) ... not written by vertex shader" in one iPhone session after the opening course). Returns (new source, padded locations); pairs whose pixel MSL cannot be read are skipped."""
+    want = set()
+    for ps in PAIRS.get(key, ()):
+        fn = os.path.join(out, ps + '_b.metal')
+        if os.path.exists(fn): want |= {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', open(fn).read())}
+    miss = sorted(want - {int(x) for x in re.findall(r'\[\[user\(locn(\d+)\)', src)})
+    i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
+    if not miss or i < 0 or j < 0 or k < 0: return src, []
+    src = src[:j] + ''.join(f'\n    float4 dm_pad{l} [[user(locn{l})]];' for l in miss) + src[j:]
+    k = src.find('main0_out out = {};') + len('main0_out out = {};')
+    return src[:k] + ''.join(f'\n    out.dm_pad{l} = float4(0.0, 0.0, 0.0, 1.0);' for l in miss) + src[k:], miss
+
 def finish(key, w, j, c1):
     name, k = loc[key]
     msl = os.path.join(w, key + '.metal'); air = msl[:-6] + '.air'; lib = os.path.join(out, key + '_b.metallib')
@@ -457,6 +482,10 @@ def finish(key, w, j, c1):
             r = subprocess.run(['spirv-cross', *XC, os.path.join(w, key + '.spv'), '--output', msl], capture_output=True, text=True)
             if r.returncode: return 'MSL 失败', r.stderr.strip()[:160], None
             src = open(msl).read()
+    pad = []
+    if j['stage'] == 'vs' and PAIRS.get(key):   # 像素着色器读而顶点没写的输出补成 (0,0,0,1)（见 vs_pad） | outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
+        src, pad = vs_pad(key, src)
+        if pad: open(msl, 'w').write(src)
     res = json.load(open(os.path.join(w, key + '.res.json')))
     try:
         subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', msl, '-o', air], check=True)
@@ -479,7 +508,7 @@ def finish(key, w, j, c1):
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['无配对 PC 反射，查询按缺省'] if j.get('pc_missing') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr),
             'bindings': reflect(key, j['stage'], src, res),
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],
-            'raster': raster_facts(j['stage'], src)}
+            'raster': raster_facts(j['stage'], src), 'vs_pad': pad}
     write_refl(key, refl)
     fetch_finish(key, src, refl)
     return 'ok', '', refl
@@ -504,7 +533,7 @@ for key in keys:
         if name not in packs: packs[name] = records(open(os.path.join(dm_dir, name), 'rb').read())
         rec = packs[name][k]
     digests[key] = shader_key(key, name, rec)
-    rule_fps[key] = hashlib.sha256(shader_rule_source(name)).hexdigest()
+    rule_fps[key] = hashlib.sha256(shader_rule_source(name) + ','.join(sorted(PAIRS.get(key, ()))).encode()).hexdigest()   # 配对变了顶点着色器要重出（vs_pad） | the vertex shader must be rebuilt when its pairs change (vs_pad)
     hit, cache_reasons[key] = cache_lookup(key, digests[key], rule_fps[key], CODE_FP)
     if hit: cache_hits.add(key)
     else: jobs[key], c1s[key] = job_for(key, name, rec, w)
@@ -528,7 +557,8 @@ def fin(key):
     result = (key,) + finish(key, w, jobs[key], c1s[key])
     if result[1] == 'ok': publish_cache(key, digests[key], rule_fps[key], CODE_FP)
     return result
-with cf.ThreadPoolExecutor(NJ) as ex: res = list(ex.map(fin, keys))
+with cf.ThreadPoolExecutor(NJ) as ex:   # 两段：配对的顶点着色器要读配对像素着色器的 MSL（vs_pad），排在最后 | two phases: paired vertex shaders read their pixel shaders' MSL (vs_pad), so they go last
+    res = list(ex.map(fin, [k for k in keys if k not in PAIRS])) + list(ex.map(fin, [k for k in keys if k in PAIRS]))
 shutil.rmtree(w, ignore_errors=True)
 st = collections.Counter(r[1] for r in res)
 print(f'着色器 {len(res)}：成功 {st["ok"]}，' + '，'.join(f'{k} {v}' for k, v in st.items() if k != 'ok'))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # B 着色器库的翻译链版本（构建结果须只由源码决定）。
 # 链版本 V = 下列仓内文件内容 + 翻译选项的 sha256 前 12 位：本脚本、dmsh_build.py、dmsh_fetch.py（可读 tile 版本）、dmsh_xlate 源（Program.cs、csproj）、
-# 映射表（含冲突表）、翻译查询的作答表（dmsh_facts.py 与 nvn/shader_facts.tsv）、iOS 编译口径 ios_metal.py、工具锁 dmsh_chain.lock（Ryujinx 着色器 dll / spirv-cross / metal 编译器的实测指纹）。
+# 映射表（含冲突表）、顶点 / 像素配对表（nvn/shader_pairs.tsv，vs_pad 用）、翻译查询的作答表（dmsh_facts.py 与 nvn/shader_facts.tsv）、iOS 编译口径 ios_metal.py、工具锁 dmsh_chain.lock（Ryujinx 着色器 dll / spirv-cross / metal 编译器的实测指纹）。
 # 出包（dmsh_build.py）写进 <缓存目录>/b-<V>/，反射 json 记 chain = V；宿主编译时取 nvn/dmsh_chain.h 里的 V，只从 b-<V>/ 加载并逐个核 json。
 # 用法：dmsh_chain.py                 打印 V（缺省选项）
 #       dmsh_chain.py --header        重写 nvn/dmsh_chain.h（改了上列任一文件后要跑，tests/t_chain.sh 核对）
@@ -10,7 +10,7 @@
 # 环境：XLATE_DEBUG / XLATE_REDUCED（与 dmsh_build.py 同义，缺省 1 / 1；非缺省选项得到不同的 V，宿主不会加载）
 # Translation chain version of the B shader library (the build result must be determined by source alone).
 # Chain version V = first 12 digits of the sha256 of the contents of the following in-repo files + the translation options: this script, dmsh_build.py, dmsh_fetch.py (readable-tile version), the dmsh_xlate sources (Program.cs, csproj),
-# the mapping table (including the conflict table), the answer table for translation queries (dmsh_facts.py and nvn/shader_facts.tsv), the iOS compile convention ios_metal.py, the tool lock dmsh_chain.lock (measured fingerprints of the Ryujinx shader dll / spirv-cross / metal compiler).
+# the mapping table (including the conflict table), the vertex / pixel pair table (nvn/shader_pairs.tsv, used by vs_pad), the answer table for translation queries (dmsh_facts.py and nvn/shader_facts.tsv), the iOS compile convention ios_metal.py, the tool lock dmsh_chain.lock (measured fingerprints of the Ryujinx shader dll / spirv-cross / metal compiler).
 # The build (dmsh_build.py) writes into <cache dir>/b-<V>/ and the reflection json records chain = V; at compile time the host takes V from nvn/dmsh_chain.h, loads only from b-<V>/ and verifies each json.
 # Usage: dmsh_chain.py                 print V (default options)
 #       dmsh_chain.py --header        rewrite nvn/dmsh_chain.h (run after changing any file listed above; tests/t_chain.sh verifies it)
@@ -21,7 +21,7 @@ import os, sys, hashlib, subprocess
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # 工作区根目录（游戏文件、产物、运行现场都在它下面） | Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); GFX = os.path.dirname(HERE); HOME = os.path.expanduser('~')
 FILES = ['tools/dmsh_chain.py', 'tools/dmsh_build.py', 'tools/dmsh_fetch.py', 'tools/dmsh_facts.py', 'nvn/shader_facts.tsv', 'tools/dmsh_xlate/Program.cs', 'tools/dmsh_xlate/dmsh_xlate.csproj',
-         'nvn/shader_map.tsv', 'nvn/shader_map.tsv.conflicts.tsv', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
+         'nvn/shader_map.tsv', 'nvn/shader_map.tsv.conflicts.tsv', 'nvn/shader_pairs.tsv', '../ios/tools/ios_metal.py', 'tools/dmsh_chain.lock']
 LOCK = os.path.join(HERE, 'dmsh_chain.lock'); HEADER = os.path.join(GFX, 'nvn/dmsh_chain.h')
 XLATE_DIR = os.path.dirname(os.environ.get('XLATE', f'{DM_ROOT}/build/gfx/dmsh_xlate/dmsh_xlate'))
 
