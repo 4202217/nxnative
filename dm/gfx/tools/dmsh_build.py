@@ -253,7 +253,14 @@ def job_for(key, name, rec, w):
     ci = rec.find(bytes.fromhex('34127698')); code = rec[0x38:ci]; stage = stage_of.get(key, name[:2])
     c1o, c1t = struct.unpack_from('<2I', rec, ci + 0x700)   # 控制段 +0x700：c1 相对指令区起点、+0x704：指令区总长（c1 = 两者之间；全库长度 0 / 256 / 512 / 768） | control segment +0x700: c1 relative to the start of the instruction area, +0x704: total length of the instruction area (c1 = what lies between the two; lengths across the whole library are 0 / 256 / 512 / 768)
     c1 = rec[0x38 + c1o:0x38 + c1t]
-    if stage != 'cs' or code[:4] == bytes.fromhex('79563412'): code = code[0x30:]   # 去 0x30 头：图形阶段都有；计算阶段本作有（魔数 0x12345679），D2R 的包记录没有 | strip the 0x30 header: every graphics stage has one; compute has one in this game (magic 0x12345679), D2R's package records do not
+    if stage != 'cs': code = code[0x30:]   # 去 0x30 头（其后 0x50 SPH 由翻译器自己读） | strip the 0x30 header (the 0x50 SPH after it is read by the translator itself)
+    elif code[:4] == bytes.fromhex('79563412'):
+        # 计算阶段本作有头（魔数 0x12345679，D2R 的包记录没有）：头 0x30 + 零填充，指令从代码区 +0x100 起（全库 71 个实测；BRA 自跳与控制字都按这个起点 32 字节对齐）。
+        # 只去 0x30 时翻译器从 +0x30 起解码：每 32 字节的控制字位置错开 0x10，间接跳转 BRX 的跳转表（相对程序起点）全部错位 → 粒子 / 后处理计算着色器死循环、GPU 卡死。
+        # Compute in this game has a header (magic 0x12345679; D2R's package records have none): 0x30 header + zero padding, instructions start at code area +0x100 (measured on all 71; the BRA-to-self and the control words are 32-byte aligned to this start).
+        # Stripping only 0x30 made the translator decode from +0x30: the control word every 32 bytes is off by 0x10 and the jump tables of indirect BRX (relative to the program start) are all misplaced → particle / post-effect compute shaders loop forever and hang the GPU.
+        if any(code[0x30:0x100]): sys.exit(f'【红】{key}：计算代码区 +0x30..+0x100 不全为零，指令起点不是 +0x100')
+        code = code[0x100:]
     cp = os.path.join(w, key + '.bin'); open(cp, 'wb').write(code)
     j = {'key': key, 'stage': stage, 'code': cp, 'tex': {}, 'img': {}, 'attr': {}, 'fout': {}, 'c1': c1.hex(),
          'debug': os.environ.get('XLATE_DEBUG', '1') != '0', 'reduced': os.environ.get('XLATE_REDUCED', '1') == '1'}   # 翻译选项（见 dmsh_xlate/Program.cs）；放宽精度缺省开（GPU 浮点末位误差不进游戏状态，mini 整帧 −26%）   # c1：翻译器读间接跳转表用 | translation options (see dmsh_xlate/Program.cs); relaxed precision is on by default (GPU float last-bit error does not enter game state, whole frame −26% on the second Mac)   # c1: used by the translator to read indirect jump tables

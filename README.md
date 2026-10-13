@@ -9,11 +9,11 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 | Step | State |
 |---|---|
 | Rewriter (`dm/tools/patch_nso.py`, `DM_RULESET=native`) | Runs unchanged on Mario `main` / `sdk` |
-| Mac host | **Reaches the title screen and renders it correctly at 60 fps** (deferred G-buffer, shadow map, post passes, layout UI, final copy into the window). Memory stays flat (about 900 MB physical footprint) |
-| Shaders | All 12,811 shaders the game ships (bfsha archives, particle effects, engine `agl` packages, UI layouts, `main`) are extracted by `shader_split.py` and translated offline; 12,804 compile. 7 `agl` post-effect compute shaders with image atomics make SPIRV-Cross throw |
-| Input | Scripted input `DM_KEYS="12:A,14:A"` (seconds:button); `DM_WINDOW=1` for a window with keyboard input. Pressing A on the title screen starts a new game and loads the opening course |
-| Current frontier | Loading the opening course crashes: the resource heap of `Model/NpcCommonerA.bfres` (sized from the resource-size table) overflows when its model instances are created, the game gets a null pool and dereferences it (`h_nvnMemoryPoolGetFlags`). Under investigation with `DM_PROBE` |
-| Known gaps | Partial / mid-pass clears; sparse virtual-pool mappings; conditional render; TBDR optimizations are off by default (they don't understand bindless textures yet) |
+| Mac host | **Plays through the menus (player count, character select) into the opening course**: the course, effects, HUD, menu and dialogue text render in Chinese or English. Title screen at 60 fps, memory flat (about 900 MB physical footprint on the title screen) |
+| Shaders | All 12,811 shaders the game ships (bfsha archives, particle effects, engine `agl` packages, UI layouts, `main`) are extracted by `shader_split.py` and translated offline; 12,809 compile. 2 `agl` post-effect compute shaders make SPIRV-Cross throw |
+| Input | Scripted input `DM_KEYS="12:A,14:A,20:A,26:A,32:A"` (seconds:button) reaches the opening course; `DM_WINDOW=1` for a window with keyboard input |
+| Current frontier | In the opening course the sky is black and no character models (player, NPCs) are visible; controller-button icons in text show as `?` (the host's stand-in system font has no Nintendo-extension glyphs) |
+| Known gaps | Partial / mid-pass clears; sparse virtual-pool mappings; conditional render; `DrawElementsIndirect`; TBDR optimizations are off by default (they don't understand bindless textures yet); resource heaps get +16 KB slack because one model's setup came up 0x70 bytes short of the size table (cause unknown) |
 | Audio | Silent AudioRenderer (`hle_audren.c`); real mixing comes later |
 | iOS bundle | Not started. Plan: reuse `dm/ios` from d2r-mobile, bundle the RomFS (3.5 GB) inside the app, standard-controller virtual gamepad |
 
@@ -41,15 +41,21 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
   - Texture swizzle (`TextureBuilderSetSwizzle` / `TextureViewSetSwizzle`) is applied through Metal texture views (the font atlas is `(1, 1, 1, R)`).
   - Non-packaged textures are shared by storage (pool + offset + description): Mario rebuilds its transient render targets on new objects every frame and never finalizes them, which leaked about 13 MB of GPU memory per frame.
   - TBDR optimizations are off by default (`DM_NVN_TBDR=1` turns them on) until they recognize bindless readers.
+  - Linear textures in CPU-visible pools are created directly on the pool buffer (zero copy). Mario's glyph cache (2048×8192 R8) is filled by the CPU; as a private GPU texture all menu and dialogue text was blank.
+  - Host command-memory segments (lent when a command buffer outgrows the memory the game gave it) grow on demand instead of a fixed 64 × 1 MB.
+  - `RGB10A2SN` vertex format; instanced `DrawArrays`.
 - Shader chain:
   - `dm/gfx/tools/shader_split.py` (new) scans RomFS and `main` for BNSH and BAHS (agl `sharcb`) containers and writes the package directory, the shader map and the answer table (compute thread-group size from control +0x748, shared memory from +0x754).
   - The translator uses GL depth (`-1..1`) and no depth clip control, so vertex shaders remap z' = z/2 + w/2: Mario sets `nvnDeviceSetDepthMode` to near = -w, and without the remap its full-screen copy was clipped away.
-  - `dmsh_build.py` strips the 0x30 header of compute code areas (magic 0x12345679).
+  - Compute code areas (magic 0x12345679) start their instructions at +0x100 (0x30 header + zero padding); `dmsh_build.py` strips all of it. Stripping only 0x30 misaligned the translator's 32-byte instruction groups: 12 particle / post-effect compute shaders became endless loops and hung the GPU at the first gameplay scene.
 - Host:
   - Guest address space repartitioned: alias region 2.875 GB, heap 2.625 GB. Mario reserves 1.75 GB of `VirtualAddressMemory` (HeapDef) that it maps into the alias region on demand; with 1.25 GB, large layout archives got no address and were skipped.
   - Threads created with ideal core -2 run on the process default core (0); `GetCurrentProcessorNumber` never returns a negative core. Mario's font engine indexes per-core state with it.
   - The shared font is served with a BFTTF "already decoded" header so `ScalableFontEngineHelper::Decode` leaves it alone.
   - Crash reports scan the stack for return addresses and dump the popped frame.
+  - `DM_PROBE` (`host/probe.c`): register-relative dumps (`@xN+off`), hit filters (`?[xN+off]=val`), a `sead::ExpHeap` walker (`!xN`), thread IDs, `DM_PROBE_ALL`.
+- `patch_nso.py` code cuts for Mario `main` (build ID `cd6e42ae…`): resource heaps (`main+0x1e62fc`) get +16 KB.
+- `dm/tools/ghidra/Decompile.java`: headless decompile by module offset; `@off` (re)creates functions reached only through vtables and undoes Ghidra's wrong "non-returning" mark on `nn::os` imports.
 
 ## Build and run on Mac
 

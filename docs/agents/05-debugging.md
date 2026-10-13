@@ -21,17 +21,29 @@ x0=… x28=…
 # decompile the functions containing these module offsets
 JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
   /opt/homebrew/opt/ghidra/libexec/support/analyzeHeadless ~/<title>-work/ghidra/proj <proj> -process <module>.elf \
-  -noanalysis -readOnly -scriptPath ~/<title>-work/ghidra/scripts -postScript Decompile.java 0x373e04,0x2ea2ac
+  -noanalysis -readOnly -scriptPath <repo>/dm/tools/ghidra -postScript Decompile.java 0x373e04,0x2ea2ac
 
 # raw disassembly (works where Ghidra defined no function)
 objdump -d --start-address=0x2ea1c0 --stop-address=0x2ea2b0 ~/<title>-work/elf/<module>.elf
 ```
 
+Prefix an offset with `@` (`... Decompile.java @0x49740`) to (re)create the function at exactly that address. Code reached only through vtables has no function, and Ghidra's analysis marked some `nn::os` imports (`LockMutex`) as non-returning, which cut many functions short right after the first lock. The script clears that flag and the call-return overrides on such calls before decompiling.
+
 Map GOT slots to NVN names with the survey table (`census/*_nvn_slots.tsv`): a call through `[x8, #0x3e8]` after `adrp x8, 0x35ad000` is GOT entry 0x35ad3e8.
 
 ## Probes without a debugger (`DM_PROBE`)
 
-`DM_PROBE=main:4290c0,main:9712c` (module:offset, comma-separated; `host/probe.c`, Mac only) replaces the instruction with `brk`, and on every hit prints x0–x7 (and strings they point to), x19–x23, lr, x8 and a backtrace, then runs the original instruction from a trampoline. Put probes at function entries or where x16 is dead; the probed instruction must not be PC-relative. `DM_PROBE_X2=<bytes>` also dumps the memory x2 points to (object fields). Output from several threads interleaves; parse it with a regex rather than by line. Probes slow the game, which can shift heap addresses between runs.
+`DM_PROBE=main:4290c0,main:9712c` (module:offset, comma-separated; `host/probe.c`, Mac only) replaces the instruction with `brk`, and on every hit prints the guest thread (`T=`), x0–x7 (and strings they point to), x19–x23, lr, x8 and a backtrace, then runs the original instruction from a trampoline. Put probes at function entries or where x16 is dead; the probed instruction must not be PC-relative (no `adrp`, `adr`, `b`, `bl`, literal `ldr`: probe the next instruction instead). Output from several threads interleaves; parse it with a regex rather than by line. Probes slow the game, which can shift heap addresses between runs.
+
+Per-probe suffixes, in this order:
+
+| Suffix | Effect |
+|---|---|
+| `@off`, `@*off`, `@xN+off`, `@*xN+off` | Print 16 bytes at x0+off (or xN+off); `*` dereferences that address first |
+| `?xN=val`, `?[xN+off]=val` | Only report hits where the register (or the 64-bit word at xN+off) equals `val` (hex); others pass silently. E.g. `main:4743c0?[x0+30]=781548` = only allocations into the heap whose size field is 0x781548 |
+| `!xN` | Treat xN as a `sead::ExpHeap` and print its free and used blocks (offset+size) |
+
+`DM_PROBE_ALL=1` adds x9–x18; `DM_PROBE_X2=<bytes>` dumps the memory x2 points to.
 
 Use it when lldb is unavailable: after macOS revokes the debugger authorization (`DevToolsSecurity -status` says developer mode is disabled), `lldb` launches hang waiting for a GUI approval prompt. `sudo DevToolsSecurity -enable` (run by the user) restores it.
 

@@ -19,7 +19,28 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 // The trampoline borrows x16: place probes only at function entries or at points where x16 is dead; the original instruction must not be PC-relative (adr/adrp/b/bl/ldr literal/cbz...).
 #define MAX_PROBE 16
 typedef void (*probe_fn)(ucontext_t *uc);
-static struct { uint64_t at; uint32_t *slot; unsigned hits; char name[40]; long dump; probe_fn fn; } g_probe[MAX_PROBE];   // dump：命中时打印 [x0+dump] 16 字节（-1 = 不打）；fn：专用处理（替代缺省打印） | dump: on hit print 16 bytes at [x0+dump] (-1 = do not print); fn: dedicated handler (replaces the default print)
+static struct { uint64_t at; uint32_t *slot; unsigned hits; char name[40]; long dump; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];
+
+// !xN：把 xN 当 sead::ExpHeap，打印空闲块与已用块（SMBW 布局：空闲表 +0xb0、节点偏移 +0xc4；已用表 +0xc8、节点偏移 +0xdc；块大小在块 +0x18）
+// !xN: treat xN as a sead::ExpHeap and print its free and used blocks (SMBW layout: free list +0xb0, node offset +0xc4; used list +0xc8, node offset +0xdc; block size at block +0x18)
+static int rd64(uint64_t a, uint64_t *v) { vm_size_t g = 0; return !vm_read_overwrite(mach_task_self(), a, 8, (vm_address_t)v, &g) && g == 8; }
+static void probe_heapwalk(uint64_t h) {
+    uint64_t start = 0, size = 0; rd64(h + 0x28, &start); rd64(h + 0x30, &size);
+    fprintf(stderr, "[dm]   ExpHeap %#llx 起 %#llx 大小 %#llx\n", (unsigned long long)h, (unsigned long long)start, (unsigned long long)size);
+    static const struct { int list, off; const char *nm; } L[2] = { { 0xb0, 0xc4, "空闲/free" }, { 0xc8, 0xdc, "已用/used" } };
+    for (int k = 0; k < 2; k++) {
+        uint64_t offw = 0, node = 0, sum = 0; int n = 0; rd64(h + L[k].off, &offw); int32_t off = (int32_t)offw;
+        rd64(h + L[k].list + 8, &node);
+        fprintf(stderr, "[dm]   %s:", L[k].nm);
+        while (node && node != h + L[k].list && n < 2000) {
+            uint64_t blk = node - off, bsz = 0, w2 = 0; rd64(blk + 0x18, &bsz); rd64(blk + 0x10, &w2);
+            fprintf(stderr, "%s%llx+%llx", n % 8 ? " " : "\n[dm]     ", (unsigned long long)(blk - start), (unsigned long long)bsz);
+            sum += bsz; n++;
+            if (!rd64(node + 8, &node)) break;
+        }
+        fprintf(stderr, "\n[dm]   %s 共 %d 块 %#llx 字节\n", L[k].nm, n, (unsigned long long)sum);
+    }
+}   // dump：命中时打印 [x0+dump] 16 字节（-1 = 不打）；fn：专用处理（替代缺省打印） | dump: on hit print 16 bytes at [x0+dump] (-1 = do not print); fn: dedicated handler (replaces the default print)
 static int g_nprobe;
 static void probe_str(uint64_t p) {
     char buf[80]; vm_size_t got = 0;
@@ -55,23 +76,31 @@ static int probe_hit(ucontext_t *uc) {   // 由 probe_install 注册给 crash.c 
     for (int i = 0; i < g_nprobe; i++) if (g_probe[i].at == pc) {
         probe_dump_once();
         if (g_probe[i].fn) { g_probe[i].hits++; g_probe[i].fn(uc); uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
-        { extern uint64_t g_t0_ns; uint64_t now_ns(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs]", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9); }
+        if (g_probe[i].freg >= 0) {   // ?xN=值 / ?[xN+偏移]=值：不符就静默放行 | ?xN=value / ?[xN+offset]=value: pass through silently when it does not match
+            uint64_t v = uc->uc_mcontext->__ss.__x[g_probe[i].freg]; vm_size_t g = 0;
+            if (g_probe[i].foff >= 0 && vm_read_overwrite(mach_task_self(), v + g_probe[i].foff, 8, (vm_address_t)&v, &g)) v = ~g_probe[i].fval;
+            if (v != g_probe[i].fval) { uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot; return 1; }
+        }
+        { extern uint64_t g_t0_ns; uint64_t now_ns(void); uint32_t thr_cur_handle(void); fprintf(stderr, "[dm] PROBE %s #%u [%.4fs] T=%x", g_probe[i].name, ++g_probe[i].hits, (now_ns() - g_t0_ns) / 1e9, thr_cur_handle()); }
         for (int r = 0; r < 8; r++) { uint64_t v = uc->uc_mcontext->__ss.__x[r]; fprintf(stderr, " x%d=%#llx", r, v); probe_str(v); }
         for (int r = 19; r < 24; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);
+        if (getenv("DM_PROBE_ALL")) for (int r = 9; r < 19; r++) fprintf(stderr, " x%d=%#llx", r, uc->uc_mcontext->__ss.__x[r]);   // DM_PROBE_ALL=1：再打 x9–x18 | also print x9–x18
         fprintf(stderr, " lr=%#llx", uc->uc_mcontext->__ss.__lr);
         { uint64_t x8 = uc->uc_mcontext->__ss.__x[8]; Dl_info di; fprintf(stderr, " x8=%#llx", x8);   // x8：间接调用目标常在这里（blr x8 前下探针） | x8: indirect call targets are often here (probe placed before blr x8)
           if (dladdr((void *)x8, &di) && di.dli_sname) fprintf(stderr, "（%s+%#lx）", di.dli_sname, (unsigned long)(x8 - (uint64_t)di.dli_saddr)); }
         if (g_probe[i].dump >= 0) {
             uint8_t b[16]; vm_size_t got = 0;
-            uint64_t at = uc->uc_mcontext->__ss.__x[0] + (g_probe[i].dump & 0xffffff);
+            int dr = (g_probe[i].dump >> 25) & 31;                                    // @xN+偏移：以 xN 为基址 | @xN+offset: based on xN
+            uint64_t at = uc->uc_mcontext->__ss.__x[dr] + (g_probe[i].dump & 0xffffff);
             if (g_probe[i].dump & 0x1000000) { uint64_t p = 0; vm_size_t g = 0; if (!vm_read_overwrite(mach_task_self(), at, 8, (vm_address_t)&p, &g)) at = p; else at = 0; }   // @*偏移：先解引用再转储 | @*offset: dereference first, then dump
             if (at && !vm_read_overwrite(mach_task_self(), at, 16, (vm_address_t)b, &got) && got == 16) {
-                fprintf(stderr, " [%s%#lx]=", (g_probe[i].dump & 0x1000000) ? "*x0+" : "x0+", g_probe[i].dump & 0xffffff); for (int k = 0; k < 16; k++) fprintf(stderr, "%02x", b[k]); }
+                fprintf(stderr, " [%sx%d+%#lx]=", (g_probe[i].dump & 0x1000000) ? "*" : "", dr, g_probe[i].dump & 0xffffff); for (int k = 0; k < 16; k++) fprintf(stderr, "%02x", b[k]); }
         }
         fputc('\n', stderr);
         { static long xd = -2; if (xd == -2) { const char *e = getenv("DM_PROBE_X2"); xd = e ? strtol(e, 0, 16) : -1; }   // DM_PROBE_X2=字节数：另打 x2 指向的内存（看对象字段） | DM_PROBE_X2=bytes: also print the memory x2 points to (to read object fields)
           if (xd > 0) { uint64_t at = uc->uc_mcontext->__ss.__x[2]; uint8_t b[512]; vm_size_t got = 0; long n = xd > 512 ? 512 : xd;
             if (!vm_read_overwrite(mach_task_self(), at, n, (vm_address_t)b, &got)) { fprintf(stderr, "[dm]   [x2]:"); for (long k = 0; k < (long)got; k += 8) { uint64_t v; memcpy(&v, b + k, 8); fprintf(stderr, "%s%llx", k % 32 ? " " : "\n[dm]   ", (unsigned long long)v); } fputc('\n', stderr); } } }
+        if (g_probe[i].hreg >= 0) probe_heapwalk(uc->uc_mcontext->__ss.__x[g_probe[i].hreg]);
         dm_backtrace(uc->uc_mcontext->__ss.__fp);
         uc->uc_mcontext->__ss.__pc = (uint64_t)g_probe[i].slot;
         return 1;
@@ -93,7 +122,7 @@ static void probe_add(module_t *m, uint64_t off, long dump, probe_fn fn) {
     *w = 0xD43E0000;                             // brk #0xf000
     mprotect((void *)pg, 0x4000, PROT_READ | PROT_EXEC);
     sys_icache_invalidate(w, 4);
-    g_probe[g_nprobe].at = at; g_probe[g_nprobe].slot = sl; g_probe[g_nprobe].dump = dump; g_probe[g_nprobe].fn = fn;
+    g_probe[g_nprobe].at = at; g_probe[g_nprobe].slot = sl; g_probe[g_nprobe].dump = dump; g_probe[g_nprobe].fn = fn; g_probe[g_nprobe].freg = -1; g_probe[g_nprobe].hreg = -1;
     snprintf(g_probe[g_nprobe].name, sizeof g_probe[0].name, "%s+%#llx", m->name, off);
     LOG("探针 %s（原指令 %08x）", g_probe[g_nprobe].name, sl[0]);
     g_nprobe++;
@@ -114,8 +143,24 @@ void probe_install(void) {
             if (!m) die("DM_PROBE 无此模块 %s", t);
             char *at_ = strchr(c + 1, '@');
             long dump = -1;
-            if (at_) dump = at_[1] == '*' ? (0x1000000 | strtol(at_ + 2, 0, 16)) : strtol(at_ + 1, 0, 16);   // @偏移 / @*偏移 | @offset / @*offset
+            if (at_) {   // @偏移 / @*偏移 / @xN+偏移 / @*xN+偏移 | @offset / @*offset / @xN+offset / @*xN+offset
+                const char *q = at_ + 1; long deref = 0, reg = 0;
+                if (*q == '*') { deref = 0x1000000; q++; }
+                if (*q == 'x') { char *e2; reg = strtol(q + 1, &e2, 10) & 31; q = *e2 == '+' ? e2 + 1 : e2; }
+                dump = deref | (reg << 25) | (strtol(q, 0, 16) & 0xffffff);
+            }
+            char *qm = strchr(c + 1, '?'), *bang = strchr(c + 1, '!');
             probe_add(m, strtoull(c + 1, 0, 16), dump, NULL);
+            if (bang && bang[1] == 'x') g_probe[g_nprobe - 1].hreg = (int)strtol(bang + 2, 0, 10) & 31;
+            if (qm) {   // 过滤：?x0=706c400000 或 ?[x0+38]=781548（十六进制） | Filter: ?x0=706c400000 or ?[x0+38]=781548 (hex)
+                const char *q = qm + 1; int br = *q == '[';
+                if (br) q++;
+                if (*q != 'x') die("DM_PROBE 过滤格式：?xN=值 或 ?[xN+偏移]=值");
+                char *e2; g_probe[g_nprobe - 1].freg = (int)strtol(q + 1, &e2, 10) & 31; g_probe[g_nprobe - 1].foff = -1;
+                if (br) { g_probe[g_nprobe - 1].foff = *e2 == '+' ? strtol(e2 + 1, &e2, 16) : 0; if (*e2 == ']') e2++; }
+                if (*e2 != '=') die("DM_PROBE 过滤缺 =");
+                g_probe[g_nprobe - 1].fval = strtoull(e2 + 1, 0, 16);
+            }
         }
     }
     if (g_slots && !g_slots_sealed) { mprotect(g_slots, 0x4000, PROT_READ | PROT_EXEC); sys_icache_invalidate(g_slots, 0x4000); g_slots_sealed = 1; }

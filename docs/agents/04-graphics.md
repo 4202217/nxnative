@@ -10,7 +10,8 @@ Do not stop at the obvious archive. In Mario the main `bfsha` held 4,888 of the 
 
 - **BNSH** (`BNSH\0\0\0\0` + `grsc` block at +0x60): inside `bfsha`, particle effects (`esetb`, VFXB), UI layouts (`blarc`), and `main` itself. Variation table at +0x80 (count at +0x7c); binary program at variation +0x10; six stage pointers from program +0x08 (vs, hs, ds, gs, ps, cs); stage code descriptor: control ptr +0x08, code ptr +0x10, code size +0x18, control size +0x1c. All pointers relative to the BNSH start.
 - **BAHS** (agl `sharcb`, engine utility shaders): code region at header +0x1c (size +0x18). Binary entries in the table area are 16 bytes `{code offset, 0, control size (0x880/0x88c), signed offset from this entry to the control section}`. Control sections are shared between programs, so pair by entry, never by searching for code near a control.
-- **Code area**: 0x30-byte header (magic `0x12345678` graphics, `0x12345679` compute) + 0x50 SPH (graphics only) + instructions. **Control section**: magic `0x98761234`; +0x700 = c1 offset in the code area, +0x704 = code size, +0x748 = compute thread-group size (u32 ×3), +0x754 = compute shared memory bytes.
+- **Code area**: graphics = 0x30-byte header (magic `0x12345678`) + 0x50 SPH + instructions (at +0x80); compute = 0x30-byte header (magic `0x12345679`) + **zero padding, instructions at +0x100** (all 71 of Mario's). **Control section**: magic `0x98761234`; +0x700 = c1 offset in the code area, +0x704 = code size, +0x748 = compute thread-group size (u32 ×3), +0x754 = compute shared memory bytes.
+- **The program start must be exact.** Ryujinx's decoder treats every 32-byte boundary *relative to the start* as a scheduling word. Mario's compute code was first fed from +0x30: the groups were misaligned by 0x10, instructions were dropped or misread, and 12 compute shaders (particles, post effects) translated into an endless loop that hung the GPU at the first gameplay scene. Check a new title: the first non-zero word after the header must be a control word, and the trailing `EXIT` (`e30000000007000f`) / `BRA`-to-self (`e2400fffff87000f`) must sit in instruction slots of 32-byte groups counted from your chosen start. `dmsh_build.py` now refuses compute code whose padding is not zero.
 
 Validate a new title's coverage at run time: `DM_NVN_SHDUMP=<dir>` makes the host dump the control section and code of every program it can't find in the map; search those bytes in the game files to find the container that was missed.
 
@@ -50,7 +51,10 @@ Consequence: any optimization that infers "which textures a draw reads" from bou
 - **Inline uniform updates** (`CommandBufferUpdateUniformBuffer`) are replayed as in-order GPU copies; reading the uniform buffer from the CPU at encode time gives the frame's *last* value, not the draw's.
 - **Compute code areas have a header** in Mario (`0x12345679`), not in D2R; `dmsh_build.py` strips it.
 - **Virtual memory pools** (flag 0x200): aliased onto the physical pool named by `MapVirtual` when all requests share one base (Mario's case); otherwise unimplemented.
-- **Image atomics**: 7 agl compute shaders produce SPIR-V that SPIRV-Cross can't parse (`nullptr` exception). Open issue.
+- **SPIRV-Cross failures**: 2 agl post-effect compute shaders still produce SPIR-V that SPIRV-Cross can't parse (`nullptr` exception). Before the compute start-offset fix it was 7: misdecoded code produced the bad SPIR-V.
+- **CPU-written linear textures**: a texture with `NVN_TEXTURE_FLAGS_LINEAR` in a CPU-visible pool is created on the pool's `MTLBuffer` (`tex_linear`), so CPU writes (Mario's glyph cache) are visible to the GPU. Block-linear CPU-written textures still need the packaged-texture re-upload path.
+- **Vertex formats**: Mario uses `RGB10A2SN` (0x69) → `MTLVertexFormatInt1010102Normalized`. Unmapped formats fall back to a 4-component read and print `顶点属性格式 … 未映射` once.
+- **Instanced array draws** (`DrawArraysInstanced`) carry instance count and base instance in the `OP_DRAW` record.
 
 ## 7. Diagnostic switches (host)
 

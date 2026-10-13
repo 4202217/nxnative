@@ -46,7 +46,7 @@ Do this before touching the host. Every item answers "what will break, and how m
 
   ```bash
   JAVA_HOME=<jdk21> $GHIDRA/support/analyzeHeadless ~/<title>-work/ghidra/proj <name> -process <module>.elf \
-      -noanalysis -readOnly -scriptPath ~/<title>-work/ghidra/scripts -postScript Decompile.java 0x107dbc0,0x3707b0
+      -noanalysis -readOnly -scriptPath <repo>/dm/tools/ghidra -postScript Decompile.java 0x107dbc0,0x3707b0
   ```
 
   `analyzeHeadless` needs `JAVA_HOME` set even when Java is on PATH. Code only reachable through vtables may have no function defined at an address; use `objdump -d --start-address=… --stop-address=… <module>.elf` instead.

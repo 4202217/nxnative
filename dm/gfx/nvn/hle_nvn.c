@@ -454,22 +454,30 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 // Host-supplied segment when the game's own command memory runs out: when the game's out-of-memory callback cannot allocate from its command memory pool, it calls AddCommandMemory with an empty pool (p = NULL, n = 0)
 // (opening the advanced stats page on the level 88 sorceress save: many list items in one frame, and the original implementation segfaulted here reading NULL+8). Our records are larger than real-device NVN commands, so the budget the game reserved for real-device usage is not necessarily enough,
 // so this is not an error state of the game but something we must catch: provide a segment of host memory to keep recording. The segment is replayed in place at submit and reclaimed after being kept for 8 frames (submit is in the same frame as recording or the next one).
-#define HOSTSEG_SZ (1u << 20)
-#define HOSTSEG_MAX 64
+// 段池按需增长（SMBW 开场关：很多小命令缓冲每帧各溢出一次，旧版固定 64 段 × 1 MB 在 8 帧内用完）；总量超过 HOSTSEG_CAP 才中止。
+// The segment pool grows on demand (SMBW opening course: many small command buffers each overflow once per frame, and the old fixed 64 segments × 1 MB ran out within 8 frames); abort only beyond HOSTSEG_CAP in total.
+#define HOSTSEG_SZ (256u << 10)
+#define HOSTSEG_CAP (1u << 30)
 uint64_t dm_nvn_frame_count(void);
-static struct { uint8_t *mem; uint64_t frame; int busy; } g_hostseg[HOSTSEG_MAX];
+typedef struct { uint8_t *mem; uint64_t frame; int busy; } hostseg_t;
+static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg;
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint8_t *hostseg_take(void) {
     static unsigned total; uint64_t f = dm_nvn_frame_count(); uint8_t *m = NULL;
     pthread_mutex_lock(&g_hostseg_mu);
-    for (int i = 0; i < HOSTSEG_MAX; i++) if (g_hostseg[i].busy && g_hostseg[i].frame + 8 < f) g_hostseg[i].busy = 0;
-    for (int i = 0; i < HOSTSEG_MAX && !m; i++) if (!g_hostseg[i].busy) {
-        if (!g_hostseg[i].mem) g_hostseg[i].mem = malloc(HOSTSEG_SZ);
-        g_hostseg[i].busy = 1; g_hostseg[i].frame = f; m = g_hostseg[i].mem; }
-    unsigned t = ++total;
+    for (int i = 0; i < g_nhostseg && !m; i++) {
+        if (g_hostseg[i].busy && g_hostseg[i].frame + 8 < f) g_hostseg[i].busy = 0;
+        if (!g_hostseg[i].busy) { g_hostseg[i].busy = 1; g_hostseg[i].frame = f; m = g_hostseg[i].mem; }
+    }
+    if (!m && (uint64_t)(g_nhostseg + 1) * HOSTSEG_SZ <= HOSTSEG_CAP) {
+        if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
+        m = malloc(HOSTSEG_SZ);
+        g_hostseg[g_nhostseg++] = (hostseg_t){ m, f, 1 };
+    }
+    unsigned t = ++total; int n = g_nhostseg;
     pthread_mutex_unlock(&g_hostseg_mu);
-    if (!m) die("NVN 命令内存：游戏池已空，宿主补段 %d 段也用完（8 帧内）", HOSTSEG_MAX);
-    if (t == 1 || t % 256 == 0) LOG("[nvn] 游戏的命令内存池已空，宿主补段（累计 %u 次，帧 %llu）", t, (unsigned long long)f);
+    if (!m) die("NVN 命令内存：游戏池已空，宿主补段已达 %u MB（8 帧内）", HOSTSEG_CAP >> 20);
+    if (t == 1 || t % 1024 == 0) LOG("[nvn] 游戏的命令内存不够，宿主补段（累计 %u 次，帧 %llu，段池 %d 段 × %u KB）", t, (unsigned long long)f, n, HOSTSEG_SZ >> 10);
     return m;
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
@@ -635,7 +643,7 @@ NVN(nvnCommandBufferSetStencilRef, void, NVNcommandBuffer *c, NVNface f, int v) 
 NVN(nvnCommandBufferSetPolygonOffsetClamp, void, NVNcommandBuffer *c, float fa, float un, float cl) {
     *REC(c, OP_POLY_OFFSET, p_poly_offset) = (p_poly_offset){fa, un, cl};
 }
-NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { *REC(c, OP_DRAW, p_draw) = (p_draw){pr, first, n}; }
+NVN(nvnCommandBufferDrawArrays, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n) { *REC(c, OP_DRAW, p_draw) = (p_draw){pr, first, n, 1, 0}; }
 NVN(nvnCommandBufferDrawElementsInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib,
     int bv, int bi, int inst) {
     *REC(c, OP_DRAW_IDX, p_draw_idx) = (p_draw_idx){pr, it, n, bv, bi, inst, ib};
@@ -1366,8 +1374,7 @@ NVN(nvnCommandBufferBindVertexBuffer, void, NVNcommandBuffer *c, int i, NVNbuffe
 NVN(nvnCommandBufferDrawElements, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, 0, 0, 1); }
 NVN(nvnCommandBufferDrawElementsBaseVertex, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, int n, NVNbufferAddress ib, int bv) { h_nvnCommandBufferDrawElementsInstanced(c, pr, it, n, ib, bv, 0, 1); }
 NVN(nvnCommandBufferDrawArraysInstanced, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, int first, int n, int bi, int inst) {
-    if (inst != 1 || bi) ONCE_LOG("【红】DrawArraysInstanced 实例数 %d / 基实例 %d：宿主按 1 个实例画", inst, bi);
-    h_nvnCommandBufferDrawArrays(c, pr, first, n);
+    *REC(c, OP_DRAW, p_draw) = (p_draw){pr, first, n, inst, bi};
 }
 NVN(nvnCommandBufferDrawElementsIndirect, void, NVNcommandBuffer *c, NVNdrawPrimitive pr, NVNindexType it, NVNbufferAddress ib, NVNbufferAddress ind) {
     (void)c; (void)pr; (void)it; (void)ib; (void)ind; ONCE_LOG("【红】DrawElementsIndirect：宿主未实现（跳过）");

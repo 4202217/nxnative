@@ -49,7 +49,20 @@ PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
 # ---- Registered cuts: {NSO build ID: [(offset, original bytes, new bytes, reason)]} ----
 # Networking cuts (excluded scope: Battle.net / online play): taken from a community offline fix (LFS Mod Offline Fix for v2228224, which differs from the official 94012 main in only these 7 words).
 # Measured: the system service layer (nifm offline / DNS black hole / account service) cannot get around it: the game itself sends Battle.net requests directly and allows offline play according to the "last online" time.
-CUTS = {'db0507f36b84200ac05f75d76ed5026f': [
+CUTS = {
+  # Super Mario Bros. Wonder v0 main
+  'cd6e42aee7934f4d8393cd43893ae25e': [
+    # 资源堆留余量：资源单元的 ExpHeap 按资源尺寸表值 + 0x1008 建（main+0x1e603c → ExpHeap::create main+0x4aac38），表值是任天堂实测的峰值，几乎不留余量
+    # （PlayerYoshiAnm 用到 99%）。宿主上开场关 Course900 的 Model/NpcCommonerA.bfres 差约 0x70 字节：模型资源初始化最后一块显存（MatBlock，
+    # 0x9000 字节、4 KB 对齐，main+0x4290c0）放下后，它的 0x598 字节描述块放不下，显存分配失败 → 缓冲区建在空内存池上 → main+0x106f5c8 读空崩溃。
+    # 与真机差在哪里未查明（本块之前的每一项分配尺寸都由游戏代码与数据决定）；先给每个资源堆 +16 KB。
+    # Resource heap slack: each resource unit's ExpHeap is created with the resource size table value + 0x1008 (main+0x1e603c → ExpHeap::create main+0x4aac38); the table holds Nintendo's measured peaks with almost no margin
+    # (PlayerYoshiAnm uses 99%). On the host, Model/NpcCommonerA.bfres in the opening course Course900 is about 0x70 bytes short: after the model resource's last GPU chunk (MatBlock,
+    # 0x9000 bytes, 4 KB aligned, main+0x4290c0) is placed, its 0x598-byte descriptor does not fit, the GPU allocation fails → a buffer is built on a null memory pool → null read crash at main+0x106f5c8.
+    # Where this differs from hardware is not known (every allocation size before this block is determined by game code and data); for now every resource heap gets +16 KB.
+    (0x1e62fc, 'e00317aa', 'e0124091', '资源堆尺寸：mov x0,x23 → add x0,x23,#0x4000（ExpHeap::create 的尺寸参数 +16 KB）'),
+  ],
+  'db0507f36b84200ac05f75d76ed5026f': [
     # （放进所有产物共用的基础改写）：游戏显存分配器预算 260 MB → 512 MB
     # (Placed in the base rewrite shared by all build outputs): game video memory allocator budget 260 MB → 512 MB
     (0x8524c4, '0808a2d2', '0800a4d2', '显存分配器初始化配置：mov x8,#0x10400000（260 MB）→ mov x8,#0x20000000（512 MB），随后 movk #0xa0,lsl48 与 str [sp,#0x238] 不变；'
