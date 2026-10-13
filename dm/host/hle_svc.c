@@ -20,7 +20,7 @@
 // about 4.2 GB in total; on iOS without the "extended virtual addressing" entitlement a single reservation can be at most 6 GB
 // (read on a real device: 6 GB succeeds, 7 GB fails), so it cannot be made any wider --
 // with an 8 GB reservation, builds from developer accounts that cannot sign that entitlement (free accounts) would exit at this step.
-#define RESERVE (6ull << 30)   // SMBW（SDK 16）：别名区要容下 VammManager 固定占的约 1 GB 节点区，整块由 5 GB 加到 iOS 免权限上限 6 GB | SMBW (SDK 16): the alias region must hold the ~1 GB node area VammManager always takes, so the block grows from 5 GB to the 6 GB no-entitlement iOS limit
+#define RESERVE (5ull << 30)   // SMBW：堆只要 1.47 GB，整块与 D2R 一样 5 GB（真机已跑通的总量；6 GB 单块虽能预留，但还要给 Metal 等留地址） | SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB like D2R (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
 static uint8_t *g_as;              // ASLR 区基址 = 整块 | ASLR region base = the whole block
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap;
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
@@ -33,12 +33,12 @@ static void mem_init(void) {
     if (g_as) return;
     g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
-    // 固定划分（都在预留块内）：alias 2.875 GB、stack 256 MB、heap 其余 2.625 GB。
+    // 固定划分（都在预留块内）：alias 2.875 GB、stack 256 MB、heap 其余 1.625 GB。
     // 较新 SDK 的 AddressRegionManager 在别名区开头固定占 0x3fe00000（约 1 GB）作节点区（sdk 0x134728），之后才给游戏分区域；别名区只有 512 MB 时第一次 AllocateAddressRegion 就失败（0x1803）。
     // SMBW 还在 HeapDef（System/HeapSize）里定了 1792000 KB（1.75 GB）的 VirtualAddressMemory：开堆时先从内存池里扣掉它（SetHeapSize 只要 0x5be00000），
     //   资源加载再按需 MapPhysicalMemory 到别名区节点区之后。别名区只给 1.25 GB 时那里只剩约 256 MB，3 MB 级的布局归档（WipeCourseIn / WipeWarp）
-    //   分不到地址就被跳过，用到时空指针崩（main +0x373e04）。所以别名区 = 节点区 + 1.75 GB + 余量；堆只要 1.47 GB，给 2.625 GB 足够。
-    // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 2.625 GB.
+    //   分不到地址就被跳过，用到时空指针崩（main +0x373e04）。所以别名区 = 节点区 + 1.75 GB + 余量；堆只要 1.47 GB，给 1.625 GB 够用。
+    // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
     // SMBW also defines a 1792000 KB (1.75 GB) VirtualAddressMemory in HeapDef (System/HeapSize): it is subtracted from the memory pool before the heap is opened (SetHeapSize asks for only 0x5be00000),
     //   and resource loading then MapPhysicalMemory's into the alias region after the node area on demand. With a 1.25 GB alias region only about 256 MB was left there, and 3 MB-class layout archives (WipeCourseIn / WipeWarp)

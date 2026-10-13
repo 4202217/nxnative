@@ -15,7 +15,7 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 | Current frontier | **The opening course is playable** (run, jump, collect coins; characters, NPCs, sky, text all render). Open: an intermittent water / refraction effect over the fountain draws as tall blue panels (sometimes with a wrong texture); controller-button icons in text show as `?` (the host's stand-in system font has no Nintendo-extension glyphs); no audio |
 | Known gaps | Partial / mid-pass clears; sparse virtual-pool mappings; conditional render; `DrawElementsIndirect`; TBDR optimizations are off by default (they don't understand bindless textures yet); resource heaps get +16 KB slack because one model's setup came up 0x70 bytes short of the size table (cause unknown) |
 | Audio | Silent AudioRenderer (`hle_audren.c`); real mixing comes later |
-| iOS bundle | Not started. Plan: reuse `dm/ios` from d2r-mobile, bundle the RomFS (3.5 GB) inside the app, standard-controller virtual gamepad |
+| iOS bundle | `dm/ios/tools/build_ipa.sh` builds one unsigned IPA (iPhone + iPad): game code embedded in the executable, iOS shader libraries, RomFS (3.5 GB) inside the app, standard-controller virtual gamepad and physical controllers. Compiles and links; **not yet run on a device** (this Mac has no signing identity, and the Simulator SDK has no Metal 4) |
 
 ## What changed relative to d2r-mobile
 
@@ -78,6 +78,25 @@ make -C dm/host dmhost
 ```
 
 Agent-facing guides for analysing and porting other titles are in [docs/agents](docs/agents/README.md).
+
+## Build the iOS app (unsigned IPA)
+
+Needs Xcode 27, xcodegen, and the Mac build steps above (the rewritten modules in `~/smbw-work/build/patched_v0`).
+
+```
+# iOS shader libraries for the current chain version (writes ~/smbw-work/build/ios/dmsh_b/b-<V>/; about 15 min)
+IOSOUT=~/smbw-work/build/ios/dmsh_b XLATE=... python3 dm/gfx/tools/dmsh_build.py ~/smbw-work/shader/pkg ~/smbw-work/build/cache/metal_shader_cache
+# the IPA (default ~/Desktop/SMBWMobile.ipa)
+dm/ios/tools/build_ipa.sh [out.ipa]
+```
+
+Sign and install it with your own tool (AltStore, Sideloadly, ...), which replaces the placeholder bundle ID `org.smbwmobile.app`. The app shell is `dm/ios/Sources`:
+
+- `main.m`: environment, log, boot thread.
+- `front_ios.m`: the `front.h` functions and a centred 16:9 Metal view.
+- `DmGamepad.m`: touch gamepad (left stick anywhere in the lower left, D-pad, A/B/X/Y in Nintendo positions, ZL/L, ZR/R, −/+). Hidden while a physical controller is connected; physical buttons map by position.
+
+The host log goes to the app's Documents (`log.txt`, previous run `log.prev.txt`), visible in the Files app. Game files are also accepted at `Documents/romfs`.
 
 ## Tools (dm/tools)
 
