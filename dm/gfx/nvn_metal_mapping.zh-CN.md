@@ -22,9 +22,9 @@ English: [nvn_metal_mapping.md](nvn_metal_mapping.md)
 | TextureView | `newTextureViewWithPixelFormat:textureType:levels:slices:` | — |
 | Sampler | `MTLSamplerState` | 边框色 Metal 只有三种预设（透明黑、不透明黑、不透明白），按 NVN 给的边框色就近取 |
 | TexturePool / SamplerPool | 宿主侧的表：描述符号 → 贴图 / 采样器 | 分离贴图句柄的值就是描述符号 |
-| Program | 每个阶段一个 `MTLFunction` | 以着色器控制段的哈希为键，从离线翻译好的 `<键>_b.metallib` 加载；运行时不翻译。翻译链见 README |
+| Program | 每个阶段一个 `MTLFunction` | 以着色器「控制段 + 代码区」的哈希为键，从离线翻译好的 `<键>_b.metallib` 加载；运行时不翻译。翻译链见 README |
 | 状态对象（Blend / Color / ChannelMask / Multisample / Polygon / DepthStencil / VertexAttrib / VertexStream） | 渲染管线描述符的字段 + `MTLDepthStencilState` + 编码器状态 | 游戏按值拷贝这些小结构，宿主侧用位域就地打包。渲染管线、深度模板状态按状态哈希缓存 |
-| CommandBuffer | 录在游戏命令内存里的记录流 | 提交时回放 |
+| CommandBuffer | 录在游戏命令内存里的记录流 | 提交时回放。宿主放在游戏 `NVNcommandBuffer` 里的记录让开 +0x10 那个字节：游戏内联的 NVN 代码直接写它。录制超出游戏给的内存时宿主借出段，只在游戏重新给出这段录制起始所在的内存时才收回；`GetCommandMemoryUsed` 两边的字节都算 |
 | Queue | Metal 命令队列 | `SubmitCommands` = 回放并提交 |
 | Sync | 提交的栅栏值 | `FenceSync` 记下最近一次提交的栅栏值；`SyncWait` 只在 GPU 真正完成到该值之后放行（`MTLSharedEvent` 的已完成值）。没围栏过的同步对象等待直接返回超时 |
 | Event | 游戏内存里的一个 32 位值 | 写值在 GPU 完成之后发生 |

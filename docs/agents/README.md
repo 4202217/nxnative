@@ -2,7 +2,7 @@
 
 These pages are for an agent asked to analyse a Switch NSP and port it with the native-execution approach of this repository and [d2r-mobile](../../../d2r-mobile): the game's own aarch64 code runs natively on Apple hardware, a rewriter patches only the instructions Apple's kernel cannot run, the host replaces Horizon system services, and NVN is reimplemented on Metal.
 
-Everything here was learned on two titles: Diablo II: Resurrected (SDK ~12, NVN 53, the original target of d2r-mobile) and Super Mario Bros. Wonder (SDK 16.2.1, NVN 55, this repository). Where the two differed, both are given; a third title will differ again, so treat every number below as "measure it, don't assume it".
+Everything here was learned on two titles: Diablo II: Resurrected (SDK ~12, NVN 53, the original target of d2r-mobile) and Super Mario Bros. Wonder (SDK 16.2.0, NVN 55, this repository; its update 1.2.1 uses SDK 16.2.12). Where the two differed, both are given; a third title will differ again, so treat every number below as "measure it, don't assume it".
 
 | Page | Covers |
 |---|---|
@@ -10,7 +10,7 @@ Everything here was learned on two titles: Diablo II: Resurrected (SDK ~12, NVN 
 | [02-survey.md](02-survey.md) | Static survey of a new title before touching the host: SDK version, imports vs. host hooks, SVCs, instructions to rewrite, NVN surface, data containers, Ghidra / REA setup |
 | [03-bringup.md](03-bringup.md) | Getting the host to boot the game: the run loop, how to read the log, and a catalogue of every failure pattern met so far with its root cause and fix |
 | [04-graphics.md](04-graphics.md) | NVN on Metal for a new title: object sizes, shader containers and keys, binding layouts, bindless textures, depth mode, index sizes, swizzle, transient render targets, the diagnostic switches |
-| [05-debugging.md](05-debugging.md) | Recipes: crash reports, lldb scripts, Ghidra headless decompilation, objdump, memory growth, render-pass and texture dumps |
+| [05-debugging.md](05-debugging.md) | Recipes: crash reports, lldb scripts, Ghidra headless decompilation, objdump, memory growth, render-pass and texture dumps, on-device diagnostics, offline pipeline link checks |
 
 ## Ground rules
 
@@ -30,3 +30,5 @@ Everything here was learned on two titles: Diablo II: Resurrected (SDK ~12, NVN 
 6. Extract and translate the shaders, find the binding layout by census, and get the first frame — [04](04-graphics.md).
 7. Check memory over a minute of running (`footprint`, the host's memory report line); fix growth before moving on.
 8. Input, audio, then the iOS bundle (d2r-mobile's `dm/ios`, RomFS inside the app).
+9. Test on a phone: an unsigned IPA the user sideloads, switches through `env.txt`, results through `Documents/log.txt` ([05](05-debugging.md)). Several bugs only showed there (the command-buffer byte and the audio buffer size in [03](03-bringup.md), pipeline link failures in later levels in [04](04-graphics.md)).
+10. For a game update: extract it over the base game, diff the imports, carry the per-build addresses over, and rebuild the shader tables for both versions ([01](01-extract.md)).

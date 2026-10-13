@@ -22,9 +22,9 @@ Two conventions that run through the whole table:
 | TextureView | `newTextureViewWithPixelFormat:textureType:levels:slices:` | — |
 | Sampler | `MTLSamplerState` | For border color Metal has only three presets (transparent black, opaque black, opaque white); the nearest one to the border color NVN gives is chosen |
 | TexturePool / SamplerPool | A host-side table: descriptor number → texture / sampler | The value of a separate texture handle is the descriptor number |
-| Program | One `MTLFunction` per stage | Keyed by the hash of the shader's control section and loaded from the offline-translated `<key>_b.metallib`; nothing is translated at run time. For the translation chain see the README |
+| Program | One `MTLFunction` per stage | Keyed by the hash of the shader's control section plus code area and loaded from the offline-translated `<key>_b.metallib`; nothing is translated at run time. For the translation chain see the README |
 | State objects (Blend / Color / ChannelMask / Multisample / Polygon / DepthStencil / VertexAttrib / VertexStream) | Fields of the render pipeline descriptor + `MTLDepthStencilState` + encoder state | The game copies these small structures by value, and the host side packs them in place with bit fields. Render pipelines and depth-stencil states are cached by state hash |
-| CommandBuffer | A record stream recorded in the game's command memory | Replayed at submit time |
+| CommandBuffer | A record stream recorded in the game's command memory | Replayed at submit time. The host's record inside the game's `NVNcommandBuffer` leaves byte +0x10 alone: the game's inlined NVN code writes it directly. When a recording outgrows the game's memory the host lends a segment, released only when the game re-grants the memory the recording started in; `GetCommandMemoryUsed` counts the bytes in both |
 | Queue | Metal command queue | `SubmitCommands` = replay and submit |
 | Sync | The fence value of a submission | `FenceSync` records the fence value of the most recent submission; `SyncWait` lets the caller through only after the GPU has actually completed up to that value (the completed value of an `MTLSharedEvent`). Waiting on a sync object that was never fenced returns a timeout directly |
 | Event | A 32-bit value in game memory | The value is written after the GPU completes |

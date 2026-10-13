@@ -21,7 +21,7 @@ English: [README.md](README.md)
 - **回放层 `nvn/nvn_mtl.m`**：提交时把记录流回放成 Metal 命令。
   - 内存池建成零拷贝的 `MTLBuffer`，GPU 地址等于 CPU 地址，所以只支持统一内存设备。
   - 「GPU 完成」的可见效果（同步对象就绪、事件写值、计数器）只在 Metal 命令缓冲真正完成之后发生。
-  - 管线状态、深度模板状态按状态哈希缓存；启动时按预热清单在后台预建着色器与管线。
+  - 管线状态、深度模板状态按状态哈希缓存；启动时按预热清单（随包的种子清单 `pso_manifest.tsv`，再加本机的 `pso_user.tsv`，见下）在后台预建着色器与管线。建不成的管线记为失败、不再重试，按着色器键报红一次。
   - 游戏打包贴图是 Tegra 块线性排布，上传前解排布（见 `tex/README.zh-CN.md`）。
   - 出图：游戏的交换链贴图画到 `CAMetalLayer`，出图节拍由 `nvn/nvn_pace.h` 的节拍器排。
 
@@ -42,7 +42,7 @@ Switch 原版着色器包
 
 整条链由 `tools/dmsh_build.py` 驱动，`setup.sh` 会替你跑。要点：
 
-- **键**：每个着色器以它的控制段（0x880 字节）的 sha256 前 16 位十六进制为键。运行时游戏把控制段交给 `nvnProgramSetShaders`，回放层算出同一个键去找库。
+- **键**：每个着色器以「控制段（前 0x880 字节）+ 代码区」的 sha256 前 16 位十六进制为键（马力欧有很多着色器控制段相同、代码不同）。运行时游戏把两者交给 `nvnProgramSetShaders`，回放层算出同一个键去找库。
 - **产物**：`<键>_b.metallib`（着色器库）、`<键>_b.json`（回放用的反射：各绑定的种类、槽号、在参数缓冲里的序号等）、`<键>_b.metal`（MSL 源）。部分片元着色器另有 `<键>_bf.metallib`，是「可读 tile」版本，供通道合并用（见 `tools/dmsh_fetch.py` 文件头）。目录里的 `_b_build.json` 记本次每个键的成败。
 - **`nvn/shader_map.tsv`**：着色器映射表，每个着色器变体一行。运行时只用其中「键 → 阶段（顶点 / 片元 / 计算）」。
 - **`nvn/shader_facts.tsv`**：翻译查询的作答表。翻译器需要知道一些机器码里读不出的事实（贴图的维度类型、图像格式、顶点属性与片元输出的分量类型、计算着色器的线程组大小与共享内存字节数），这张表按键给出答案。表随仓库，出着色器库只读这张表；表由 `tools/dmsh_facts.py` 维护，文件头有说明。
@@ -53,7 +53,9 @@ Switch 原版着色器包
   - `dmsh_chain.py --header`：重写 `nvn/dmsh_chain.h`。
   - 本机的 Xcode 或 spirv-cross 版本与仓库登记的不同是正常的，`setup.sh` 会自动按本机工具重新登记。
 - **`nvn/c1_full.tsv`**：着色器自带常数段（c1）的下标清单，由 `tools/c1_guard.py` 扫描翻译出的 MSL 生成，列出「运行时下标没能证明有界」的着色器键。首行记着它对应的 `b-<V>`。回放层对清单里的着色器给 c1 单独分配整块 64 KiB 缓冲；清单缺失或版本对不上时报红，并对全部着色器都这样保守处理。
-- **`nvn/pso_manifest.tsv`**：预热种子清单，记启动后最先用到的着色器与管线，行序就是预建顺序，不要排序。
+- **`nvn/shader_pairs.tsv`**：每个 BNSH 变体的（顶点键, 像素键），由 `tools/shader_split.py` 写出。Metal 要求像素着色器的每个输入都是顶点着色器的输出才肯建管线，而 Maxwell 对没写的属性给缺省值；所以 `dmsh_build.py` 给顶点着色器补上配对像素着色器读、它却没写的输出，值为 (0, 0, 0, 1)（`vs_pad`）。这张表算进翻译链版本。
+- **多个游戏版本**：`shader_split.py` 的 RomFS 与 `main` 参数可写成逗号分隔的列表（基础版在前），输出并集；映射表、作答表、配对表目前覆盖马力欧 v0 与 1.2.1。
+- **`nvn/pso_manifest.tsv`**：随包的预热种子清单：启动时预建的着色器（`S`）、渲染管线（`R`，即 `nvn/nvn_pso_skey.h` 里 `pso_skey` 的十六进制）与计算管线（`C`）。行序就是预建顺序（首次使用的顺序），不要排序。与它配套的是 `pso_user.tsv`：宿主每次不得不当场建着色器或管线时追加记到存档目录旁，下次启动在种子清单之后预建。两者都只以键指认着色器、只描述管线设置，所以一台设备录的清单在别的设备上同样有效；本构建用不上的行跳过。录到的行可以追加到种子清单表头之后（目前为空）。
 - **程序本体内嵌的着色器**：主程序里另有 4 个计算着色器不在着色器包里，按反汇编手写成 MSL，在 `nvn/nvn_builtin.h`。
 
 翻译时遵循的绑定约定（`tools/maxwell_refs.py` 文件头）：
@@ -103,7 +105,7 @@ Switch 原版着色器包
 
 ## 构建
 
-图形层没有单独的库。`dm/host/Makefile` 按通配把 `dm/gfx/*.c`、`dm/gfx/nvn/` 与 `dm/gfx/tex/` 下的源文件编进宿主 `dmhost`；iOS App 由 `dm/ios/run.sh build` 构建，同时把映射表、`pso_manifest.tsv`、`c1_full.tsv` 和 `b-<V>/` 着色器库拷进 App。`tests/` 与 `metal/` 不进宿主。
+图形层没有单独的库。`dm/host/Makefile` 按通配把 `dm/gfx/*.c`、`dm/gfx/nvn/` 与 `dm/gfx/tex/` 下的源文件编进宿主 `dmhost`；iOS App 由 `dm/ios/tools/build_ipa.sh` 构建，同时把映射表、`pso_manifest.tsv`、`c1_full.tsv` 和 `b-<V>/` 着色器库拷进 App。`tests/` 与 `metal/` 不进宿主。
 
 着色器库由 `setup.sh` 生成：
 
@@ -145,6 +147,7 @@ make -C dm/gfx/metal run        # 离屏示例自测，见 metal/README.zh-CN.md
 | `DM_MSL_DIR=目录` | 着色器库的上级目录，宿主从其下的 `b-<V>/` 加载。在 Mac 上跑宿主时设为 `$DM_ROOT/build/cache/metal_shader_cache` |
 | `DM_PSO_MANIFEST=路径` 或 `off` | 换一份预热清单，或关掉预热 |
 | `DM_PSO_RECORD=路径` | 把本次运行用到的着色器与管线追加记到文件，用来重录预热清单 |
+| `DM_PSO_USER=路径` | 本机「当场建的着色器与管线」清单放哪里（缺省：`DM_SAVE` 父目录下的 `pso_user.tsv`） |
 
 日志与抓取：
 
@@ -177,7 +180,7 @@ make -C dm/gfx/metal run        # 离屏示例自测，见 metal/README.zh-CN.md
 下面这些路径没有实现，走到会在日志里报红（`nvn/nvn_mtl.m` 里的 `RED_ONCE`）：
 
 - 渲染通道中途的清除、带部分掩码或部分剪裁的清色；
-- 带索引的四边形图元、8 位索引；
+- 带索引的四边形图元（8 位索引在回放时扩成 16 位）；
 - 部分形态的贴图到贴图拷贝与清贴图。
 
 `MultiDraw*IndirectCount`、`DispatchComputeIndirect`、`SetDepthBounds`、`DownsampleTextureView` 等列在 `g_nops` 里的函数是空实现，调用不报红也不生效。

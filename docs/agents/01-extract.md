@@ -23,6 +23,8 @@ ht -t nca --exefsdir=$W/data/v0/ExeFS --romfsdir=$W/data/v0/RomFS $W/build/nsp/<
 
 - ExeFS holds `main.npdm`, `rtld` (usually), `main`, `sdk` and sometimes `subsdk*` modules (NSO). D2R and Mario both had only `main` + `sdk` worth loading.
 - Update NSPs: the update's Program NCA is a patch NCA; extract it with `--basenca=<base program nca>` so RomFS is the merged view. Keep base and update in separate directories (`data/v0`, `data/v<ver>`); the rewriter and the host take one ExeFS at a time.
+- Newer patch NCAs (seen: Mario 1.2.1, key generation 17) make hactool stop with `Invalid BKTR layout!`. `dm/tools/nx_extract` (C#, LibHac 0.19) handles them: `nx_extract <prod.keys> <base.nsp> <update.nsp> <out dir> [<base RomFS dir>]`. It reads the NCAs straight out of both NSPs (no 3+ GB intermediate NCA), imports the common tickets itself, prints the display version and module build IDs, and with a base RomFS dir writes identical files as APFS clones.
+- After an update, find every address the host or rewriter hard-codes for the old build (`CUTS` / `OBS` / `PARAMS` in `patch_nso.py`, `->base + 0x…` in the host) and carry it over with `dm/tools/nso_fnmap.py <old.orig.bin> <new.orig.bin> 0x…`: it matches functions with address bits masked and maps globals through their `adrp` references; check each result by disassembly (`sdis.py`). Also diff the imported SDK symbols: new imports that reach a system service need host implementations, or the real SDK aborts after connecting to `sm:`.
 - Decompressed NSO images for analysis: `dm/tools/nso.py <nso> <out.bin>` (lz4; use a venv that has `lz4`). `dm/tools/nso2elf.py` makes an ELF for Ghidra / REA / objdump.
 
 ## Workspace layout used so far
