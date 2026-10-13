@@ -28,6 +28,7 @@ typedef struct {
     uint8_t *base;             // 映像（含补丁区）在宿主地址空间的首址 | Start address of the image (including the patch area) in the host address space
     size_t size;
     uint64_t text_end, ro_off, data_off, patch_off, key_page_off, key_page_size;   // 来自改写器 fixups 头 | From the rewriter fixups header
+    char build_id[33];         // NSO 构建号前 16 字节（十六进制）；旧产物没有则为空 | First 16 bytes of the NSO build ID (hex); empty for older build outputs
     unsigned key_idx[8];
     const Elf64_Dyn *dyn;
     const Elf64_Sym *symtab;

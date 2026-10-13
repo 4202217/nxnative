@@ -15,7 +15,20 @@
 enum { AOC_WARLOCK = 1 };
 // DM_AOC_OWNED=0：测试开关，回到「无 DLC」前提（只用于对拍未装 DLC 时录的真值；缺省 = 拥有）
 // DM_AOC_OWNED=0: test switch, back to the "no DLC" premise (only for lockstep comparison against ground truth recorded without the DLC installed; default = owned)
-static int aoc_owned(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_AOC_OWNED"); v = !(e && !strcmp(e, "0")); if (!v) LOG("DM_AOC_OWNED=0：aoc 报告 0 个追加内容（对拍测试用）"); } return v; }
+// 已拥有的追加内容（术士君临）只属于 D2R（main 构建 db0507f3…）：别的构建（马力欧）缺省 0 个——用户手里没有马力欧的追加内容文件，
+// 马力欧 1.2.1 在 Switch 2 上靠它判断有没有升级包。DM_AOC_OWNED=0 / 1 覆盖缺省
+// The owned add-on content (the Warlock expansion) belongs to D2R only (main build db0507f3…): other builds (Mario) default to none -- the user has no Mario add-on content files,
+// and on a Switch 2 Mario 1.2.1 uses it to tell whether the upgrade pack is owned. DM_AOC_OWNED=0 / 1 overrides the default
+static int aoc_owned(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_AOC_OWNED"); v = 0;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) v = !strcmp(g_mod[i].build_id, "db0507f36b84200ac05f75d76ed5026f");
+        if (e) v = strcmp(e, "0") != 0;
+        LOG("aoc：报告 %d 个追加内容（%s）", v, e ? "DM_AOC_OWNED" : "按 main 构建号");
+    }
+    return v;
+}
 HLE_FORCE("_ZN2nn3aoc17CountAddOnContentEv", "追加内容数：已拥有术士君临 1 个（复刻范围必须保留）", int, h_aoc_Count, void) { return aoc_owned() ? 1 : 0; }
 // ListAddOnContent(out, 起始下标, 最多个数)：按已拥有序号列表 {1} 从起始下标起写出，返回写出个数
 // ListAddOnContent(out, start index, max count): writes out from the owned index list {1} starting at the start index, returns the number written

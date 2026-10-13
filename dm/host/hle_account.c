@@ -22,6 +22,11 @@ HLE_FORCE("_ZN2nn7account13ListOpenUsersEPiPNS0_3UidEi", "已打开用户列表�
 HLE_FORCE("_ZN2nn7account16ShowUserSelectorEPNS0_3UidERKNS0_21UserSelectionSettingsE", "用户选择小程序；宿主直接选本地用户", Result, h_acc_ShowSel, Uid *out, const void *settings) {
     (void)settings; *out = k_uid; return RES_OK;
 }
+// 取走系统代应用打开的用户（马力欧 1.2.1 起先问它，0 个再走 TryOpenPreselectedUser；游戏只看个数、不看返回值）：
+// 宿主没有代开的用户，给 0 个，游戏照 v0 的路自己打开预选用户
+// Take the users the system opened on the application's behalf (Mario 1.2.1 asks this first and falls back to TryOpenPreselectedUser on 0; the game only reads the count, not the return value):
+// the host has no such users and returns 0, so the game opens the preselected user itself, as in v0
+HLE_FORCE("_ZN2nn7account12PopOpenUsersEPiPNS0_10UserHandleEi", "系统代开的用户：无（游戏改走预选用户）", void, h_acc_PopOpen, int *n, UserHandle *out, int max) { (void)out; (void)max; *n = 0; }
 HLE_FORCE("_ZN2nn7account22TryOpenPreselectedUserEPNS0_10UserHandleE", "启动时预选用户；恒为本地用户（返回 bool）", unsigned, h_acc_TryOpenPre, UserHandle *h) {
     h->v[0] = k_uid.v[0]; h->v[1] = k_uid.v[1]; h->v[2] = HANDLE_MAGIC; return 1;
 }

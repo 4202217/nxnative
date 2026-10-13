@@ -71,6 +71,7 @@ void hid_keys_init(void) {
 }
 
 static uint32_t connected_id(void) { return dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1; }
+uint32_t hle_hid_connected_npad(void) { return connected_id(); }   // nfp 的 NFC 设备挂在这个手柄上（hle_sdk16.c） | nfp's NFC device sits on this controller (hle_sdk16.c)
 static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
 static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // 两路里偏得多的那个 | whichever of the two paths is deflected more

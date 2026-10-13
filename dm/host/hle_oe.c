@@ -222,6 +222,11 @@ static void scale3d_tick(void) {
         const char *e = getenv("DM_3D_SCALE"); want_cfg = TARGET_OS_IPHONE ? 0.75f : 1.0f;
         if (e) { char *end; float v = strtof(e, &end); if (end == e || *end || !(v >= 0.5f && v <= 1.0f)) die("DM_3D_SCALE 非法：%s（要求 0.5–1.0）", e); want_cfg = v; }
         for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) main = &g_mod[i];
+        // 上面的地址（渲染器全局指针、改分辨率函数、成员偏移）都是 D2R 构建 db0507f3… 的；别的构建（马力欧各版）同一地址是不相干的数据与代码
+        // （马力欧 v0 的 main+0x8582f0 在一个静态初始化函数中间），照写照调会改坏内存。只在这个构建上开
+        // The addresses above (renderer global pointer, resolution change function, member offsets) all belong to D2R build db0507f3…; in other builds (every Mario version) the same addresses are unrelated data and code
+        // (Mario v0's main+0x8582f0 is in the middle of a static initializer), so writing and calling them would corrupt memory. Only enabled on that build
+        if (main && strcmp(main->build_id, "db0507f36b84200ac05f75d76ed5026f")) { LOG("3D 渲染比例：main 构建 %s 没有对应地址，不调（只认 D2R db0507f3…）", main->build_id[0] ? main->build_id : "（产物无构建号）"); main = NULL; }
     }
     int lv = atomic_load(&g_scale3d_level);   // 动态级：0 = 配置值，1 = 0.72，2 = 0.70（都不高于配置值） | dynamic level: 0 = configured value, 1 = 0.72, 2 = 0.70 (none higher than the configured value)
     float dyn = lv == 0 ? want_cfg : lv == 1 ? SCALE3D_MID : SCALE3D_MIN; if (dyn > want_cfg) dyn = want_cfg;

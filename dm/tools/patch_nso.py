@@ -62,6 +62,11 @@ CUTS = {
     # Where this differs from hardware is not known (every allocation size before this block is determined by game code and data); for now every resource heap gets +16 KB.
     (0x1e62fc, 'e00317aa', 'e0124091', '资源堆尺寸：mov x0,x23 → add x0,x23,#0x4000（ExpHeap::create 的尺寸参数 +16 KB）'),
   ],
+  # Super Mario Bros. Wonder 1.2.1（v327680）main：同上。位置由 dm/tools/nso_fnmap.py 从 v0 搬来（所在函数 0x1e603c → 0x1cf6f0 屏蔽地址后全同，ExpHeap::create 0x4aac38 → 0x4c4a18）
+  # Super Mario Bros. Wonder 1.2.1 (v327680) main: same as above. Location carried over from v0 by dm/tools/nso_fnmap.py (containing function 0x1e603c → 0x1cf6f0 identical after address masking, ExpHeap::create 0x4aac38 → 0x4c4a18)
+  'ff773e90972d544eb79406eaa65396d5': [
+    (0x1cf9b0, 'e00317aa', 'e0124091', '资源堆尺寸：mov x0,x23 → add x0,x23,#0x4000（ExpHeap::create 的尺寸参数 +16 KB）'),
+  ],
   'db0507f36b84200ac05f75d76ed5026f': [
     # （放进所有产物共用的基础改写）：游戏显存分配器预算 260 MB → 512 MB
     # (Placed in the base rewrite shared by all build outputs): game video memory allocator budget 260 MB → 512 MB
@@ -867,6 +872,7 @@ elif os.path.exists(P('rules.tsv')):
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
+    f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # 宿主据此认构建：写死地址的功能只在它们所属的构建上开 | the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:
     for ret, k, arg, orig in gates: f.write(f'{ret:#x}\t{k}\t{arg}\t{orig:#x}\n')
 with open(P('sites.tsv'), 'w') as f:
