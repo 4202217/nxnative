@@ -546,14 +546,66 @@ static inline void enc_b_copy_buffer_texture(id e, id<MTLBuffer> s, NSUInteger s
 static inline void enc_b_copy_texture_buffer(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin o, MTLSize z, id<MTLBuffer> d, NSUInteger doff, NSUInteger row, NSUInteger img) { [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:o sourceSize:z toBuffer:d destinationOffset:doff destinationBytesPerRow:row destinationBytesPerImage:img]; }
 static inline void enc_b_copy_texture(id e, id<MTLTexture> s, NSUInteger sl, NSUInteger lv, MTLOrigin so, MTLSize z, id<MTLTexture> d, NSUInteger dl, NSUInteger dv, MTLOrigin doo) { [e copyFromTexture:s sourceSlice:sl sourceLevel:lv sourceOrigin:so sourceSize:z toTexture:d destinationSlice:dl destinationLevel:dv destinationOrigin:doo]; }
 static void blit_note(void);   // 逐通道转储：拷贝 / 缓冲更新结束了渲染通道（定义在 PD 之后） | Per-pass dump: a copy / buffer update ended the render pass (defined after PD)
-static id<MTL4ComputeCommandEncoder> blit(void) { blit_note(); rp_end(); if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice]; } return g_blit; }
+// 拷贝编码器内的先后：Metal 4 同一编码器里的拷贝 / 填充互不排序（无自动冒险跟踪），后一条读写前一条写过的范围要编码器内屏障。
+// 缺了它，SMBW 每帧对同一 uniform 槽「先写 4 字节 −1、再写 16 字节系数」两次更新偶尔反序落地，喷泉水面的波形模拟拿 −1 当自身系数、发散，水面顶点被推到屏幕顶。
+// 缓冲操作按客体地址范围判冲突（读写前面写过的范围才加屏障）；贴图操作只要编码器里已有操作就加。
+// Ordering inside the copy encoder: Metal 4 does not order copies / fills within one encoder (no automatic hazard tracking); an operation reading or writing a range an earlier one wrote needs an intra-encoder barrier.
+// Without it, SMBW's two updates per frame to the same uniform slot ("write 4 bytes −1, then 16 bytes of coefficients") occasionally landed in reverse order; the fountain water wave simulation took −1 as its self coefficient, diverged, and the water vertices were pushed to the top of the screen.
+// Buffer operations check conflicts by guest address range (barrier only when reading or writing a range written earlier); texture operations get one whenever the encoder already holds an operation.
+enum { BW_MAX = 64 };
+static uint64_t g_bw_lo[BW_MAX], g_bw_hi[BW_MAX]; static int g_bw_n, g_blit_ops; static uint64_t g_blit_barriers;
+static id<MTL4ComputeCommandEncoder> blit_raw(void) { blit_note(); rp_end(); if (!g_blit) { ser_gate(); g_blit = enc_b_begin(g_cb); [g_blit barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice]; g_bw_n = 0; g_blit_ops = 0; } return g_blit; }
+static void blit_barrier(void) {
+    static int off = -1; if (off < 0) { const char *e = getenv("DM_NVN_BLIT_ORDER"); off = e && !strcmp(e, "0"); if (off) MLOG("DM_NVN_BLIT_ORDER=0：拷贝编码器内不加屏障（诊断，会复现喷泉竖条）"); }
+    if (!off) [g_blit barrierAfterEncoderStages:MTLStageAll beforeEncoderStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+    g_bw_n = 0; g_blit_ops = 0; g_blit_barriers++;
+}
+uint64_t mtl_blit_barriers(void) { return g_blit_barriers; }
+static int bw_hit(uint64_t lo, uint64_t hi) { for (int i = 0; i < g_bw_n; i++) if (lo < g_bw_hi[i] && g_bw_lo[i] < hi) return 1; return 0; }
+// 缓冲 → 缓冲 / 填充：读 [rlo, rhi)（无读给 0, 0）、写 [wlo, whi) | buffer → buffer / fill: reads [rlo, rhi) (0, 0 when nothing is read), writes [wlo, whi)
+static id<MTL4ComputeCommandEncoder> blit_buf(uint64_t rlo, uint64_t rhi, uint64_t wlo, uint64_t whi) {
+    id<MTL4ComputeCommandEncoder> e = blit_raw();
+    if (g_blit_ops && (g_bw_n == BW_MAX || (rhi > rlo && bw_hit(rlo, rhi)) || bw_hit(wlo, whi))) blit_barrier();
+    g_bw_lo[g_bw_n] = wlo; g_bw_hi[g_bw_n++] = whi; g_blit_ops++;
+    return e;
+}
+// 贴图相关的拷贝 / 读回：前面有操作就先屏障，之后的操作也要等它 | texture copies / readbacks: barrier if anything came before, and later operations must wait for it too
+static id<MTL4ComputeCommandEncoder> blit(void) {
+    id<MTL4ComputeCommandEncoder> e = blit_raw();
+    if (g_blit_ops) blit_barrier();
+    g_bw_lo[0] = 0; g_bw_hi[0] = ~0ull; g_bw_n = 1; g_blit_ops = 1;   // 记成「全范围已写」：下一条一律加屏障 | record as "everything written": the next operation always gets a barrier
+    return e;
+}
 
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) {
     if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
     void *sb, *db; uint64_t so, dof;
     if (!mtl_addr(src, n, &sb, &so) || !mtl_addr(dst, n, &db, &dof))
         MDIE("缓冲拷贝地址不在任何内存池内 src=%#llx dst=%#llx n=%#llx", (unsigned long long)src, (unsigned long long)dst, (unsigned long long)n);
-    enc_b_copy_buffer(blit(), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
+    enc_b_copy_buffer(blit_buf(src, src + n, dst, dst + n), (__bridge id<MTLBuffer>)sb, so, (__bridge id<MTLBuffer>)db, dof, n);
+}
+
+// 内联 uniform 更新（UpdateUniformBuffer）：数据在编码时就拷进宿主自己的共享环，再按序拷到目标。
+// 原先 GPU 执行时才从命令内存读——游戏回收命令内存若早于 GPU 执行，读到的是下一批命令的字节（SMBW 喷泉水面的波形模拟系数被换掉，模拟发散到 ±65504）。
+// Inline uniform update (UpdateUniformBuffer): the data is copied into the host's own shared ring at encode time, then copied in order to the destination.
+// Previously it was read from command memory only when the GPU executed - if the game recycles command memory before the GPU runs, it reads the bytes of the next batch of commands (SMBW's fountain water wave simulation got the wrong coefficients and diverged to ±65504).
+static id<MTLBuffer> g_ubs_buf; static size_t g_ubs_off, g_ubs_size;
+void mtl_sub_update(const void *data, uint64_t dst, uint64_t n) {
+    if (!n) return;
+    if (g_npend < PEND_MAX) { g_pend_lo[g_npend] = dst; g_pend_hi[g_npend++] = dst + n; } else g_pend_over = 1;
+    void *db; uint64_t dof;
+    if (!mtl_addr(dst, n, &db, &dof)) MDIE("uniform 更新目标不在任何内存池内 dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
+    size_t need = (n + 15u) & ~(size_t)15u;
+    if (!g_ubs_buf || g_ubs_off + need > g_ubs_size) {
+        if (g_ubs_buf) defer_obj_release(g_ubs_buf);   // 已编的拷贝还引用着旧块：本次提交跑完再放 | copies already encoded still reference the old block: release after this submission completes
+        g_ubs_size = MAX((size_t)1 << 20, need);
+        g_ubs_buf = [g_dev newBufferWithLength:g_ubs_size options:MTLResourceStorageModeShared];
+        if (!g_ubs_buf) MDIE("uniform 更新环分配失败 %#zx", g_ubs_size);
+        res_add(g_ubs_buf); g_ubs_off = 0;
+    }
+    memcpy((uint8_t *)g_ubs_buf.contents + g_ubs_off, data, n);
+    enc_b_copy_buffer(blit_buf(0, 0, dst, dst + n), g_ubs_buf, g_ubs_off, (__bridge id<MTLBuffer>)db, dof, n);
+    g_ubs_off += need;
 }
 
 // 提交内按序填充缓冲：四个字节一致 → fillBuffer；否则从一块 64 KiB 图案缓冲分段拷
@@ -564,11 +616,11 @@ void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) {
     void *db; uint64_t dof;
     if (!mtl_addr(dst, n, &db, &dof)) MDIE("缓冲填充地址不在任何内存池内 dst=%#llx n=%#llx", (unsigned long long)dst, (unsigned long long)n);
     uint8_t b0 = (uint8_t)value;
-    if (value == (uint32_t)b0 * 0x01010101u) { [blit() fillBuffer:(__bridge id<MTLBuffer>)db range:NSMakeRange(dof, n) value:b0]; return; }
+    if (value == (uint32_t)b0 * 0x01010101u) { [blit_buf(0, 0, dst, dst + n) fillBuffer:(__bridge id<MTLBuffer>)db range:NSMakeRange(dof, n) value:b0]; return; }
     enum { PAT = 0x10000 }; static __strong id<MTLBuffer> pat; static uint32_t pat_v; static int pat_ok;
     if (!pat_ok || pat_v != value) { uint32_t *tmp = malloc(PAT); for (unsigned i = 0; i < PAT / 4; i++) tmp[i] = value;
         pat = [g_dev newBufferWithBytes:tmp length:PAT options:MTLResourceStorageModeShared]; free(tmp); pat_v = value; pat_ok = 1; res_add(pat); }
-    for (uint64_t off = 0; off < n; off += PAT) { uint64_t k = n - off < PAT ? n - off : PAT; enc_b_copy_buffer(blit(), pat, 0, (__bridge id<MTLBuffer>)db, dof + off, k); }
+    for (uint64_t off = 0; off < n; off += PAT) { uint64_t k = n - off < PAT ? n - off : PAT; enc_b_copy_buffer(blit_buf(0, 0, dst + off, dst + off + k), pat, 0, (__bridge id<MTLBuffer>)db, dof + off, k); }
 }
 
 static void post(post_op o) {
@@ -1194,6 +1246,62 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp) {
     up_flush();
     return mt;
 }
+// 新建的非预排布贴图清零：Metal 新贴图的内容未定义，Switch 上新映射的内存池读出 0。游戏有依赖：SMBW 喷泉水面的 512×1 RGBA16F 波形贴图
+// 每帧「读上一帧 → 画进渲染目标 → 拷回」，从没清过；未定义的初值在反馈里一直荡，水面顶点被推到屏幕顶（喷泉上方的竖条）。
+// 从一块共享全零缓冲按级 / 层拷进去，随上传批执行（排在本次回放之前）。多重采样、深度 / 模板、块压缩格式不清（游戏用前必清，也拷不进去）。
+// Zero newly created non-packaged textures: a new Metal texture's content is undefined, while a freshly mapped memory pool on the Switch reads as 0. Games depend on it: SMBW's fountain water surface uses a 512×1 RGBA16F wave texture
+// that every frame is "read last frame → render into a render target → copy back" and is never cleared; the undefined initial value keeps swinging through the feedback and pushes the water vertices to the top of the screen (the tall panels above the fountain).
+// Copied level by level / slice by slice from one shared all-zero buffer, executed with the upload batch (ordered before this replay). Multisample, depth / stencil and block-compressed formats are not cleared (games always clear them before use, and they cannot be copied into anyway).
+static size_t mtl_pf_bytes(MTLPixelFormat pf) {
+    switch ((int)pf) {
+        case 10: case 11: case 12: case 13: case 14: return 1;                                   // R8
+        case 20: case 22: case 23: case 24: case 25: case 30: case 31: case 32: case 33: case 34: return 2;   // R16 / RG8
+        case 40: case 41: case 42: case 43: return 2;                                            // 16 位压缩色 | packed 16-bit colour
+        case 53: case 54: case 55: case 60: case 62: case 63: case 64: case 65:
+        case 70: case 71: case 72: case 73: case 74: case 80: case 81:
+        case 90: case 91: case 92: case 93: case 94: return 4;                                   // R32 / RG16 / RGBA8 / BGRA8 / 10-10-10-2 / 11-11-10 / 9-9-9-5
+        case 103: case 104: case 105: case 110: case 112: case 113: case 114: case 115: return 8;   // RG32 / RGBA16
+        case 123: case 124: case 125: return 16;                                                 // RGBA32
+    }
+    return 0;
+}
+// 共用的全零缓冲（新贴图清零、剪裁清零用）：不够大就换一块更大的，旧块等在途提交跑完再放
+// Shared all-zero buffer (for zeroing new textures and scissored zero clears): replaced by a bigger one when too small; the old one is released after in-flight submissions finish
+static id<MTLBuffer> zero_buf(size_t need) {
+    static id<MTLBuffer> zb; static size_t zn;
+    if (need > zn) {
+        size_t n = MAX(need, (size_t)4 << 20);
+        id<MTLBuffer> b = [g_dev newBufferWithLength:n options:MTLResourceStorageModeShared];
+        if (!b) return nil;
+        memset(b.contents, 0, n); res_add(b);
+        if (zb) defer_obj_release(zb);
+        zb = b; zn = n;
+    }
+    return zb;
+}
+static uint64_t g_tex_zeroed;
+static void tex_zero_fill(id<MTLTexture> mt) {
+    static int warned;
+    if (!atomic_load(&g_sub_thread_set) || !on_sub_thread()) return;   // 上传批只属于提交线程 | the upload batch belongs to the submit thread only
+    MTLTextureType tt = mt.textureType;
+    if (tt == MTLTextureType2DMultisample || tt == MTLTextureType2DMultisampleArray || tt == MTLTextureTypeTextureBuffer) return;
+    size_t bpp = mtl_pf_bytes(mt.pixelFormat);
+    if (!bpp) { if (!warned++) MLOG("新建贴图清零：像素格式 %lu 不清（深度 / 模板 / 压缩等）", (unsigned long)mt.pixelFormat); return; }
+    NSUInteger slices = mt.arrayLength * (tt == MTLTextureTypeCube || tt == MTLTextureTypeCubeArray ? 6 : 1);
+    size_t need = (size_t)mt.width * bpp * mt.height * mt.depth;   // 第 0 级一层最大 | level 0, one slice is the largest
+    if (need > (64u << 20)) { static int big; if (!big++) MLOG("新建贴图清零：%lux%lux%lu 超过 64 MB，不清", (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)mt.depth); return; }
+    id<MTLBuffer> zb = zero_buf(need); if (!zb) return;
+    up_begin();
+    for (NSUInteger l = 0; l < mt.mipmapLevelCount; l++) {
+        NSUInteger w = MAX(mt.width >> l, 1u), h = MAX(mt.height >> l, 1u), z = tt == MTLTextureType3D ? MAX(mt.depth >> l, 1u) : 1;
+        for (NSUInteger y = 0; y < slices; y++) up_blit_add(zb, 0, w * bpp, w * bpp * h, MTLSizeMake(w, h, z), mt, y, l);
+    }
+    [g_up_texs addObject:mt];
+    if (!g_cb) up_flush();
+    if (!g_tex_zeroed++) MLOG("新建贴图清零：开（Metal 新贴图内容未定义，Switch 新内存读 0）");
+}
+
+static int clear_rect_zero(int i);
 // 线性贴图（LINEAR）放在 CPU 可见池里：游戏用 CPU 直接往池内存写（SMBW 的字形缓存：2048×8192 R8，IMAGE|LINEAR，池 CPU_UNCACHED|GPU_CACHED，
 // 字体引擎在 CPU 上把字形画进去）。GPU 私有贴图看不到这些写入 → 菜单 / 对话框文字全空。统一内存下直接在池缓冲上建线性贴图（零拷贝），GPU 执行时读到当前内容，同 NVN 语义。
 // Linear textures (LINEAR) in a CPU-visible pool: the game writes the pool memory directly from the CPU (SMBW's glyph cache: 2048×8192 R8, IMAGE|LINEAR, pool CPU_UNCACHED|GPU_CACHED,
@@ -1217,10 +1325,23 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
 }
 static id<MTLTexture> tex_mtl_(const tex_t *ct);
 static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct); AP_E(4); return r; }
+static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
     int packaged = t->has_layout && t->mem;
+    {   // 诊断 DM_NVN_TEXINFO=宽x高：该尺寸的贴图首次解析时记下存储与描述（判两张贴图是否同一块存储、为何没合用） | Diagnostic DM_NVN_TEXINFO=WxH: log storage and description of textures of that size on first resolution (to tell whether two textures share storage and why they were not merged)
+        static int ti = -1; static uint32_t tw, th; static uint64_t last[64]; static int nl;
+        if (ti > 0 && t->d.width == tw && t->d.height == th && g_texinfo_n < 8) { int dup = 0; for (int i = 0; i < g_texinfo_n; i++) dup |= g_texinfo_ser[i] == t->serial; if (!dup && !(t->d.flags & 8)) g_texinfo_ser[g_texinfo_n++] = t->serial; }   // 非渲染目标（无 COMPRESSIBLE）的记下，供 DM_NVN_TEXRAW=info | remember the non-render-target ones (no COMPRESSIBLE) for DM_NVN_TEXRAW=info
+        if (ti < 0) { const char *e = getenv("DM_NVN_TEXINFO"); ti = e && sscanf(e, "%ux%u", &tw, &th) == 2; }
+        if (ti && t->d.width == tw && t->d.height == th) {
+            int seen = 0; for (int i = 0; i < nl; i++) if (last[i] == t->serial) seen = 1;
+            static uint64_t n; if (!seen && (n++ < 40 || n % 600 == 0)) { if (nl < 64) last[nl++] = t->serial; else last[n % 64] = t->serial;
+                MLOG("TEXINFO ser=%llu 预排布=%d has_layout=%d mem=%p pool=%p(%#x) off=%#llx 目标=%d 格式=%#x 标志=%#x 采样=%d %ux%ux%u 级=%u 跨距=%u 块高=%d",
+                     (unsigned long long)t->serial, packaged, t->has_layout, t->mem, t->pool, t->pool ? t->pool->flags : 0, (unsigned long long)t->off, t->d.target, t->d.format, t->d.flags, t->d.samples,
+                     t->d.width, t->d.height, t->d.depth, t->d.levels, t->d.stride, t->d.pkg_block_h); }
+        }
+    }
     id have = serial_get(t->serial);
     if (packaged) {
         NvPkg *pk = have;
@@ -1273,6 +1394,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         if (!d) return nil;
         mt = [g_dev newTextureWithDescriptor:d];
         if (!mt) { RED_ONCE(2, "建 MTLTexture 失败 %ux%u 格式 %#x 目标 %d", t->d.width, t->d.height, t->d.format, t->d.target); return nil; }
+        res_add(mt); tex_zero_fill(mt);   // 先登记驻留再清零（拷贝目标也要驻留） | register residency before zeroing (the copy destination must be resident too)
     }
     if (g_allocprof > 0) { static int n; if (n++ < 30 || n % 500 == 0) MLOG("新建贴图（%s）#%d ser=%llu %ux%ux%u 格式 %#x 目标 %d 级 %u 存储 %p", __func__, n, (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, (void *)t->mem); }
     if (getenv("DM_NVN_TEXCPU") && t->pool && !(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) MLOG("CPU 可见池上的非预排布贴图 ser=%llu %ux%ux%u 格式 %#x 目标 %d 级 %u 贴图标志 %#x 池标志 %#x 存储 %p", (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels, t->d.flags, t->pool->flags, (void *)t->mem);
@@ -1886,6 +2008,26 @@ static int scissor_full(const tex_t *t, const view_t *v, int has_v) {
     NSUInteger level = has_v && v->set_levels ? v->base_level : 0;
     NSUInteger w = mip_extent(t->d.width, level), h = mip_extent(t->d.target == 0 || t->d.target == 3 ? 1 : t->d.height, level);
     return !R.has_sc || (R.sc.x <= 0 && R.sc.y <= 0 && (int64_t)R.sc.x + R.sc.w >= (int64_t)w && (int64_t)R.sc.y + R.sc.h >= (int64_t)h);
+}
+// 剪裁清零（见 OP_CLEAR_COLOR）：先落地挂起的清除，再在回放流的拷贝编码器里从全零缓冲拷进附件那一级 / 层的剪裁矩形。多重采样、3D、深度 / 压缩格式不做（返回 0 走原路）
+// Scissored zero clear (see OP_CLEAR_COLOR): land pending clears first, then copy from the zero buffer into the scissor rectangle of the attachment's level / slice in the replay stream's copy encoder. Multisample, 3D, depth / compressed formats are not handled (returns 0 and takes the old path)
+static int clear_rect_zero(int i) {
+    const tex_t *t = R.rt.color[i]; id<MTLTexture> mt = tex_mtl(t); if (!mt) return 0;
+    MTLTextureType tt = mt.textureType;
+    if (tt == MTLTextureType2DMultisample || tt == MTLTextureType2DMultisampleArray || tt == MTLTextureType3D || tt == MTLTextureTypeTextureBuffer) return 0;
+    size_t bpp = mtl_pf_bytes(mt.pixelFormat); if (!bpp) return 0;
+    const view_t *v = &R.rt.cview[i]; int hv = R.rt.has_cview[i];
+    NSUInteger lv = hv && v->set_levels ? v->base_level : 0, sl = hv && v->set_layers ? v->min_layer : 0;
+    long lw = (long)MAX(mt.width >> lv, 1u), lh = (long)MAX(mt.height >> lv, 1u);
+    long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+    if (x1 > lw) x1 = lw; if (y1 > lh) y1 = lh;
+    if (x1 <= x0 || y1 <= y0) return 1;
+    size_t row = (size_t)(x1 - x0) * bpp, img = row * (size_t)(y1 - y0);
+    id<MTLBuffer> zb = zero_buf(img); if (!zb) return 0;
+    rp_flush();   // 同一附件上挂起的整面清除要先落地，否则会盖掉这次 | a pending full clear on the same attachment must land first, or it would overwrite this one
+    enc_b_copy_buffer_texture(blit(), zb, 0, row, img, MTLSizeMake((NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0), 1), mt, sl, lv, MTLOriginMake((NSUInteger)x0, (NSUInteger)y0, 0));
+    static uint64_t n; if (!n++) MLOG("剪裁清零：首例 %ldx%ld @%ld,%ld（目标 %lux%lu 级 %lu）", x1 - x0, y1 - y0, x0, y0, (unsigned long)mt.width, (unsigned long)mt.height, (unsigned long)lv);
+    return 1;
 }
 
 
@@ -2834,8 +2976,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                    (unsigned long long)(u->addr - mo), (unsigned long long)mo, ((float *)u->addr)[0], ((float *)u->addr)[1], ((float *)u->addr)[2], ((float *)u->addr)[3]);
                 // DM_NVN_CBDUMP=目录：同时把整块 uniform 原样存盘（F帧_p通道_st阶段_cb槽_地址.bin），供真值侧按客体地址逐字节对
                 // DM_NVN_CBDUMP=directory: also saves the whole uniform block to disk as-is (F<frame>_p<pass>_st<stage>_cb<slot>_<address>.bin), for the ground-truth side to compare byte by byte by guest address
-                static const char *cbd; static int cbd_init; if (!cbd_init) { cbd = getenv("DM_NVN_CBDUMP"); cbd_init = 1; }
-                if (cbd) {
+                // DM_NVN_CBDUMP_KEY=着色器键：只存该着色器（任一阶段）所在绘制的 | DM_NVN_CBDUMP_KEY=shader key: only save for draws using that shader (any stage)
+                static const char *cbd, *cbk; static int cbd_init; if (!cbd_init) { cbd = getenv("DM_NVN_CBDUMP"); cbk = getenv("DM_NVN_CBDUMP_KEY"); cbd_init = 1; }
+                if (cbd && (!cbk || !strcmp(sh->key, cbk))) {
                     char p[1024]; snprintf(p, sizeof p, "%s/F%llu_p%llu_st%d_cb%d_%llx.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, nvn_stage, reg, (unsigned long long)u->addr);
                     FILE *f = fopen(p, "wb"); if (f) { fwrite((const void *)u->addr, 1, u->size, f); fclose(f); } else RED_ONCE(41, "CBDUMP 写不出 %s", p);
                 }
@@ -2849,7 +2992,8 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             slots[aid] = sid && sid < g_nsreg && g_srid[sid] ? g_srid[sid] : dummy_samp_rid();
             USE(ss ? ss : dummy_samp(), MTLResourceUsageRead);
             if (bl && sid > 0) { int ok = sid < g_nsreg && g_sreg_ok[sid]; samp_par sp = ok ? g_sreg[sid] : (samp_par){0};   // 本段已持 g_rmu | g_rmu is already held in this section
-                if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d（0 最近点 / 1 双线性；2–5 带 mip）", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf); }
+                if (ok) PD("B %llu st%d samp reg%d sid=%d mag=%d min=%d（0 最近点 / 1 双线性；2–5 带 mip）wrap=%d,%d,%d border=%g,%g,%g,%g", g_stat_pass, nvn_stage, reg, sid, (int)sp.magf, (int)sp.minf,
+                           (int)sp.ws, (int)sp.wt, (int)sp.wr, sp.border[0], sp.border[1], sp.border[2], sp.border[3]); }
         } else if (b->kind == NVN_RB_TEX || b->kind == NVN_RB_TEXU) {
             int tid = b->kind == NVN_RB_TEXU ? (int)(ubo_handle(nvn_stage, reg, b->off) & 0xfffff) : reg < 128 ? (int)(S.tex[nvn_stage][reg] & 0xfffff) : 0;
             void *tv = NULL; uint64_t trid = tid ? tex_fast_rid(tid, &tv) : 0; __unsafe_unretained id<MTLTexture> t = (__bridge id<MTLTexture>)tv;
@@ -4573,7 +4717,19 @@ frz_plain:;
             for (int i = 0; i < S.nattr && i < 16 && o < sizeof vb - 100; i++) { int st = S.attr[i].stream; if (!S.attr[i].fmt) continue;   // 只打有格式的属性 | only attributes with a format
                 o += snprintf(vb + o, sizeof vb - o, " a%d{fmt=%#x off=%d s=%d stride=%u div=%u vb=%#llx/%llu}", i, S.attr[i].fmt, S.attr[i].offset, st,
                               st < 16 ? S.stream[st].stride : 0, st < 16 ? S.stream[st].divisor : 0, st < 16 ? (unsigned long long)S.vbuf[st].address : 0ull, st < 16 ? (unsigned long long)S.vbuf[st].size : 0ull); }
-            PD("v %llu %s", g_stat_pass, vb); }
+            PD("v %llu %s", g_stat_pass, vb);
+            // DM_NVN_CBDUMP + DM_NVN_CBDUMP_KEY=顶点着色器键：另存该绘制的各顶点流与索引（F帧_p通道_vb流号_地址.bin / _ib_地址.bin）
+            // DM_NVN_CBDUMP + DM_NVN_CBDUMP_KEY=vertex shader key: also save that draw's vertex streams and indices (F<frame>_p<pass>_vb<stream>_<address>.bin / _ib_<address>.bin)
+            const char *cbd = getenv("DM_NVN_CBDUMP"), *cbk = getenv("DM_NVN_CBDUMP_KEY");
+            if (cbd && cbk && pr->sh[0] && !strcmp(pr->sh[0]->key, cbk)) {
+                char fp[1024];
+                for (int st = 0; st < 16; st++) if (S.vbuf[st].address && S.vbuf[st].size) {
+                    snprintf(fp, sizeof fp, "%s/F%llu_p%llu_vb%d_%llx.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, st, (unsigned long long)S.vbuf[st].address);
+                    FILE *f = fopen(fp, "wb"); if (f) { fwrite((const void *)S.vbuf[st].address, 1, S.vbuf[st].size, f); fclose(f); } }
+                if (di && di->ibuf) {
+                    snprintf(fp, sizeof fp, "%s/F%llu_p%llu_ib%d_%llx.bin", cbd, (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, di->itype, (unsigned long long)di->ibuf);
+                    FILE *f = fopen(fp, "wb"); if (f) { fwrite((const void *)di->ibuf, 1, (size_t)di->count << (di->itype == 2 ? 2 : di->itype), f); fclose(f); } }
+            } }
         if (last_pass != g_stat_pass) {
             last_pass = g_stat_pass;
             PD("D %llu prim=%d vc=%d inst=%d blend=%#x wm=%#x dt=%d dw=%d df=%d st=%d sc=%lu,%lu,%lu,%lu tgt=%lux%lu vp=%.0f,%.0f,%.0f,%.0f", g_stat_pass, prim,
@@ -4894,6 +5050,23 @@ static void copy_t2t(const p_copy_t2t *c) {
     else
         for (int z = 0; z < nz; z++)
             enc_b_copy_texture(b, s, sz0 + c->sr.zoffset + z, sl, MTLOriginMake(c->sr.xoffset, c->sr.yoffset, 0), MTLSizeMake(c->sr.width, c->sr.height, 1), d, dz0 + c->dr.zoffset + z, dl, MTLOriginMake(c->dr.xoffset, c->dr.yoffset, 0));
+    // 诊断 DM_NVN_T2T_TRACE=宽x高:文件：拷进该尺寸 RGBA16F 贴图的结果，在 GPU 时间线上逐次另拷一份进追踪缓冲（帧号记在 CPU 侧），满 240 次写文件
+    // Diagnostic DM_NVN_T2T_TRACE=WxH:file: after each copy into an RGBA16F texture of that size, copy the result once more into a trace buffer on the GPU timeline (frame numbers kept on the CPU side); after 240 copies write the file
+    { static int on = -1; static uint32_t tw, th; static const char *tf; static id<MTLBuffer> tb; static int tn; static uint64_t tfr[240], from;
+      if (on < 0) { const char *e = getenv("DM_NVN_T2T_TRACE"), *fe = getenv("DM_NVN_T2T_FROM"); on = e && sscanf(e, "%ux%u", &tw, &th) == 2 && (tf = strchr(e, ':')) && *++tf; from = fe ? strtoull(fe, NULL, 10) : 0; }
+      if (on > 0 && tn < 240 && atomic_load(&g_cur_frame) >= from && d.width == tw && d.height == th && d.pixelFormat == MTLPixelFormatRGBA16Float && !s3) {
+          if (!tb) { tb = [g_dev newBufferWithLength:(size_t)240 * tw * th * 8 options:MTLResourceStorageModeShared]; res_add(tb); }
+          enc_b_copy_texture_buffer(blit(), d, dz0, dl, MTLOriginMake(0, 0, 0), MTLSizeMake(tw, th, 1), tb, (size_t)tn * tw * th * 8, (size_t)tw * 8, (size_t)tw * th * 8);
+          tfr[tn++] = atomic_load(&g_cur_frame);
+          if (tn == 240) {
+              rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+              mtl_finish_gpu();
+              FILE *f = fopen(tf, "wb");
+              if (f) { fprintf(f, "%u %u %d\n", tw, th, tn); fwrite(tfr, 8, 240, f); fwrite(tb.contents, 1, (size_t)240 * tw * th * 8, f); fclose(f); }
+              MLOG("[t2t-trace] %d 次 → %s（帧 %llu–%llu）", tn, tf, (unsigned long long)tfr[0], (unsigned long long)tfr[239]);
+          }
+      }
+    }
 }
 
 // GPU：用给定值清贴图区域（原先误列为空操作，初始化调 5 次；Metal 私有贴图初值未定义，游戏依赖清出的初值）。
@@ -5210,7 +5383,8 @@ void mtl_exec(const uint8_t *p) {
             case OP_COPY_B2B: { uint64_t s_, d, n; memcpy(&s_, a, 8); memcpy(&d, (const uint8_t *)a + 8, 8); memcpy(&n, (const uint8_t *)a + 16, 8);
                 PD("Y copy_b2b cmd=%p src=%#llx dst=%#llx bytes=%llu", p, (unsigned long long)s_, (unsigned long long)d, (unsigned long long)n); mtl_sub_copy(s_, d, n); break; }
             case OP_UPDATE_UB: { uint64_t d, n; memcpy(&d, a, 8); memcpy(&n, (const uint8_t *)a + 8, 8);
-                PD("Y update_ub cmd=%p src=%#llx dst=%#llx bytes=%llu", p, (unsigned long long)((const uint8_t *)a + 16), (unsigned long long)d, (unsigned long long)n); mtl_sub_copy((uint64_t)((const uint8_t *)a + 16), d, n); break; }
+                PD("Y update_ub cmd=%p src=%#llx dst=%#llx bytes=%llu f=%g,%g,%g,%g", p, (unsigned long long)((const uint8_t *)a + 16), (unsigned long long)d, (unsigned long long)n,
+                   n >= 4 ? ((const float *)((const uint8_t *)a + 16))[0] : 0.f, n >= 8 ? ((const float *)((const uint8_t *)a + 16))[1] : 0.f, n >= 12 ? ((const float *)((const uint8_t *)a + 16))[2] : 0.f, n >= 16 ? ((const float *)((const uint8_t *)a + 16))[3] : 0.f); mtl_sub_update((const uint8_t *)a + 16, d, n); break; }
             case OP_SET_RT: {
                 const p_set_rt *r = a;
                 if (defer_begin_q(p)) break;
@@ -5226,9 +5400,17 @@ void mtl_exec(const uint8_t *p) {
             }
             case OP_CLEAR_COLOR: {
                 const p_clear_color *c = a;
+                // 通道外、全通道、清成 0 的剪裁清除（SMBW 在 480×272 等目标上按子矩形清金字塔各级）：在回放流里从全零缓冲拷进剪裁矩形
+                // A scissored clear to 0 outside a pass with all channels (SMBW clears pyramid levels as sub-rectangles of 480×272 and other targets): copy from the zero buffer into the scissor rectangle in the replay stream
+                if (!g_enc && c->mask == 0xf && !c->rgba[0] && !c->rgba[1] && !c->rgba[2] && !c->rgba[3] && R.has_sc && c->index >= 0 && c->index < R.rt.n && R.rt.color[c->index]
+                    && !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index]) && clear_rect_zero(c->index)) break;
                 if (g_rt_merged) rp_end();   // 续用的通道里来了清除：在此结束，清除照旧挂到下一个通道开头 | A clear arrived in a continued render pass: end it here, and the clear is attached to the start of the next render pass as usual
                 if (c->index < 0 || c->index >= R.rt.n || !R.rt.color[c->index]) { RED_ONCE(5, "清色目标 %d 无效", c->index); break; }
-                if (g_enc || c->mask != 0xf || !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index])) { RED_ONCE(6, "通道中途 / 部分掩码 / 部分剪裁的清色未实现（首例 掩码 %#x）", c->mask); break; }
+                if (g_enc || c->mask != 0xf || !scissor_full(R.rt.color[c->index], &R.rt.cview[c->index], R.rt.has_cview[c->index])) {
+                    RED_ONCE(6, "通道中途 / 部分掩码 / 部分剪裁的清色未实现（首例 掩码 %#x）", c->mask);
+                    static uint64_t n; if (getenv("DM_NVN_CLEARLOG") && n++ < 40) MLOG("清色跳过 帧%llu 通道%llu 目标%d ser=%llu %ux%u 中途=%d 掩码=%#x 剪裁=%d,%d,%d,%d 色=%g,%g,%g,%g", (unsigned long long)atomic_load(&g_cur_frame), g_stat_pass, c->index,
+                        (unsigned long long)R.rt.color[c->index]->serial, R.rt.color[c->index]->d.width, R.rt.color[c->index]->d.height, g_enc != nil, c->mask, R.sc.x, R.sc.y, R.sc.w, R.sc.h, c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
+                    break; }
                 R.clear_c[c->index] = 1; R.cc[c->index] = MTLClearColorMake(c->rgba[0], c->rgba[1], c->rgba[2], c->rgba[3]);
                 break;
             }
@@ -5432,6 +5614,10 @@ static void td_dump(void) {
     // DM_NVN_TEXRAW=序号,…：按贴图序号存原始字节（含 3D；文件 路径%d 换成序号、后缀 .raw，首行文本头：宽 高 深 格式 每行字节）
     // DM_NVN_TEXRAW=index,...: save raw bytes by texture index (including 3D; file: %d in the path is replaced with the index, suffix .raw, first-line text header: width height depth format bytes-per-row)
     for (const char *q = getenv("DM_NVN_TEXRAW"); q && *q; q = strchr(q, ',') ? strchr(q, ',') + 1 : q + strlen(q)) {
+        if (!strncmp(q, "info", 4)) {   // DM_NVN_TEXRAW=info：DM_NVN_TEXINFO 记下的那几张 | DM_NVN_TEXRAW=info: the textures remembered by DM_NVN_TEXINFO
+            static char buf[256]; size_t o = 0; for (int i = 0; i < g_texinfo_n; i++) o += snprintf(buf + o, sizeof buf - o, "%s%llu", i ? "," : "", (unsigned long long)g_texinfo_ser[i]);
+            if (o) { static char env[300]; snprintf(env, sizeof env, "%s", buf); setenv("DM_NVN_TEXRAW", env, 1); q = getenv("DM_NVN_TEXRAW"); MLOG("[texraw] info → %s", q); } else continue;
+        }
         uint64_t ser = (uint64_t)atoll(q); id o = serial_get(ser);
         id<MTLTexture> t = [o isKindOfClass:[NvPkg class]] ? ((NvPkg *)o)->tex : o;
         if (!t) { MLOG("[texraw] ser=%llu 不在序号表", ser); continue; }

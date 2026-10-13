@@ -12,9 +12,9 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 | Mac host | **Plays through the menus (player count, character select) into the opening course**: the course, effects, HUD, menu and dialogue text render in Chinese or English. Title screen at 60 fps, memory flat (about 900 MB physical footprint on the title screen) |
 | Shaders | All 12,811 shaders the game ships (bfsha archives, particle effects, engine `agl` packages, UI layouts, `main`) are extracted by `shader_split.py` and translated offline; 12,809 compile. 2 `agl` post-effect compute shaders make SPIRV-Cross throw |
 | Input | Scripted input `DM_KEYS="12:A,14:A,20:A,26:A,32:A"` (seconds:button) reaches the opening course; `DM_WINDOW=1` for a window with keyboard input |
-| Current frontier | **The opening course is playable** (run, jump, collect coins; characters, NPCs, sky, text all render). Open: an intermittent water / refraction effect over the fountain draws as tall blue panels (sometimes with a wrong texture); controller-button icons in text show as `?` (the host's stand-in system font has no Nintendo-extension glyphs); no audio |
+| Current frontier | **The opening course is playable with sound** (run, jump, collect coins; characters, NPCs, sky, text, button icons all render; music and effects play). Only the opening course has been played |
 | Known gaps | Partial / mid-pass clears; sparse virtual-pool mappings; conditional render; `DrawElementsIndirect`; TBDR optimizations are off by default (they don't understand bindless textures yet); resource heaps get +16 KB slack because one model's setup came up 0x70 bytes short of the size table (cause unknown) |
-| Audio | Silent AudioRenderer (`hle_audren.c`); real mixing comes later |
+| Audio | The game's own SDK renderer runs in-process in its CPU / manual-execution mode (`hle_audren.c`); the host renders one 5 ms frame per buffer the output hands back and sends the device-sink mix (5.1 folded to stereo) through Core Audio (`DM_AUDIO=1` on Mac, default on iOS). About 0.1 ms of CPU per frame on an M-series Mac |
 | iOS bundle | `dm/ios/tools/build_ipa.sh` builds one unsigned IPA (iPhone + iPad): game code embedded in the executable, iOS shader libraries, RomFS (3.5 GB) inside the app, standard-controller virtual gamepad and physical controllers. Compiles and links; **not yet run on a device** (this Mac has no signing identity, and the Simulator SDK has no Metal 4) |
 
 ## What changed relative to d2r-mobile
@@ -45,6 +45,9 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
   - Host command-memory segments (lent when a command buffer outgrows the memory the game gave it) grow on demand instead of a fixed 64 × 1 MB.
   - `RGB10A2SN` vertex format; instanced `DrawArrays`.
   - Vertex formats follow the shader input type (integer inputs get integer formats of the matching sign).
+  - Copies, fills and inline uniform updates batched in one Metal 4 encoder get a barrier when they touch a range an earlier one wrote (Metal 4 does not order them). Mario writes the same uniform slot twice in a row; the reversed order made the fountain's GPU wave simulation diverge and draw tall panels over the screen.
+  - Scissored zero clears outside a pass are copied from a zero buffer into the scissor rectangle (they were skipped).
+  - New non-packaged colour textures are zero-filled (Metal leaves them undefined; Switch memory pools start as zero), and inline uniform updates are copied out of command memory when encoded.
 - Shader chain:
   - `dm/gfx/tools/shader_split.py` (new) scans RomFS and `main` for BNSH and BAHS (agl `sharcb`) containers and writes the package directory, the shader map and the answer table (compute thread-group size from control +0x748, shared memory from +0x754).
   - The translator uses GL depth (`-1..1`) and no depth clip control, so vertex shaders remap z' = z/2 + w/2: Mario sets `nvnDeviceSetDepthMode` to near = -w, and without the remap its full-screen copy was clipped away.
@@ -53,9 +56,10 @@ Same approach as d2r-mobile: the game's own aarch64 code runs natively. A rewrit
 - Host:
   - Guest address space repartitioned: alias region 2.875 GB, heap 2.625 GB. Mario reserves 1.75 GB of `VirtualAddressMemory` (HeapDef) that it maps into the alias region on demand; with 1.25 GB, large layout archives got no address and were skipped.
   - Threads created with ideal core -2 run on the process default core (0); `GetCurrentProcessorNumber` never returns a negative core. Mario's font engine indexes per-core state with it.
-  - The shared font is served with a BFTTF "already decoded" header so `ScalableFontEngineHelper::Decode` leaves it alone.
+  - Shared fonts are served with a BFTTF "already decoded" header so `ScalableFontEngineHelper::Decode` leaves them alone. Type 5 (Nintendo extension) gets a generated icon font (`dm/tools/make_ext_font.py`: A/B/X/Y, L/R/ZL/ZR/SL/SR, +/−, D-pad, stick arrows at the original private-use code points); the other types share a desktop font. `DM_FONT_DIR` points at `standard.ttf` / `nintendo_ext.ttf` (the iOS app ships both).
   - Crash reports scan the stack for return addresses and dump the popped frame.
   - `DM_PROBE` (`host/probe.c`): register-relative dumps (`@xN+off`), hit filters (`?[xN+off]=val`), a `sead::ExpHeap` walker (`!xN`), thread IDs, `DM_PROBE_ALL`.
+- Audio (`hle_audren.c`): newer SDKs link the whole audio renderer into the game (`nn::audio::server` command generation and `nn::audio::dsp::CommandListProcessor`, the CPU version of the DSP). `OpenAudioRenderer` is switched to rendering device = CPU and execution mode = manual and then runs in-process; a host-started guest thread calls the game's `ExecuteAudioRendererRendering` for every buffer the output returns, the takeover of `AudioRendererImpl::ExecuteAudioRendererRendering` reads the DeviceSink inputs out of the mix buffers (DeviceSink is a no-op in the CPU processor), and an update hook renders a catch-up frame when the game sends two updates without a frame in between (otherwise newly added effects are never initialized and the light limiter dereferences null).
 - `patch_nso.py` code cuts for Mario `main` (build ID `cd6e42ae…`): resource heaps (`main+0x1e62fc`) get +16 KB.
 - `dm/tools/ghidra/Decompile.java`: headless decompile by module offset; `@off` (re)creates functions reached only through vtables and undoes Ghidra's wrong "non-returning" mark on `nn::os` imports.
 
@@ -74,14 +78,16 @@ XLATE=... python3 dm/gfx/tools/dmsh_build.py ~/smbw-work/shader/pkg ~/smbw-work/
 python3 dm/gfx/tools/c1_guard.py ~/smbw-work/build/cache/metal_shader_cache/b-<V> dm/gfx/nvn/c1_full.tsv
 # 3. host
 make -C dm/host dmhost
-~/smbw-work/run/boot.sh <logname> [seconds]     # sets DM_MSL_DIR to the shader cache
+# 4. button-icon font for the Nintendo-extension shared font (needs fontTools: pip install fonttools)
+python3 dm/tools/make_ext_font.py ~/smbw-work/build/font/nintendo_ext.ttf
+~/smbw-work/run/boot.sh <logname> [seconds]     # sets DM_MSL_DIR to the shader cache and DM_FONT_DIR to ~/smbw-work/build/font
 ```
 
 Agent-facing guides for analysing and porting other titles are in [docs/agents](docs/agents/README.md).
 
 ## Build the iOS app (unsigned IPA)
 
-Needs Xcode 27, xcodegen, and the Mac build steps above (the rewritten modules in `~/smbw-work/build/patched_v0`).
+Needs Xcode 27, xcodegen, fontTools (`FONT_PY=` a python that has it, if `python3` does not), and the Mac build steps above (the rewritten modules in `~/smbw-work/build/patched_v0`). The app also bundles `dm/font/standard.ttf` (copied from macOS's Arial Unicode, `STD_FONT=` to override) and the generated `nintendo_ext.ttf`.
 
 ```
 # iOS shader libraries for the current chain version (writes ~/smbw-work/build/ios/dmsh_b/b-<V>/; about 15 min)

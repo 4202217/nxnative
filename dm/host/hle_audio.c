@@ -226,6 +226,17 @@ HLE_FORCE("_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE", "取已播�
     return b;
 }
 
+// 宿主内部的 PCM 输出（进程内音频渲染器用，见 hle_audren.c）：同一套 AudioOut（真出声 / 静音接收端 / 切后台接手），键是宿主分配的哑对象
+// Host-internal PCM output (used by the in-process audio renderer, see hle_audren.c): the same AudioOut machinery (real output / silent sink / background take-over), keyed by a host-allocated dummy object
+void *dm_pcmout_open(int ch) {
+    void *key = calloc(1, 64); uint8_t param[8] = {0}; *(uint16_t *)(param + 4) = (uint16_t)ch;
+    if (h_au_Open(key, NULL, "AudioRenderer", param)) die("宿主 PCM 输出打不开");
+    return key;
+}
+void dm_pcmout_start(void *k) { h_au_Start(k); }
+int dm_pcmout_append(void *k, void *b) { return (int)h_au_Append(k, b); }
+void *dm_pcmout_released(void *k) { return h_au_Released(k); }
+
 // 前端生命周期 / 音频会话打断：暂停真出声，期间由静音接收端接手按实时消耗（节奏不断）；恢复时切回 AudioUnit。
 // 前端在 切后台 / 打断开始 时调 1，回前台 / 打断结束（shouldResume）时调 0。
 // Front-end lifecycle / audio session interruption: suspend real audio output, with the silent sink taking over real-time consumption meanwhile (pacing unbroken); switch back to the AudioUnit on resume.
