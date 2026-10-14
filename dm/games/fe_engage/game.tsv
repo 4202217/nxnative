@@ -26,22 +26,22 @@ romfs_marker	Data/data.unity3d
 zip_store	.bundle:.wem:.unity3d:.metallib
 
 # ---- 内存 | Memory ----
-# NPDM 声明系统资源 16 MB，所以 IsVirtualAddressMemoryEnabled 为真：nninitStartup 把整个空闲内存（约 3.2 GB）作虚拟地址内存交给 StandardAllocator，
-# 要在别名区里一次分到这么大的地址区域（较新 SDK 的 AddressRegionManager 先占别名区开头约 1 GB 作节点区）。马力欧的 2.875 GB 别名区不够（StandardAllocator::Initialize 中止）。
-# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands all free memory (about 3.2 GB) to StandardAllocator as virtual address memory,
-# which needs one address region that large in the alias region (newer SDKs' AddressRegionManager first takes about 1 GB at the start of the alias region as its node area). Mario's 2.875 GB alias region is too small (StandardAllocator::Initialize aborts).
-# Engage 不调 SetHeapSize：全部内存经别名区（MapPhysicalMemory，实测映射一直用到别名区顶端），线程栈在栈区里随机放。所以堆区只留 128 MB，
-# 整块 6 GB = 前置 256 MB + 别名区 5.375 GB + 栈区 256 MB + 堆区 128 MB，正好是 iOS 不带「扩展虚拟寻址」授权时单块预留的上限（原先 Mac 起机用 8 GB、别名区 5.5 GB）
-# Engage never calls SetHeapSize: all its memory goes through the alias region (MapPhysicalMemory; measured mappings reach the top of the alias region), and thread stacks are placed at random in the stack region. So the heap region keeps only 128 MB,
-# and the 6 GB block = 256 MB in front + 5.375 GB alias region + 256 MB stack region + 128 MB heap region, exactly the largest single reservation iOS allows without the "extended virtual addressing" entitlement (Mac bring-up used 8 GB with a 5.5 GB alias region)
-# 别名区的地址也是 Unity 的：它的低层虚拟分配器自己 AllocateAddressRegion（每块按尺寸对齐，2.25 MB 占 4 MB、16.25 MB 占 20 MB），序章战斗前已占约 1.2 GB。
-# 节点区 1 GB 再占掉就不够了，所以 patch_nso.py 给本作 sdk 构建登记了剪口，把节点区缩到 62 MB（真机别名区 64 GB，不在乎这点）。
-# The alias region's address space is Unity's too: its low-level virtual allocator calls AllocateAddressRegion itself (each block aligned by size: 2.25 MB takes 4 MB, 16.25 MB takes 20 MB), about 1.2 GB before the prologue battle.
-# With the 1 GB node area taken as well that is not enough, so patch_nso.py registers a cut for this game's sdk build that shrinks the node area to 62 MB (the hardware's alias region is 64 GB and does not care).
-mem_reserve	0x180000000
-mem_alias	0x158000000
+# NPDM 声明系统资源 16 MB，所以 IsVirtualAddressMemoryEnabled 为真：nninitStartup 把整个空闲内存（应用池 − 64 MB）作虚拟地址内存交给 StandardAllocator，
+# 在别名区里一次分一整块地址区域（按 1 GB 对齐）。Unity 的低层虚拟分配器也自己 AllocateAddressRegion（每块按尺寸对齐，2.25 MB 占 4 MB、16.25 MB 占 20 MB），
+# 序章战斗时约 1.05 GB。较新 SDK 的 AddressRegionManager 先占别名区开头约 1 GB 作节点区；patch_nso.py 给本作 sdk 构建登记了剪口，把它缩到 62 MB（真机别名区 64 GB，不在乎这点）。
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands all free memory (application pool − 64 MB) to StandardAllocator as virtual address memory,
+# one address region in the alias region (1 GB aligned). Unity's low-level virtual allocator also calls AllocateAddressRegion itself (each block aligned by size: 2.25 MB takes 4 MB, 16.25 MB takes 20 MB),
+# about 1.05 GB in the prologue battle. Newer SDKs' AddressRegionManager first takes about 1 GB at the start of the alias region as its node area; patch_nso.py registers a cut for this game's sdk build that shrinks it to 62 MB (the hardware's alias region is 64 GB and does not care).
+# 实测（序章到战斗，12 分钟）：StandardAllocator 只提交 0.58 GB，Unity 自己的区域提交 0.97 GB，合计 1.55 GB。所以应用池报 2.5 GB（StandardAllocator 约 2.44 GB，是用量的 4 倍），
+# 整块就能放进 5 GB = 前置 256 MB + 别名区 4.375 GB + 栈区 256 MB + 堆区 128 MB（Engage 不调 SetHeapSize，线程栈在栈区里随机放）。5 GB 是真机跑通过的总量（D2R）；
+# iOS 不带「扩展虚拟寻址」授权时单块最多 6 GB，但 Metal 等还要地址（Mac 上 Engage 的显存分配约 1 GB），原先的 6 GB 块在手机上没有余量。
+# Measured (prologue to the battle, 12 minutes): StandardAllocator commits only 0.58 GB and Unity's own regions 0.97 GB, 1.55 GB in all. So the pool is reported as 2.5 GB (StandardAllocator about 2.44 GB, four times its use),
+# and the block fits in 5 GB = 256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region (Engage never calls SetHeapSize; thread stacks are placed at random in the stack region). 5 GB is the total proven on a phone (D2R);
+# without the "extended virtual addressing" entitlement iOS allows one reservation of at most 6 GB, but Metal and the rest need address space too (Engage allocates about 1 GB of GPU memory on the Mac), so the former 6 GB block left no margin on a phone.
+mem_reserve	0x140000000
+mem_alias	0x118000000
 mem_stack	0x10000000
-app_pool	0xCD500000
+app_pool	0xA0000000
 
 # ---- NVN 驱动常量段（dmsh_build.py 出包、nvn_mtl.m 运行时现填；按全库着色器实测） | NVN driver constant segments (dmsh_build.py at packaging, nvn_mtl.m filled at run time; measured over all shaders) ----
 # 旧驱动布局（同 D2R）：c2 贴图句柄表 0x168 + 8 r（128 槽）、分离采样器表 0x568 + 8 r；Unity 只用分离贴图 / 采样器（BindSeparateTexture / Sampler）。图像表与 c0 存储缓冲表未实测，先沿用
