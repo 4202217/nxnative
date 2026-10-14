@@ -5524,7 +5524,15 @@ void mtl_exec(const uint8_t *p) {
             case OP_CLEAR_DS: {
                 const p_clear_ds *c = a;
                 if (g_rt_merged) rp_end();
-                if (g_enc) { RED_ONCE(7, "通道中途的深度模板清除未实现"); break; }
+                // 通道中途的深度模板清除：结束当前通道，清除挂到下一个通道开头（颜色附件照旧载入，同上面续用通道遇到清除的做法）。原先直接跳过，之后的绘制拿旧深度做测试。
+                // 剪裁没盖满深度目标时，Metal 的载入清除表达不了局部清除，仍跳过
+                // Depth / stencil clear in the middle of a pass: end the current pass and attach the clear to the start of the next one (color attachments load as usual, as a continued pass does above when a clear arrives). It used to be skipped, and later draws depth-tested against stale depth.
+                // When the scissor does not cover the depth target, Metal's load-action clear cannot express a partial clear; still skipped
+                if (g_enc) {
+                    if (R.rt.depth && !scissor_full(R.rt.depth, &R.rt.dview, R.rt.has_dview)) { RED_ONCE(7, "通道中途的剪裁深度模板清除未实现"); break; }
+                    { static int once; if (!once++) MLOG("通道中途的深度模板清除：结束本通道，清除挂到下一个通道开头（首例 通道 %llu）", g_stat_pass); }
+                    rp_end();
+                }
                 if (c->depth_mask) { R.clear_d = 1; R.cd = c->depth; }
                 if (c->stencil_mask) { R.clear_s = 1; R.cs = (uint32_t)c->stencil; }
                 break;
