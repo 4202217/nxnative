@@ -1,6 +1,7 @@
 // 实际RT单级选择不变，仅view范围4→1；同纹理同CB原guard参考与候选，手写常量shader不冒游戏shader。
 // The actual RT single-level selection is unchanged, only the view range goes 4→1; same texture and same CB for the original-guard reference and the candidate; hand-written constant shaders do not pass themselves off as game shaders.
 #include "../nvn/nvn_mtl.m"
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 void *front_metal_layer(void){return NULL;}
 module_t *module_of(const void *p){(void)p;return NULL;}
 module_t g_mod[MAX_MOD];int g_nmod;
@@ -11,7 +12,7 @@ static int cases,bad,enabled,small_depth,force_invalid,sample_attachment,both_fl
 typedef struct{uint8_t b[8192];size_t n;} code;
 static void emit(code *c,int op,const void *p,size_t n){size_t z=(8+n+7)&~7ull;op_hdr h={op,(uint32_t)z};memcpy(c->b+c->n,&h,8);if(n)memcpy(c->b+c->n+8,p,n);c->n+=z;}
 static void st(code *c,int k,const void *v,size_t n){p_bind_state b={.kind=k};memcpy(b.bytes,v,n);emit(c,OP_BIND_STATE,&b,sizeof b);}
-static tex_t color={.serial=52000},depth={.serial=52001};static prog_t pg[2]={{.serial=52002},{.serial=52003}};
+static tex_t color={.magic=MAGIC('T', 'E', 'X', 0), .serial =52000},depth={.magic=MAGIC('T', 'E', 'X', 0), .serial =52001};static prog_t pg[2]={{.serial=52002},{.serial=52003}};
 static p_set_rt rt(int levels){p_set_rt r={.n=1,.depth=&depth,.has_dview=1};r.color[0]=&color;r.has_cview[0]=1;
  r.cview[0]=(view_t){.set_levels=1,.set_layers=1,.set_format=1,.set_target=1,.nlevels=levels,.nlayers=1,.format=NVN_FORMAT_RGBA8,.target=NVN_TEXTURE_TARGET_2D};
  r.dview=r.cview[0];r.dview.nlevels=1;r.dview.base_level=small_depth?1:0;r.dview.format=NVN_FORMAT_DEPTH32F_STENCIL8;return r;}

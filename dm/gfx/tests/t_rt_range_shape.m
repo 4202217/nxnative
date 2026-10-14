@@ -1,4 +1,5 @@
 #include "../nvn/nvn_mtl.m"
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 void *front_metal_layer(void){return NULL;}
 module_t *module_of(const void *p){(void)p;return NULL;}
 module_t g_mod[MAX_MOD];int g_nmod;
@@ -14,7 +15,7 @@ static int shape(const p_set_rt *a,const p_set_rt *b){
 #endif
 }
 int main(void){@autoreleasepool{
- tex_t c={.serial=26},d={.serial=29};c.d.width=c.d.height=8;c.d.depth=c.d.samples=1;c.d.levels=4;c.d.target=NVN_TEXTURE_TARGET_2D;c.d.format=NVN_FORMAT_RGBA8;d.d=c.d;d.d.levels=1;d.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
+ tex_t c={.magic=MAGIC('T', 'E', 'X', 0), .serial =26},d={.magic=MAGIC('T', 'E', 'X', 0), .serial =29};c.d.width=c.d.height=8;c.d.depth=c.d.samples=1;c.d.levels=4;c.d.target=NVN_TEXTURE_TARGET_2D;c.d.format=NVN_FORMAT_RGBA8;d.d=c.d;d.d.levels=1;d.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
  view_t cv={.set_levels=1,.set_layers=1,.set_format=1,.set_target=1,.base_level=0,.nlevels=4,.min_layer=0,.nlayers=1,.format=NVN_FORMAT_RGBA8,.target=NVN_TEXTURE_TARGET_2D};view_t dv=cv;dv.nlevels=1;dv.format=d.d.format;
  p_set_rt a={.n=1,.depth=&d,.has_dview=1,.dview=dv};a.color[0]=&c;a.has_cview[0]=1;a.cview[0]=cv;p_set_rt b=a;b.cview[0].nlevels=1;
  E("实际level0同层仅级数变化",1,shape(&a,&b));

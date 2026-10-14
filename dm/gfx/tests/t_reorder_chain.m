@@ -3,6 +3,7 @@
 // Fixed command chain experiment: production mtl_exec, hand-written constant shaders and closed-form expectations; does not include the production reorderer.
 // G full stencil block, M small view + copy, U blend, R stencil resolve; only G/M are swapped.
 #include "../nvn/nvn_mtl.m"
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
@@ -25,7 +26,7 @@ static void state(chain *c, int kind, const void *s, size_t n) {
     p_bind_state b={.kind=kind}; if(n>sizeof b.bytes) abort(); memcpy(b.bytes,s,n); emit(c,OP_BIND_STATE,&b,sizeof b);
 }
 static tex_t texture(unsigned w, unsigned levels, int depth) {
-    static uint64_t ser=5000; tex_t t={.serial=ser++}; t.d.width=t.d.height=w;
+    static uint64_t ser=5000; tex_t t={.magic=MAGIC('T', 'E', 'X', 0), .serial =ser++}; t.d.width=t.d.height=w;
     t.d.depth=t.d.samples=1; t.d.levels=levels; t.d.target=NVN_TEXTURE_TARGET_2D;
     t.d.format=depth?NVN_FORMAT_DEPTH32F_STENCIL8:NVN_FORMAT_RGBA8; return t;
 }

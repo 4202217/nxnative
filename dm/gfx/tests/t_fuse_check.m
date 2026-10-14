@@ -7,6 +7,7 @@ void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
 void svc_thread_dump(void) {}
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 uint64_t now_ns(void) { return bp_now(); }
 
 static int fail, count;
@@ -49,7 +50,7 @@ int main(void) { @autoreleasepool {
     pr->sh[1] = [NvShader new]; pr->sh[1]->fn = [lib newFunctionWithName:@"f"]; pr->sh[1]->stage = 1;
     prog_t pg = {.serial = 100}; serial_put(pg.serial, pr);
     tex_t t[4] = {0};
-    for (int i = 0; i < 4; i++) { t[i].serial = 101 + i; t[i].d.width = t[i].d.height = 16;
+    for (int i = 0; i < 4; i++) { t[i].magic = MAGIC('T', 'E', 'X', 0); t[i].serial = 101 + i; t[i].d.width = t[i].d.height = 16;
         t[i].d.depth = t[i].d.levels = t[i].d.samples = 1; t[i].d.target = NVN_TEXTURE_TARGET_2D; t[i].d.format = NVN_FORMAT_RGBA8; }
     check_color(0, &pg, t); check_color(1, &pg, t);
     printf("== %d 项，失败 %d ==\n", count, fail); return fail != 0;

@@ -11,7 +11,7 @@ uint64_t now_ns(void) { return bp_now(); }
 static int cases,failed; static prog_t colour_pg,depth_pg;
 #define EXPECT(n,w,v) do { uint64_t a=(w),b=(v);cases++;printf("%s 期望 %llu → 真结果 %llu %s\n",n,(unsigned long long)a,(unsigned long long)b,a==b?"✓":"✗");failed+=a!=b;}while(0)
 static tex_t make_tex(int w,int h,int levels,int format) {
-    static uint64_t ser=90000; tex_t t={.serial=ser++};t.d.width=w;t.d.height=h;
+    static uint64_t ser=90000; tex_t t={.magic=MAGIC('T', 'E', 'X', 0), .serial =ser++};t.d.width=w;t.d.height=h;
     t.d.depth=t.d.samples=1;t.d.levels=levels;t.d.target=NVN_TEXTURE_TARGET_2D;t.d.format=format;return t;
 }
 typedef struct { NVNcommandBuffer cb; pool_t pool; void *mem; } recording;

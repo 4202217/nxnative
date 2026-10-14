@@ -59,7 +59,7 @@ int main(void) {
     gpa = (PFNNVNDEVICEGETPROCADDRESSPROC)boot("nvnDeviceGetProcAddress");
     EXPECT("bootstrap 取 GetProcAddress 非空", 1, gpa != NULL);
     int nonnull = 0; for (unsigned i = 0; i < NVN_NFUNC; i++) nonnull += gpa(NULL, nvn_names[i]) != NULL;
-    EXPECT("523 个名字全部取到地址", 523, nonnull);
+    EXPECT("名字表里每个名字都取到地址（NVN_NFUNC 个）", NVN_NFUNC, nonnull);   // 原先写死 523，名字表加到 536 后一直报不通 | used to be hard-coded 523 and kept failing once the name table grew to 536
     EXPECT("未知名字取址返回空", 0, gpa(NULL, "nvnNoSuchFunction") != NULL);
 
     // 2. 设备
@@ -361,8 +361,9 @@ int main(void) {
 
     // 7. 未实现函数：返回 0、报红、只报一次
     // 7. Unimplemented functions: return 0, report a failure, report only once
-    unsigned ui = 0; while (strcmp(nvn_names[ui], "nvnBufferBuilderSetDefaults")) ui++;
-    ((void (*)(void *))proc("nvnBufferBuilderSetDefaults"))(NULL); ((void (*)(void *))proc("nvnBufferBuilderSetDefaults"))(NULL);
+    // 取一个仍未实现的函数（原先用的 nvnBufferBuilderSetDefaults 后来实现了，传 NULL 就崩） | Use a function that is still unimplemented (nvnBufferBuilderSetDefaults, used before, was implemented later and crashes on NULL)
+    unsigned ui = 0; while (strcmp(nvn_names[ui], "nvnBufferBuilderGetDevice")) ui++;
+    ((void (*)(void *))proc("nvnBufferBuilderGetDevice"))(NULL); ((void (*)(void *))proc("nvnBufferBuilderGetDevice"))(NULL);
     EXPECT("未实现函数被调用后记为已报红", 1, g_unimpl_seen[ui] > 0);
     EXPECT("未实现函数计数 2", 2, nvn_slot[ui].cnt);
 
