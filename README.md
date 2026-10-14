@@ -12,7 +12,7 @@ The project is built from the generic parts of [d2r-mobile](../d2r-mobile) (MIT)
 | Game | Profile | State |
 |---|---|---|
 | Super Mario Bros. Wonder (base game v0, update 1.2.1) | `smbw` | **Playable on the iPhone with sound through several levels**: an 11-minute session at 60 fps with no crash and no audio dropouts. Scripted Mac runs reach the opening course. Notes are in the [Super Mario Bros. Wonder](#super-mario-bros-wonder-smbw) section |
-| Fire Emblem Engage | `fe_engage` | Bring-up started (Unity 2020.3 IL2CPP, SDK 12.3.7): on the Mac it boots through Unity's startup and runs to the opening movie, with nothing on screen yet. Next: its shaders, which sit in UnityFS bundles (27,152 of them) that `shader_split.py` cannot read yet, and the movies (VP9 WebM; the hardware decoder is stubbed) |
+| Fire Emblem Engage | `fe_engage` | Bring-up (Unity 2020.3 IL2CPP, SDK 12.3.7): **on the Mac it reaches the title screen** and, left idle, its 3D attract demo. `shader_split.py` reads the shaders out of the Unity bundles (9,268 of 9,269 compile). Movies play through a host decoder with black frames (no VP9 decoding yet). Not yet: input, some render targets and textures in the demo, iOS |
 
 ## Status
 
@@ -20,7 +20,7 @@ The project is built from the generic parts of [d2r-mobile](../d2r-mobile) (MIT)
 |---|---|
 | Rewriter (`dm/tools/patch_nso.py`, `DM_RULESET=native`) | Runs unchanged on Mario's `main` / `sdk`, v0 and 1.2.1 |
 | Mac host | Runs Mario through the menus into the opening course: the course, effects and HUD render. The title screen runs at 60 fps with flat memory (about 900 MB physical footprint). Menu and dialogue text currently render blank on the Mac (they are fine on the iPhone); this is not investigated yet |
-| Shaders | `shader_split.py` extracts the shaders from Nintendo's containers: bfsha archives, particle effects, `agl` packages, UI layouts, and shaders embedded in `main`. They are translated offline, and each vertex shader gets the outputs its paired pixel shader reads. For Mario, 16,266 of 16,268 shaders compile; 2 `agl` post-effect compute shaders make SPIRV-Cross throw. All 14,603 pairs link |
+| Shaders | `shader_split.py` extracts the shaders from Nintendo's containers (bfsha archives, particle effects, `agl` packages, UI layouts, shaders embedded in `main`) and from Unity's `Shader` objects. They are translated offline, and each vertex shader gets the outputs its paired pixel shader reads. For Mario, 16,266 of 16,268 shaders compile; 2 `agl` post-effect compute shaders make SPIRV-Cross throw. All 14,603 pairs link |
 | Audio | The game's own SDK renderer runs in-process in its CPU / manual-execution mode (`hle_audren.c`). The host renders one 5 ms frame per buffer the output hands back. It sends the device-sink mix (5.1 folded to stereo) through Core Audio (`DM_AUDIO=1` on Mac, default on iOS). This costs about 0.1 ms of CPU per frame on an M-series Mac |
 | Input | On iOS, a touch gamepad and physical controllers. On the Mac, scripted input (`DM_KEYS=<seconds>:<button>,…`) or `DM_WINDOW=1` for a window with keyboard input |
 | iOS bundle | `build_ipa.sh` builds one unsigned IPA for iPhone and iPad. The game code is embedded in the executable, and the iOS shader libraries and the RomFS are inside the app |
