@@ -148,6 +148,21 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         for (int i = 0; i < g_nfault_hook; i++) if (g_fault_hook[i](si->si_addr, is_write, uc)) return;
     }
     crash_gate(sig);
+    // stderr 的锁可能被别的线程拿着（它卡住了、或被挂起了）：下面的 fprintf 会跟着卡死，时限的 SIGALRM 也收不了尾，日志里一个字没有。
+    // 等 1 s 还拿不到就只用 write 打一行（pc / lr 换成模块偏移）再退出。本线程自己拿着锁时 ftrylockfile 照样成功（文件锁可重入），不影响
+    // The stderr lock may be held by another thread (stuck or suspended): the fprintf below would hang with it, the time limit's SIGALRM could not end the run, and the log would get nothing.
+    // If it still cannot be taken after 1 s, write a single line with write() (pc / lr as module offsets) and exit. When this thread itself holds the lock, ftrylockfile still succeeds (file locks are recursive), unaffected
+    for (int i = 0; ftrylockfile(stderr); i++) {
+        if (i < 100) { usleep(10000); continue; }
+        char b[256]; int n = snprintf(b, sizeof b, "[dm] CRASH sig=%d（stderr 被占用 1 s，现场不打 | stderr held for 1 s, no dump）", sig);
+        uint64_t at[2] = {uc->uc_mcontext->__ss.__pc, uc->uc_mcontext->__ss.__lr};
+        for (int k = 0; k < 2; k++) { module_t *m = module_of((void *)at[k]);
+            n += m ? snprintf(b + n, sizeof b - n, " %s=%s+%#llx", k ? "lr" : "pc", m->name, at[k] - (uint64_t)m->base) : snprintf(b + n, sizeof b - n, " %s=%#llx", k ? "lr" : "pc", at[k]); }
+        n += snprintf(b + n, sizeof b - n, "\n");
+        if (write(2, b, (size_t)n) < 0) {}
+        _exit(128 + sig);
+    }
+    funlockfile(stderr);
     fprintf(stderr, "[dm] CRASH sig=%d", sig);
     off("addr", (uint64_t)si->si_addr); off("pc", uc->uc_mcontext->__ss.__pc); off("lr", uc->uc_mcontext->__ss.__lr);
     fprintf(stderr, " sp=%#llx\n", uc->uc_mcontext->__ss.__sp);
