@@ -1,0 +1,2 @@
+# kind: evidence  Engage 着色器：尚未拆出（Unity 着色器在 UnityFS 包里，shader_split.py 还读不到）| Engage shaders: not split out yet (Unity shaders sit in UnityFS bundles, which shader_split.py cannot read yet)
+package	index	stage	dm_ctl_sha16	source

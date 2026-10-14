@@ -1,0 +1,50 @@
+# 火焰纹章 Engage（Switch，基础版 v0 + 更新 2.0.0 = v327680）的游戏档案。移植刚起步：只有身份、构建号与模块；内存与 NVN 常数先沿用马力欧的，起机时实测再改
+# Game profile of Fire Emblem Engage (Switch, base game v0 + update 2.0.0 = v327680). The port has just started: only identity, build IDs and modules; the memory and NVN constants are Mario's for now, to be measured during bring-up
+# 格式见 dm/games/README.md | Format: see dm/games/README.md
+# Unity 2020.3.18f1（IL2CPP），SDK 12.3.7：着色器在 RomFS/Data/StreamingAssets 的 UnityFS 包里，shader_split.py 还读不到，着色器表暂空 | Unity 2020.3.18f1 (IL2CPP), SDK 12.3.7: the shaders sit in UnityFS bundles under RomFS/Data/StreamingAssets, which shader_split.py cannot read yet, so the shader tables are empty for now
+
+# ---- 身份 | Identity ----
+title_id	0100A6301214E000
+program_id	0100A6301214E000
+
+# ---- App ----
+app_name	FE Engage
+bundle_id	org.feengage.app
+ipa	FEEngage.ipa
+app_category	public.app-category.strategy-games
+
+# ---- 版本 | Versions ----
+# 只解了合并 2.0.0 的那份；基础版单独的构建号用到时再补 | only the merged 2.0.0 copy is extracted; the base game's own build IDs are added when needed
+build	v327680	2.0.0	main=8c08b9719e085f91847b5e0f935d9488	subsdk0=bffed55ea46c1b48ddeabcacdfbf81bf	sdk=56ec24747ec9e7f19b3efb062483a19d
+package	v327680
+shader_versions	v327680
+
+# ---- 文件 | Files ----
+# 装载顺序同 Horizon：main、subsdk*、sdk（subsdk0 = NintendoSDK_movie） | load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie)
+modules	main subsdk0 sdk
+romfs_marker	Data/data.unity3d
+zip_store	.bundle:.wem:.unity3d:.metallib
+
+# ---- 内存 | Memory ----
+# NPDM 声明系统资源 16 MB，所以 IsVirtualAddressMemoryEnabled 为真：nninitStartup 把整个空闲内存（约 3.2 GB）作虚拟地址内存交给 StandardAllocator，
+# 要在别名区里一次分到这么大的地址区域（较新 SDK 的 AddressRegionManager 先占别名区开头约 1 GB 作节点区）。马力欧的 2.875 GB 别名区不够（StandardAllocator::Initialize 中止）。
+# 先给 Mac 起机用：预留 8 GB、别名区 5.5 GB。iOS 没有「扩展虚拟寻址」授权时单块预留最多 6 GB，到时再定（授权，或少报内存池）
+# The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands all free memory (about 3.2 GB) to StandardAllocator as virtual address memory,
+# which needs one address region that large in the alias region (newer SDKs' AddressRegionManager first takes about 1 GB at the start of the alias region as its node area). Mario's 2.875 GB alias region is too small (StandardAllocator::Initialize aborts).
+# For Mac bring-up for now: an 8 GB reservation with a 5.5 GB alias region. On iOS without the "extended virtual addressing" entitlement a single reservation is at most 6 GB; decide then (the entitlement, or a smaller reported pool)
+mem_reserve	0x200000000
+mem_alias	0x160000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+
+# ---- NVN 驱动常量段（马力欧的值，待按 Engage 的着色器实测） | NVN driver constant segments (Mario's values, to be measured on Engage's shaders) ----
+nvn_tex_base	0x20
+nvn_tex_slots	32
+nvn_samp_base	0x568
+nvn_img_base	0x120
+nvn_img_slots	8
+nvn_ssbo_bases	vs=0x110 ps=0x510 cs=0x310
+
+# ---- 着色器拆分（尚未适用：Unity 着色器要先写 UnityFS 读取） | Shader split (not applicable yet: Unity shaders need a UnityFS reader first) ----
+shader_groups	/StreamingAssets/=unity
+shader_note	Engage 着色器（尚未拆出：在 UnityFS 包里）

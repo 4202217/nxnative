@@ -12,7 +12,7 @@ The project is built from the generic parts of [d2r-mobile](../d2r-mobile) (MIT)
 | Game | Profile | State |
 |---|---|---|
 | Super Mario Bros. Wonder (base game v0, update 1.2.1) | `smbw` | **Playable on the iPhone with sound through several levels**: an 11-minute session at 60 fps with no crash and no audio dropouts. Scripted Mac runs reach the opening course. Notes are in the [Super Mario Bros. Wonder](#super-mario-bros-wonder-smbw) section |
-| Fire Emblem Engage | none | Surveyed, not ported: Unity 2020.3 IL2CPP on SDK 12.3.7. Its shaders are in UnityFS bundles (27,152 of them), which `shader_split.py` cannot read yet |
+| Fire Emblem Engage | `fe_engage` | Bring-up started (Unity 2020.3 IL2CPP, SDK 12.3.7): on the Mac it boots through Unity's startup and runs to the opening movie, with nothing on screen yet. Next: its shaders, which sit in UnityFS bundles (27,152 of them) that `shader_split.py` cannot read yet, and the movies (VP9 WebM; the hardware decoder is stubbed) |
 
 ## Status
 
