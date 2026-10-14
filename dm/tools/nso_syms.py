@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Compare the SDK surface of two Switch games: dynamic symbols of NSO modules + this repo's HLE hook names.
-Usage: nso_syms.py <repo dm/host dir> <gameA ExeFS> <gameB ExeFS>   (A = the game the host already supports, B = the new one)"""
+Usage: nso_syms.py <repo dm/host dir> <gameA ExeFS | -> <gameB ExeFS>   (A = the game the host already supports, B = the new one; - = no reference game, compare with the host hooks only)"""
 import collections, glob, os, re, struct, sys
 import lz4.block
 
@@ -48,7 +48,7 @@ host, A, B = sys.argv[1:4]
 hooks = set()
 for f in glob.glob(os.path.join(host, '*.c')):
     hooks |= set(re.findall(r'HLE(?:_FORCE)?\(\s*"([^"]+)"', open(f, encoding='utf-8', errors='replace').read()))
-ia, ib, eb = imports(A), imports(B), exports(B)
+ia, ib, eb = (set() if A == '-' else imports(A)), imports(B), exports(B)   # A = -：无参照游戏，只比宿主钩子 | A = -: no reference game, compare with the host hooks only
 print('HLE hooks in host:', len(hooks), '| present in new game sdk exports:', len(hooks & eb))
 print('main imports: old game %d, new game %d, shared %d, new-only %d' % (len(ia), len(ib), len(ia & ib), len(ib - ia)))
 new = ib - ia
