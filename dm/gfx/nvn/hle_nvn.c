@@ -1451,12 +1451,14 @@ NVN(nvnTextureViewSetSwizzle, void, NVNtextureView *v, NVNtextureSwizzle r, NVNt
 NVN(nvnColorStateSetAlphaTest, void, NVNcolorState *s, NVNalphaFunc f) { ST(color_st, s)->alpha_func = (uint32_t)f; }
 NVN(nvnColorStateSetLogicOp, void, NVNcolorState *s, NVNlogicOp op) { ST(color_st, s)->logic_op = (uint32_t)op; }
 
-// 设备：组合贴图句柄 = 贴图号 | 采样器号 << 20（与分离句柄同一编码）；计时器数据里的时间戳宿主已是纳秒
-// Device: combined texture handle = texture id | sampler id << 20 (same encoding as the separate handles); the timestamp in counter data is already in nanoseconds on the host
+// 设备：组合贴图句柄 = 贴图号 | 采样器号 << 20（与分离句柄同一编码）
+// Device: combined texture handle = texture id | sampler id << 20 (same encoding as the separate handles)
 NVN(nvnDeviceGetTextureHandle, NVNtextureHandle, const NVNdevice *d, int tex, int samp) { (void)d; return (NVNtextureHandle)((uint64_t)(uint32_t)tex | (uint64_t)(uint32_t)samp << 20); }
-NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return c->timestamp; }
-// 当前 GPU 时刻（纳秒）：宿主 GPU 计时与计数器时戳同一时钟源（CLOCK_MONOTONIC） | Current GPU time (ns): the host's GPU timing and counter timestamps share one clock source (CLOCK_MONOTONIC)
-NVN(nvnDeviceGetCurrentTimestampInNanoseconds, uint64_t, const NVNdevice *d) { (void)d; return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+// 计数器时戳是 19.2 MHz 的 GPU 计数（nvn_mtl.m gpu_ticks：纳秒 × 12 / 625），换回纳秒。原先原样返回，比 GetCurrentTimestampInNanoseconds 小约 52 倍，两者一减就是乱数
+// Counter timestamps are 19.2 MHz GPU ticks (nvn_mtl.m gpu_ticks: ns × 12 / 625); convert back to ns. They used to be returned as is, about 52 times smaller than GetCurrentTimestampInNanoseconds, so subtracting one from the other gave garbage
+NVN(nvnDeviceGetTimestampInNanoseconds, uint64_t, const NVNdevice *d, const NVNcounterData *c) { (void)d; return c->timestamp * 625 / 12; }
+// 当前 GPU 时刻（纳秒）：与计数器时戳同一时钟——客体时钟（guest_ns，nvn_mtl.m gpu_ticks） | Current GPU time (ns): the same clock as the counter timestamps -- the guest clock (guest_ns, nvn_mtl.m gpu_ticks)
+NVN(nvnDeviceGetCurrentTimestampInNanoseconds, uint64_t, const NVNdevice *d) { (void)d; return guest_ns(); }
 NVN(nvnDeviceRegisterFastClearColor, NVNboolean, NVNdevice *d, const float *c, NVNformat f) { (void)d; (void)c; (void)f; return 1; }
 
 // 窗口：活动交换链张数（宿主按创建时张数轮转，只记一次）
