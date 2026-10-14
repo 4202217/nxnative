@@ -663,14 +663,17 @@ static const tex_t *tex_snap(void *rec_, size_t off, int k, const NVNtexture *t,
     if (!t) return NULL;
     tex_t *s = (tex_t *)((uint8_t *)rec_ + off) + k;
     memcpy(s, t, sizeof *s);
+    // 录制时对象无效（Unity 会在录制与提交之间 Finalize 再 Initialize 同一个渲染目标对象）：照旧记对象指针、提交时再读，那时多半又有效了；回放仍按 magic 拦
+    // The object is invalid at record time (Unity finalizes and re-initializes the same render target object between recording and submitting): keep the object pointer as before and read it at submit, when it is usually valid again; replay still checks the magic
     if (s->magic != MAGIC('T', 'E', 'X', 0)) {
         static int red;
         if (red++ < 4) {   // 前 4 例记调用点与对象开头，判断游戏传的是什么 | the first 4 log the call site and the start of the object, to tell what the game passed
             module_t *m = module_of((void *)ra); const uint64_t *q = (const uint64_t *)t;
-            LOG("【红】录命令时贴图对象已失效（未初始化或已 Finalize）：%p 第 %d 个，调用点 %s+%#llx，对象开头 %llx %llx %llx %llx %llx %llx；回放跳过它", (const void *)t, k,
+            LOG("【红】录命令时贴图对象无效（未初始化或已 Finalize）：%p 第 %d 个，调用点 %s+%#llx，对象开头 %llx %llx %llx %llx %llx %llx；提交时再读", (const void *)t, k,
                 m ? m->name : "?", m ? (unsigned long long)(ra - (uint64_t)m->base) : (unsigned long long)ra,
                 (unsigned long long)q[0], (unsigned long long)q[1], (unsigned long long)q[2], (unsigned long long)q[3], (unsigned long long)q[4], (unsigned long long)q[5]);
         }
+        return (const tex_t *)t;
     }
     return s;
 }
@@ -912,7 +915,6 @@ static const char *const g_nops[] = {
     "nvnCommandBufferMultiDrawElementsIndirectCount",
     "nvnCommandBufferDispatchComputeIndirect",
     "nvnCommandBufferSetDepthBounds",
-    "nvnCommandBufferDownsampleTextureView",
     "nvnCommandBufferWaitSync",
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferPushDebugGroupDynamic",
@@ -1550,7 +1552,20 @@ NVN(nvnCommandBufferSetTiledCacheAction, void, NVNcommandBuffer *c, NVNtiledCach
 NVN(nvnCommandBufferSetTiledCacheTileSize, void, NVNcommandBuffer *c, int w, int h) { (void)c; (void)w; (void)h; }
 NVN_NOPROTO(nvnCommandBufferSetColorReductionEnable, void, NVNcommandBuffer *c, uint32_t en) { (void)c; (void)en; }   // 颜色压缩提示 | color compression hints
 NVN_NOPROTO(nvnCommandBufferSetColorReductionThresholds, void, NVNcommandBuffer *c, int cls, const int *t) { (void)c; (void)cls; (void)t; }
-NVN(nvnCommandBufferDownsample, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtexture *d) { (void)c; (void)s; (void)d; ONCE_LOG("【红】Downsample：宿主未实现（跳过）"); }
+// 多重采样贴图解析到单采样贴图（整张）：按贴图拷贝录、带 DM_COPY_RESOLVE，回放用 Metal 的多重采样解析（nvn_mtl.m copy_t2t）
+// Resolve a multisample texture into a single-sample one (whole texture): recorded as a texture copy with DM_COPY_RESOLVE; replay uses Metal's multisample resolve (copy_t2t in nvn_mtl.m)
+static void rec_downsample(NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNtexture *d, const NVNtextureView *dv, uint64_t ra) {
+    p_copy_t2t *o = REC_SNAP(c, OP_COPY_T2T, p_copy_t2t, 2);
+    o->src = tex_snap(o, SNAP_OFF(p_copy_t2t), 0, s, ra); o->dst = tex_snap(o, SNAP_OFF(p_copy_t2t), 1, d, ra);
+    copy_view(&o->sv, &o->has_sv, sv); copy_view(&o->dv, &o->has_dv, dv);
+    if (o->src) o->sr = (NVNcopyRegion){0, 0, 0, (int)o->src->d.width, (int)o->src->d.height, 1};
+    if (o->dst) o->dr = (NVNcopyRegion){0, 0, 0, (int)o->dst->d.width, (int)o->dst->d.height, 1};
+    o->flags = DM_COPY_RESOLVE;
+}
+NVN(nvnCommandBufferDownsample, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtexture *d) { rec_downsample(c, s, NULL, d, NULL, (uint64_t)__builtin_return_address(0)); }
+NVN(nvnCommandBufferDownsampleTextureView, void, NVNcommandBuffer *c, const NVNtexture *s, const NVNtextureView *sv, const NVNtexture *d, const NVNtextureView *dv) {
+    rec_downsample(c, s, sv, d, dv, (uint64_t)__builtin_return_address(0));
+}
 
 // CPU 写贴图（NVN WriteTexels）：贴图存储在池内存里、按 Tegra 块线性排布；整级解出 → 改区域 → 排回。写前解写保护并标脏，回放层下次用到时重传
 // CPU texture write (NVN WriteTexels): texture storage lives in pool memory in Tegra block-linear layout; decode the whole level → patch the region → re-encode.

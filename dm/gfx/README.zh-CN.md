@@ -183,4 +183,4 @@ make -C dm/gfx/metal run        # 离屏示例自测，见 metal/README.zh-CN.md
 - 带索引的四边形图元（8 位索引在回放时扩成 16 位）；
 - 部分形态的贴图到贴图拷贝与清贴图。
 
-`MultiDraw*IndirectCount`、`DispatchComputeIndirect`、`SetDepthBounds`、`DownsampleTextureView` 等列在 `g_nops` 里的函数是空实现，调用不报红也不生效。
+`MultiDraw*IndirectCount`、`DispatchComputeIndirect`、`SetDepthBounds` 等列在 `g_nops` 里的函数是空实现，调用不报红也不生效。`Downsample` / `DownsampleTextureView` 按贴图拷贝录（带宿主标志 `DM_COPY_RESOLVE`），回放用 Metal 的多重采样解析。
