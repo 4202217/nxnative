@@ -27,6 +27,7 @@
 #include <mach/mach.h>
 #include <pthread/qos.h>
 #include <dlfcn.h>
+#include <stdatomic.h>
 
 #define R_TIMEOUT     0xEA01u   // 内核模块 1，描述 117 | Kernel module 1, description 117
 #define R_CANCELLED   0xEC01u   // 118
@@ -55,6 +56,14 @@ typedef struct thr {
     uint64_t nsvc;             // SVC 次数（现场导出用） | SVC count (for the state dump)
     mach_port_t mport;         // 宿主线程端口（取 CPU 时间） | Host thread port (to get CPU time)
     uint32_t qos;
+    // 暂停（SetThreadActivity，IL2CPP 的垃圾回收停世界用）：pause_req 请求、paused 已停住；停在 SVC 里时现场取门帧 svc_regs（进 SVC 时登记），
+    // 停在客体代码里时现场由信号处理存进 ctx_*；pcv 让请求方等「已停住」、被停线程等「恢复」
+    // Pausing (SetThreadActivity, used by IL2CPP's garbage collector to stop the world): pause_req = requested, paused = stopped; when stopped inside an SVC the context comes from the gate frame svc_regs (registered on SVC entry),
+    // when stopped in guest code the signal handler saves it into ctx_*; pcv lets the requester wait for "stopped" and the paused thread wait for "resume"
+    _Atomic int pause_req; int paused;
+    uint64_t *_Atomic svc_regs; uint64_t svc_pc;
+    int ctx_ok; uint64_t ctx_x[29], ctx_fp, ctx_lr, ctx_sp, ctx_pc; uint32_t ctx_pstate, ctx_fpcr, ctx_fpsr; __uint128_t ctx_v[32];
+    pthread_cond_t pcv;
 } thr_t;
 static thr_t *g_all;
 
@@ -184,7 +193,7 @@ static void *thread_main(void *p) {
 }
 static void thr_free(thr_t *t) {   // 持 G；从全部线程链摘下并释放 | Holding G; unlink from the all-threads chain and free
     for (thr_t **p = &g_all; *p; p = &(*p)->all) if (*p == t) { *p = t->all; break; }
-    pthread_cond_destroy(&t->cv); free(t);
+    pthread_cond_destroy(&t->cv); pthread_cond_destroy(&t->pcv); free(t);
 }
 static const char *thr_name(thr_t *t, char *buf, size_t n);
 static void thread_exit(thr_t *t) {
@@ -201,12 +210,77 @@ static void thread_exit(thr_t *t) {
 }
 void dm_thread_returned(void) { die("客体线程入口函数返回（Horizon 要求 ExitThread）"); }
 
+// ---------- 暂停线程（SetThreadActivity / GetThreadContext3）----------
+// IL2CPP 的 Boehm 垃圾回收停世界：逐个 SetThreadActivity(句柄, 暂停)、GetThreadContext3 读寄存器找根、扫栈，再恢复。原先两者都是占位成功：
+// 线程照跑、现场是空的，回收器漏掉只在寄存器里的指针、提前回收还在用的对象（终结器连带释放原生资源）。现在照 Horizon 语义真停：
+//   · 在 SVC 里（门帧已存全寄存器）：立即算停住，现场 = 门帧；SVC 返回前若仍在暂停就停在出口等恢复；
+//   · 在跑客体代码：发 SIGUSR2，处理函数存下 ucontext 后原地等恢复（客体代码不持宿主锁，可在信号处理里取 G）；
+//   · 在宿主代码里（HLE 函数等）：处理函数不停，请求方隔 100 µs 重发，直到它回到客体代码或进 SVC。
+// IL2CPP's Boehm garbage collector stops the world: SetThreadActivity(handle, paused) on each thread, GetThreadContext3 to read registers for roots, scan the stack, then resume. Both used to be placeholders that reported success:
+// threads kept running and the context was empty, so the collector missed pointers held only in registers and freed objects still in use (finalizers releasing native resources with them). They now really stop, as on Horizon:
+//   · inside an SVC (the gate frame holds every register): stopped at once, context = the gate frame; if still paused when the SVC returns, the thread waits at the exit for the resume;
+//   · running guest code: send SIGUSR2; the handler saves the ucontext and waits there for the resume (guest code holds no host locks, so the handler may take G);
+//   · inside host code (HLE functions etc.): the handler does not stop it; the requester resends every 100 µs until the thread is back in guest code or enters an SVC.
+module_t *module_of(const void *p);
+static void on_pause_sig(int sig, siginfo_t *si, void *uc_) {
+    (void)sig; (void)si;
+    thr_t *t = pthread_getspecific(g_keythr);
+    if (!t || !atomic_load(&t->pause_req) || atomic_load(&t->svc_regs)) return;
+    ucontext_t *uc = uc_; const struct __darwin_arm_thread_state64 *ss = &uc->uc_mcontext->__ss;
+    if (!module_of((void *)__darwin_arm_thread_state64_get_pc(*ss))) return;   // 在宿主代码里：不停，请求方重发 | in host code: do not stop; the requester resends
+    pthread_mutex_lock(&G);
+    if (t->pause_req) {
+        for (int i = 0; i < 29; i++) t->ctx_x[i] = ss->__x[i];
+        t->ctx_fp = __darwin_arm_thread_state64_get_fp(*ss); t->ctx_lr = __darwin_arm_thread_state64_get_lr(*ss);
+        t->ctx_sp = __darwin_arm_thread_state64_get_sp(*ss); t->ctx_pc = __darwin_arm_thread_state64_get_pc(*ss); t->ctx_pstate = ss->__cpsr;
+        memcpy(t->ctx_v, uc->uc_mcontext->__ns.__v, sizeof t->ctx_v); t->ctx_fpcr = uc->uc_mcontext->__ns.__fpcr; t->ctx_fpsr = uc->uc_mcontext->__ns.__fpsr;
+        t->ctx_ok = 1; t->paused = 1; pthread_cond_broadcast(&t->pcv);
+        while (t->pause_req) pthread_cond_wait(&t->pcv, &G);
+        t->paused = 0; t->ctx_ok = 0;
+    }
+    pthread_mutex_unlock(&G);
+}
+// 门进 SVC / 出 SVC 时调（hle.c gate_dispatch） | called by the gate on SVC entry / exit (gate_dispatch in hle.c)
+void thr_svc_enter(uint64_t *regs, uint64_t pc) {
+    thr_t *t = pthread_getspecific(g_keythr); if (!t) return;
+    t->svc_pc = pc; atomic_store(&t->svc_regs, regs);
+    if (atomic_load(&t->pause_req)) { pthread_mutex_lock(&G); if (t->pause_req && !t->paused) { t->paused = 1; pthread_cond_broadcast(&t->pcv); } pthread_mutex_unlock(&G); }
+}
+void thr_svc_leave(void) {
+    thr_t *t = pthread_getspecific(g_keythr); if (!t) return;
+    pthread_mutex_lock(&G);
+    while (t->pause_req) { t->paused = 1; pthread_cond_broadcast(&t->pcv); pthread_cond_wait(&t->pcv, &G); }
+    t->paused = 0; atomic_store(&t->svc_regs, NULL);
+    pthread_mutex_unlock(&G);
+}
+static void pause_install(void) {
+    struct sigaction sa = {.sa_sigaction = on_pause_sig, .sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART};
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGUSR2, &sa, NULL);
+}
+// Horizon svc::ThreadContext（arm64，0x320 字节） | Horizon svc::ThreadContext (arm64, 0x320 bytes)
+typedef struct { uint64_t r[29], fp, lr, sp, pc; uint32_t pstate, pad; __uint128_t v[32]; uint32_t fpcr, fpsr; uint64_t tpidr; } hz_ctx_t;
+_Static_assert(sizeof(hz_ctx_t) == 0x320, "ThreadContext");
+static void ctx_fill(const thr_t *t, hz_ctx_t *o) {   // 持 G、t 已停住 | holding G, t is stopped
+    memset(o, 0, sizeof *o);
+    const uint64_t *r = atomic_load(&t->svc_regs);
+    if (r) {   // 门帧：x0..x30 在 +0、q0..q31 在 +256、nzcv / fpsr / fpcr 在 +768 / +776 / +784；进门前的栈顶 = 门帧 + 800 | gate frame: x0..x30 at +0, q0..q31 at +256, nzcv / fpsr / fpcr at +768 / +776 / +784; the stack top before the gate = frame + 800
+        for (int i = 0; i < 29; i++) o->r[i] = r[i];
+        o->fp = r[29]; o->lr = r[30]; o->sp = (uint64_t)r + 800; o->pc = t->svc_pc; o->pstate = (uint32_t)r[96];
+        memcpy(o->v, r + 32, sizeof o->v); o->fpsr = (uint32_t)r[97]; o->fpcr = (uint32_t)r[98];
+    } else if (t->ctx_ok) {
+        memcpy(o->r, t->ctx_x, sizeof o->r); o->fp = t->ctx_fp; o->lr = t->ctx_lr; o->sp = t->ctx_sp; o->pc = t->ctx_pc; o->pstate = t->ctx_pstate;
+        memcpy(o->v, t->ctx_v, sizeof o->v); o->fpcr = t->ctx_fpcr; o->fpsr = t->ctx_fpsr;
+    }
+}
+
 // 主线程登记，返回其句柄（交给 nnosInitialize 作主线程句柄）
 // Register the main thread and return its handle (passed to nnosInitialize as the main thread handle)
 uint32_t svc_thread_main_init(void) {
     pthread_key_create(&g_keythr, NULL);
+    pause_install();
     thr_t *t = calloc(1, sizeof *t);
-    pthread_cond_init(&t->cv, NULL);
+    pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
     t->started = 1; t->prio = 44; t->core = 0; t->mask = 7; t->pt = pthread_self(); t->mport = pthread_mach_thread_np(t->pt);
     pthread_mutex_lock(&G); t->handle = h_new(O_THREAD, t); t->id = g_next_id++; t->all = g_all; g_all = t; pthread_mutex_unlock(&G);
     pthread_setspecific(g_keythr, t);
@@ -441,7 +515,7 @@ int svc_thread(int num, uint64_t *regs) {
     switch (num) {
     case 0x08: {  // CreateThread(→w1 句柄; x1 入口, x2 参数, x3 栈顶, w4 优先级, w5 核) | CreateThread(→w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core)
         thr_t *t = calloc(1, sizeof *t);
-        pthread_cond_init(&t->cv, NULL);
+        pthread_cond_init(&t->cv, NULL); pthread_cond_init(&t->pcv, NULL);
         t->entry = regs[1]; t->arg = regs[2]; t->stack_top = regs[3] & ~0xFull;
         // 核 -2（IdealCoreUseProcessValue）= 进程缺省理想核（本作 0 号），亲和掩码只含它——同 Horizon 内核。原先记成 -2，GetCurrentProcessorNumber 也答 -2，
         //   SMBW 的字体引擎按当前核号取每核引擎槽，拿 -2 当下标越界崩（main +0x107dbc0，SequenceBackgroundWorker 线程）
@@ -495,6 +569,37 @@ int svc_thread(int num, uint64_t *regs) {
         regs[0] = t ? 0 : R_BAD_HANDLE; return 1;
     }
     case 0x10: { int c = cur()->core; regs[0] = (uint64_t)(uint32_t)(c >= 0 ? c : 0); return 1; }   // 当前核号总在 0..2（核号从不为负） | The current core number is always 0..2 (never negative)
+    case 0x32: {  // SetThreadActivity(w0 线程, w1 0 可运行 / 1 暂停)：见上「暂停线程」 | SetThreadActivity(w0 thread, w1 0 runnable / 1 paused): see "Pausing threads" above
+        thr_t *me = cur(); int act = (int)regs[1];
+        pthread_mutex_lock(&G);
+        thr_t *t = h_get((uint32_t)regs[0], O_THREAD); int64_t r = 0;
+        if (!t) r = R_BAD_HANDLE;
+        else if (t == me) r = R_BAD_STATE;
+        else if (act == 1) {
+            atomic_store(&t->pause_req, 1);
+            if (!t->started || t->exited || atomic_load(&t->svc_regs)) t->paused = 1;
+            uint64_t t0 = now_ns(); int warned = 0;
+            while (!t->paused && !t->exited) {
+                pthread_mutex_unlock(&G); pthread_kill(t->pt, SIGUSR2); pthread_mutex_lock(&G);
+                if (t->paused || t->exited) break;
+                struct timespec dl; clock_gettime(CLOCK_REALTIME, &dl); dl.tv_nsec += 100000; if (dl.tv_nsec >= 1000000000) { dl.tv_sec++; dl.tv_nsec -= 1000000000; }
+                pthread_cond_timedwait(&t->pcv, &G, &dl);
+                if (!warned && now_ns() - t0 > 1000000000ull) { warned = 1; LOG("【红】暂停线程 %#x 超过 1 秒还没停住（一直在宿主代码里？）", t->handle); }
+            }
+        } else { atomic_store(&t->pause_req, 0); pthread_cond_broadcast(&t->pcv); }
+        pthread_mutex_unlock(&G);
+        { static int n; if (n++ < 4) LOG("SetThreadActivity %#x → %s（%s）", (uint32_t)regs[0], act ? "暂停" : "恢复", r ? "失败" : "成功"); }
+        regs[0] = (uint64_t)r; return 1;
+    }
+    case 0x33: {  // GetThreadContext3(x0 出参 ThreadContext*, w1 线程)：只对已停住的线程 | GetThreadContext3(x0 out ThreadContext*, w1 thread): only for stopped threads
+        pthread_mutex_lock(&G);
+        thr_t *t = h_get((uint32_t)regs[1], O_THREAD); int64_t r = 0;
+        if (!t) r = R_BAD_HANDLE;
+        else if (!t->paused) r = R_BAD_STATE;
+        else ctx_fill(t, (hz_ctx_t *)regs[0]);
+        pthread_mutex_unlock(&G);
+        regs[0] = (uint64_t)r; return 1;
+    }
     case 0x25: { thr_t *t = h_get((uint32_t)regs[1], O_THREAD); regs[0] = t ? 0 : R_BAD_HANDLE; regs[1] = t ? t->id : 0; return 1; }
 
     case 0x1A: {  // ArbitrateLock(w0 持有者句柄, x1 地址, w2 本线程标签) | ArbitrateLock(w0 owner handle, x1 address, w2 this thread's tag)

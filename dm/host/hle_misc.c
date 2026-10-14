@@ -70,6 +70,8 @@ HLE_FORCE("_ZN2nn3nsd9ResolveExEPNS0_4FqdnERKS1_", "服务器名解析，联网�
 // bool arguments only look at the low 8 bits; returns bool
 HLE_FORCE("_ZN2nn4pctl25TryBeginFreeCommunicationEb", "家长控制·与他人通信，联网排除；恒不允许", unsigned, h_pctl_TryBegin, unsigned show_ui) { (void)show_ui; return 0; }
 HLE_FORCE("_ZN2nn4pctl20EndFreeCommunicationEv", "家长控制·与他人通信", void, h_pctl_End, void) {}
+// Engage 进战斗地图时查询（不弹界面）；不接管时 SDK 经 sm 连 pctl 服务，宿主没有，中止 | Engage asks on entering a battle map (no UI); without this the SDK connects to the pctl service through sm, which the host does not have, and aborts
+HLE_FORCE("_ZN2nn4pctl28IsFreeCommunicationAvailableEv", "家长控制·与他人通信可用否，联网排除；恒否", unsigned, h_pctl_IsFree, void) { return 0; }
 
 // swkbd 软键盘：见 hle_swkbd.c
 // swkbd software keyboard: see hle_swkbd.c

@@ -28,12 +28,14 @@ zip_store	.bundle:.wem:.unity3d:.metallib
 # ---- 内存 | Memory ----
 # NPDM 声明系统资源 16 MB，所以 IsVirtualAddressMemoryEnabled 为真：nninitStartup 把整个空闲内存（约 3.2 GB）作虚拟地址内存交给 StandardAllocator，
 # 要在别名区里一次分到这么大的地址区域（较新 SDK 的 AddressRegionManager 先占别名区开头约 1 GB 作节点区）。马力欧的 2.875 GB 别名区不够（StandardAllocator::Initialize 中止）。
-# 先给 Mac 起机用：预留 8 GB、别名区 5.5 GB。iOS 没有「扩展虚拟寻址」授权时单块预留最多 6 GB，到时再定（授权，或少报内存池）
 # The NPDM declares 16 MB of system resource, so IsVirtualAddressMemoryEnabled is true: nninitStartup hands all free memory (about 3.2 GB) to StandardAllocator as virtual address memory,
 # which needs one address region that large in the alias region (newer SDKs' AddressRegionManager first takes about 1 GB at the start of the alias region as its node area). Mario's 2.875 GB alias region is too small (StandardAllocator::Initialize aborts).
-# For Mac bring-up for now: an 8 GB reservation with a 5.5 GB alias region. On iOS without the "extended virtual addressing" entitlement a single reservation is at most 6 GB; decide then (the entitlement, or a smaller reported pool)
-mem_reserve	0x200000000
-mem_alias	0x160000000
+# Engage 不调 SetHeapSize：全部内存经别名区（MapPhysicalMemory，实测映射一直用到别名区顶端），线程栈在栈区里随机放。所以堆区只留 128 MB，
+# 整块 6 GB = 前置 256 MB + 别名区 5.375 GB + 栈区 256 MB + 堆区 128 MB，正好是 iOS 不带「扩展虚拟寻址」授权时单块预留的上限（原先 Mac 起机用 8 GB、别名区 5.5 GB）
+# Engage never calls SetHeapSize: all its memory goes through the alias region (MapPhysicalMemory; measured mappings reach the top of the alias region), and thread stacks are placed at random in the stack region. So the heap region keeps only 128 MB,
+# and the 6 GB block = 256 MB in front + 5.375 GB alias region + 256 MB stack region + 128 MB heap region, exactly the largest single reservation iOS allows without the "extended virtual addressing" entitlement (Mac bring-up used 8 GB with a 5.5 GB alias region)
+mem_reserve	0x180000000
+mem_alias	0x158000000
 mem_stack	0x10000000
 app_pool	0xCD500000
 

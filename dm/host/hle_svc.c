@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <sched.h>
 #include <time.h>
+#include <stdatomic.h>
 
 // 预留一整块客体地址空间，按 Horizon 分区（地址值直接用宿主 mmap 得到的真地址）。只占地址、不占内存。
 // 大小 5 GB：游戏要的是开头 1 GB（别名区、栈）+ 一整块堆（应用内存池 3285 MiB，见下面 APP_POOL），合计约 4.2 GB；
@@ -107,6 +108,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
         else if (size < g_heap_cur) rc = mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
         if (g_flag.svc) LOG("SetHeapSize %#zx -> base %p mprotect=%d errno=%d", size, g_heap, rc, errno);
+        else if (size > g_heap_cur) LOG("[内存] 堆 %.2f GB（堆区 %.2f GB）", size / 1073741824.0, g_heap_cap / 1073741824.0);
         g_heap_cur = size;
         regs[0] = 0; regs[1] = (uint64_t)g_heap; return 0;
     }
@@ -199,6 +201,13 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                                         : (madvise((void *)mlo, mhi - mlo, MADV_FREE), mprotect((void *)mlo, mhi - mlo, PROT_NONE));
         if (rc) die("SVC %#x mprotect %p+%#zx errno=%d", num, a, size, errno);
         if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", num == 0x2C ? "Map" : "Unmap", a, size);
+        // 别名区用到多深（每过 256 MB 记一行）：定预留块与别名区大小用（iOS 单块预留上限 6 GB） | how deep the alias region is used (one line per 256 MB crossed): for sizing the reservation and alias region (iOS caps a single reservation at 6 GB)
+        if (num == 0x2C) { static _Atomic uint64_t hw; uint64_t end = (uint64_t)(a + size - g_alias), old = atomic_load(&hw);
+            while (end > old && !atomic_compare_exchange_weak(&hw, &old, end)) {}
+            if (end > old && end >> 28 != old >> 28) LOG("[内存] 别名区映射到 +%.2f GB（别名区 %.2f GB）", end / 1073741824.0, g_alias_cap / 1073741824.0); }
+        // 别名区实际映射的总量（每跨 256 MB 记一行，涨跌都记）：看游戏用了多少物理内存、有没有一直涨 | total actually mapped in the alias region (one line per 256 MB crossed, up or down): how much physical memory the game uses and whether it keeps growing
+        { static _Atomic int64_t tot; int64_t d = num == 0x2C ? (int64_t)size : -(int64_t)size, before = atomic_fetch_add(&tot, d), after = before + d;
+          if (before >> 28 != after >> 28) LOG("[内存] 别名区已映射 %.2f GB（应用池 %.2f GB）", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
     }
     case 0x26: {  // Break(reason, ptr, size)：SDK 致命中止 | Break(reason, ptr, size): SDK fatal abort
