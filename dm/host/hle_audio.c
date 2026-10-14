@@ -61,6 +61,8 @@ static void *event_notify(void *p) {
     return NULL;
 }
 
+// 欠载：回调要数据时待播队列已空的次数 / 补零字节（au_render 每 2000 次回调记一行） | underruns: times the pending queue was empty when the callback needed data / zero-filled bytes (au_render logs one line every 2000 callbacks)
+static _Atomic uint64_t g_au_under_n, g_au_under_b;
 // 从待播队列取 n 字节交给出声端；整块播完就挪到已释放并通知普通线程。
 // Take n bytes from the pending queue and hand them to the output side; once a whole block has played, move it to released and notify the ordinary thread.
 static void pull(aout *a, uint8_t *dst, uint64_t n) {
@@ -69,7 +71,7 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
     while (n) {
         uint32_t qt = atomic_load_explicit(&a->q_tail, memory_order_acquire);
         if (qh == qt || atomic_load_explicit(&a->state, memory_order_acquire) != STATE_STARTED) {
-            { extern _Atomic uint64_t g_au_under_n, g_au_under_b; if (qh == qt && atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED) { atomic_fetch_add(&g_au_under_n, 1); atomic_fetch_add(&g_au_under_b, n); } }   // [DEBUG-flk1]
+            if (qh == qt && atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED) { atomic_fetch_add(&g_au_under_n, 1); atomic_fetch_add(&g_au_under_b, n); }
             memset(dst, 0, n); break; }
         gbuf *b = a->q[qh & (QMAX - 1)];
         uint64_t k = b->size - a->pos; if (k > n) k = n;
@@ -91,16 +93,15 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
 
 static _Atomic uint64_t g_render_calls;   // 声卡回调累计（生命周期验证：恢复后须继续增长） | Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
 uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_calls, memory_order_relaxed); }
-_Atomic uint64_t g_au_under_n, g_au_under_b;   // [DEBUG-flk1] 欠载：回调要数据时待播队列已空的次数 / 补零字节 | underruns: times the pending queue was empty when the callback needed data / zero-filled bytes
 static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
     (void)f; (void)ts; (void)bus; (void)frames;
     aout *a = ctx;
     uint64_t nc = atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed) + 1;
-    {   // [DEBUG-flk1] 每 2000 次回调记一行：每次要多少帧、回调开始时待播多少块、欠载次数 | every 2000 callbacks log one line: frames requested per call, pending blocks at callback start, underruns
+    {   // 每 2000 次回调记一行：每次要多少帧、回调开始时待播多少块、欠载次数（换新设备时看这行；docs/agents/03-bringup.md「iOS 上爆音」） | every 2000 callbacks log one line: frames requested per call, pending blocks at callback start, underruns (check this line on a new device; docs/agents/03-bringup.md "Crackling on iOS only")
         static uint32_t fmin = ~0u, fmax; static uint64_t qsum, u0, ub0; uint32_t qd = atomic_load(&a->q_tail) - atomic_load(&a->q_head);
         if (frames < fmin) fmin = frames; if (frames > fmax) fmax = frames; qsum += qd;
         if (nc % 2000 == 0) { uint64_t un = atomic_load(&g_au_under_n), ubb = atomic_load(&g_au_under_b);
-            LOG("[DEBUG-flk1] 声卡回调 %llu 次：每次 %u–%u 帧，回调时待播均 %.1f 块；这 2000 次里欠载 %llu 次、补零 %.1f ms", (unsigned long long)nc, fmin, fmax, qsum / 2000.0,
+            LOG("audio 声卡回调 %llu 次：每次 %u–%u 帧，回调时待播均 %.1f 块；这 2000 次里欠载 %llu 次、补零 %.1f ms", (unsigned long long)nc, fmin, fmax, qsum / 2000.0,
                 (unsigned long long)(un - u0), (ubb - ub0) / (2.0 * a->ch) / (RATE / 1000.0)); fmin = ~0u; fmax = 0; qsum = 0; u0 = un; ub0 = ubb; } }
     pull(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
     return noErr;
@@ -121,9 +122,9 @@ static void au_open(aout *a) {
                                      .mChannelsPerFrame = (UInt32)a->ch, .mBitsPerChannel = 16};
     AURenderCallbackStruct cb = {au_render, a};
 #if !TARGET_OS_IPHONE
-    { const char *e = getenv("DM_DBG_AU_FRAMES"); if (e) {   // [DEBUG-flk1] Mac 上把声卡回调改成每次 N 帧（模拟 iOS 缺省约 1024 帧） | on the Mac, make the sound card callback ask N frames each time (emulating the iOS default of about 1024 frames)
+    { const char *e = getenv("DM_DBG_AU_FRAMES"); if (e) {   // 诊断：Mac 上把声卡回调改成每次 N 帧（1024 = iOS 缺省，复现爆音） | diagnostic: on the Mac, make the sound card callback ask N frames each time (1024 = the iOS default, reproduces the crackling)
         UInt32 fr = (UInt32)atoi(e); OSStatus st = AudioUnitSetProperty(a->au, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0, &fr, sizeof fr);
-        LOG("[DEBUG-flk1] 声卡缓冲帧数设为 %u：状态 %d", fr, (int)st); } }
+        LOG("audio 声卡缓冲帧数设为 %u：状态 %d", fr, (int)st); } }
 #endif
     if (AudioUnitSetProperty(a->au, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &f, sizeof f) ||
         AudioUnitSetProperty(a->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb) ||

@@ -1,4 +1,3 @@
-#include <dlfcn.h>
 // NVN 接口层：接管 main 导入的 nvnBootstrapLoader，sdk 里的 NVN 驱动整块不执行。
 // 523 个 NVN 名字一律返回计数跳板（nvn_thunks.S），跳板再转到这里的实现：
 //   · 有语义的（设备 / 内存池 / 贴图与采样器 / 队列 / 窗口 / 同步 / 事件 / 命令缓冲内存）按 NVN 语义实现，对象是真的；
@@ -420,9 +419,7 @@ NVN(nvnCommandBufferInitialize, NVNboolean, NVNcommandBuffer *c, NVNdevice *d) {
     memset(c, 0, sizeof(cmd_t)); CB(c)->magic = MAGIC('C', 'M', 'D', 'B'); CB(c)->dev = d; return 1;
 }
 NVN(nvnCommandBufferFinalize, void, NVNcommandBuffer *c) { CB(c)->magic = 0; }
-NVN(nvnCommandBufferSetMemoryCallback, void, NVNcommandBuffer *c, PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb) { CB(c)->cb = cb;
-    { static void *seen[16]; static int ns; int k = 0; while (k < ns && seen[k] != (void *)cb) k++;   // [DEBUG-flk1] 游戏的命令内存回调地址 | the game's command memory callback addresses
-      if (k == ns && ns < 16) { seen[ns++] = (void *)cb; module_t *m = module_of((void *)cb), *r = module_of(__builtin_return_address(0)); LOG("[DEBUG-flk1] SetMemoryCallback 回调 %s+%#lx（调用者 %s+%#lx）", m ? m->name : "?", (unsigned long)(m ? (uintptr_t)cb - (uintptr_t)m->base : (uintptr_t)cb), r ? r->name : "?", (unsigned long)(r ? (uintptr_t)__builtin_return_address(0) - (uintptr_t)r->base : 0)); } } }
+NVN(nvnCommandBufferSetMemoryCallback, void, NVNcommandBuffer *c, PFNNVNCOMMANDBUFFERMEMORYCALLBACKPROC cb) { CB(c)->cb = cb; }
 NVN(nvnCommandBufferSetMemoryCallbackData, void, NVNcommandBuffer *c, void *d) { CB(c)->cb_data = d; }
 static uint8_t *align8(uint8_t *p) { return (uint8_t *)(((uintptr_t)p + 7) & ~(uintptr_t)7); }
 // 诊断 DM_NVN_CMDSTAT=1：每 300 帧记一行命令录制的用量——每帧录了多少字节 / 多少条、游戏每次给多大一段命令内存、每帧补内存回调几次、宿主补段几次、
@@ -509,16 +506,7 @@ NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemory
     const pool_t *pl = (const pool_t *)p;
     if (!pl || n < 64) { if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.hostseg++; pthread_mutex_unlock(&g_cs_mu); } cmd_new_segment(CB(c), hostseg_take(CB(c)), HOSTSEG_SZ); return; }
     if (!pl->mem) { LOG("【红】AddCommandMemory 池没有 CPU 存储"); return; }
-    {   // [DEBUG-flk1] DM_DBG_GRANTS=1：按（调用者, 长度档）统计游戏给命令内存，每 600 帧打一次 | DM_DBG_GRANTS=1: count the game's command memory grants by (caller, size class), printed every 600 frames
-        static int on = -1; if (on < 0) on = getenv("DM_DBG_GRANTS") != NULL;
-        if (on) { static uintptr_t ra[64]; static size_t sz[64]; static uint64_t cnt[64]; static int nr; static uint64_t last_f; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
-            uintptr_t r = (uintptr_t)__builtin_return_address(0); size_t cls = n >= 0x100000 ? (n + 0xfffff) & ~(size_t)0xfffff : n >= 0x1000 ? (n + 0xfff) & ~(size_t)0xfff : n;
-            pthread_mutex_lock(&mu); int k = 0; while (k < nr && !(ra[k] == r && sz[k] == cls)) k++; if (k == nr && nr < 64) { ra[nr] = r; sz[nr] = cls; nr++; } if (k < 64) cnt[k]++;
-            if (dm_nvn_frame_count() / 600 != last_f / 600) { last_f = dm_nvn_frame_count(); for (int i = 0; i < nr; i++) { module_t *m = module_of((void *)ra[i]); LOG("[DEBUG-flk1] 给命令内存 调用者 %s+%#lx 长度档 %#zx 累计 %llu 次（帧 %llu）", m ? m->name : "?", (unsigned long)(m ? ra[i] - (uintptr_t)m->base : ra[i]), sz[i], (unsigned long long)cnt[i], (unsigned long long)last_f); } }
-            pthread_mutex_unlock(&mu); } }
     hostseg_release((uintptr_t)(pl->mem + off), (uintptr_t)(pl->mem + off + n));
-    { static long shrink = -1; if (shrink < 0) { const char *e = getenv("DM_DBG_CMDMEM_SHRINK"); shrink = e ? atol(e) : 0; }   // [DEBUG-flk1] 把游戏给的每段命令内存截短，逼录制溢出到宿主补段（在 Mac 上复现 iPhone 的溢出） | cut every game command memory chunk short to force overflow into host segments (reproduces the iPhone overflow on the Mac)
-      if (shrink && n > (size_t)shrink + 256) n -= (size_t)shrink; }
     if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.grants++; g_cs.grant_bytes += n; if (!g_cs.grant_min || n < g_cs.grant_min) g_cs.grant_min = n; if (n > g_cs.grant_max) g_cs.grant_max = n; pthread_mutex_unlock(&g_cs_mu); }
     { static int cblog = -1; if (cblog < 0) cblog = getenv("DM_NVN_CBLOG") != NULL; static uint64_t ng; if (cblog && (++ng <= 60 || ng % 500 == 0)) LOG("[nvn] AddCommandMemory #%llu cmd=%p 池 %p +%#lx 长 %#zx（录制中 %d）", (unsigned long long)ng, (void *)c, (const void *)pl, (long)off, n, CB(c)->recording); }
     cmd_new_segment(CB(c), pl->mem + off, n);
@@ -533,9 +521,6 @@ static uint8_t *cmd_alloc(cmd_t *o, uint32_t size) {
         // The game's callback cannot supply enough (newer-SDK games hand out small chunks sized for real-device commands, or disable the callback and manage memory themselves): continue recording in a host segment instead of aborting
         if (!o->cb || tries == 2) {
             static int once; if (!once++) LOG("[nvn] 命令内存：游戏回调补不够（cb=%p，需 %u 字节），改用宿主补段", (void *)o->cb, size + OP_RESERVE);
-            { static int nlog; if (dm_nvn_frame_count() > 600 && nlog < 30) { nlog++;   // [DEBUG-flk1] 局内溢出明细 | in-game overflow details
-                LOG("[DEBUG-flk1] 溢出 帧 %llu cmd=%p 本次录制已写 %llu 字节，本条要 %u（+留 %d），段内剩 %ld，段尾 %p",
-                    (unsigned long long)dm_nvn_frame_count(), (void *)o, (unsigned long long)o->used, size, OP_RESERVE, (long)(o->end - o->cur), (void *)o->end); } }
             cmd_new_segment(o, hostseg_take(o), HOSTSEG_SZ); break;
         }
         if (cs_on()) { pthread_mutex_lock(&g_cs_mu); g_cs.cbs++; pthread_mutex_unlock(&g_cs_mu); }
@@ -554,22 +539,12 @@ NVN(nvnCommandBufferBeginRecording, void, NVNcommandBuffer *c) {
 }
 NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     cmd_t *o = CB(c);
-    { static int seen; if (o->nvn_flag10 && !seen++) LOG("[DEBUG-flk1] 游戏写了 +0x10：%#llx（cmd=%p）", (unsigned long long)o->nvn_flag10, (void *)o); }   // [DEBUG-flk1]
     uint8_t *p = cmd_alloc(o, 8); put_hdr(p, OP_END, 8);
     o->recording = 0;
     return (NVNcommandHandle)o->begin;
 }
 NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->recording != 0; }
 NVN(nvnCommandBufferCopyCommands, void, NVNcommandBuffer *c, int n, const NVNcommandHandle *h) {
-    {   // [DEBUG-flk1] DM_DBG_CALLSITES=1：记下调用者（客体返回地址）与次数，每 600 帧打一次 | DM_DBG_CALLSITES=1: record callers (guest return addresses) and counts, printed every 600 frames
-        static int on = -1; if (on < 0) on = getenv("DM_DBG_CALLSITES") != NULL;
-        if (on) { static uintptr_t ra[64]; static uint64_t cnt[64]; static int nra; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t last_f;
-            uintptr_t r = (uintptr_t)__builtin_return_address(0); pthread_mutex_lock(&mu);
-            int k = 0; while (k < nra && ra[k] != r) k++; if (k == nra && nra < 64) ra[nra++] = r; if (k < 64) cnt[k] += n;
-            if (dm_nvn_frame_count() / 600 != last_f / 600) { last_f = dm_nvn_frame_count(); for (int i = 0; i < nra; i++) { module_t *m = module_of((void *)ra[i]); LOG("[DEBUG-flk1] CallCommands 调用者 %s+%#lx 累计 %llu 个句柄", m ? m->name : "?", (unsigned long)(m ? ra[i] - (uintptr_t)m->base : ra[i]), (unsigned long long)cnt[i]); } }
-            pthread_mutex_unlock(&mu);
-            { static int tab; if (!tab++) { module_t *m = module_of((void *)r);   // [DEBUG-flk1] 一次性：打出 main+0x35ad800..0x35adc00 的 NVN 函数指针表（解析成宿主符号） | one-off: print the NVN function pointer table at main+0x35ad800..0x35adc00 (resolved to host symbols)
-                if (m) for (uint64_t o = 0x35ad800; o < 0x35adc00; o += 8) { void *fp = *(void **)(m->base + o); Dl_info di; if (fp && dladdr(fp, &di) && di.dli_sname) LOG("[DEBUG-flk1] 表 main+%#llx → %s", (unsigned long long)o, di.dli_sname); } } } } }
     for (int i = 0; i < n; i++) { uint8_t *p = cmd_alloc(CB(c), 16); put_hdr(p, OP_CALL, 16); memcpy(p + 8, &h[i], 8); }
 }
 NVN(nvnCommandBufferSignalEvent, void, NVNcommandBuffer *c, const NVNevent *e, NVNeventSignalMode m, NVNeventSignalLocation loc, int flags, uint32_t v) {
@@ -1394,7 +1369,6 @@ NVN_NOPROTO(nvnWindowSetNumActiveTextures, void, NVNwindow *w, int n) { (void)w;
 // and on 0 (with control memory also 0) treats the recording as empty and marks the handle invalid (from main+0x4bb6c it clears bit 0 of the material entry +0x50); later draws no longer CALL it and inherit the previous object's vertex buffers / textures:
 // on the iPhone a batch of draws on odd frames of the opening course fetched vertices out of bounds, giving huge triangles and NaN (black band, black-edged glow, grey stripes). Without overflow the accumulated value equals cur - begin
 NVN(nvnCommandBufferGetCommandMemoryUsed, size_t, const NVNcommandBuffer *c) { const cmd_t *m = (const cmd_t *)c;
-    { static int old = -1; if (old < 0) old = getenv("DM_DBG_OLD_USED") != NULL; if (old) return m->begin && m->cur >= m->begin ? (size_t)(m->cur - m->begin) : 0; }   // [DEBUG-flk1] 旧算法（对照） | the old computation (for comparison)
     return m->begin ? (size_t)m->used : 0; }
 NVN(nvnCommandBufferGetControlMemoryUsed, size_t, const NVNcommandBuffer *c) { (void)c; return 0; }
 NVN_NOPROTO(nvnCommandBufferSetCommandMemoryCallbackEnabled, void, NVNcommandBuffer *c, uint32_t on) { (void)c; (void)on; }

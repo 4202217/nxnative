@@ -532,10 +532,9 @@ static inline void enc_r_blend_color(id<MTL4RenderCommandEncoder> e, float r, fl
 static inline void enc_r_visibility(id<MTL4RenderCommandEncoder> e, MTLVisibilityResultMode m, NSUInteger o) { [e setVisibilityResultMode:m offset:o]; }
 static inline void enc_r_vbuf(id<MTL4RenderCommandEncoder> e, NSUInteger i, uint64_t gpu) { (void)e; [g_vt setAddress:gpu atIndex:i]; }
 static inline void enc_r_args(id<MTL4RenderCommandEncoder> e, MTLRenderStages s, uint64_t gpu, NSUInteger i) { (void)e; [(s == MTLRenderStageVertex ? g_vt : g_ft) setAddress:gpu atIndex:i]; }
-static void np_after_draw(id<MTL4RenderCommandEncoder> e);   // [DEBUG-flk1] 每次绘制后的 NaN 探针 | NaN probe after each draw
-static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { [e drawPrimitives:p vertexStart:v vertexCount:n]; np_after_draw(e); }
-static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; np_after_draw(e); }
-static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; np_after_draw(e); }
+static inline void enc_r_draw(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n) { [e drawPrimitives:p vertexStart:v vertexCount:n]; }
+static inline void enc_r_draw_instanced(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger v, NSUInteger n, NSUInteger i, NSUInteger b) { [e drawPrimitives:p vertexStart:v vertexCount:n instanceCount:i baseInstance:b]; }
+static inline void enc_r_draw_indexed(id<MTL4RenderCommandEncoder> e, MTLPrimitiveType p, NSUInteger n, MTLIndexType t, uint64_t gpu, NSUInteger len, NSUInteger i, NSInteger bv, NSUInteger bi) { [e drawIndexedPrimitives:p indexCount:n indexType:t indexBuffer:gpu indexBufferLength:len instanceCount:i baseVertex:bv baseInstance:bi]; }
 static inline id<MTL4ComputeCommandEncoder> enc_c_begin(MTLComputePassDescriptor *d) { (void)d; id<MTL4ComputeCommandEncoder> e = [g_cb computeCommandEncoder]; [e barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice]; [e setArgumentTable:g_ct]; return e; }
 static inline id<MTLComputeCommandEncoder> enc_c_begin_concurrent(id<MTLCommandBuffer> cb) { return [cb computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent]; }
 static inline void enc_c_end(id e) { m4_end(e); }
@@ -745,7 +744,6 @@ int mtl_gpu_span(uint64_t f, uint64_t *t0, uint64_t *t1) {
     return *t1 >= *t0 && *t1;
 }
 static void rp_flush(void);
-static int passdump(void);   // [DEBUG-flk1]
 static const char *cctx_snap(void);   // 这次提交里有什么（出错时打进红行；定义在 mtl_exec 之前） | What is in this submission (printed into the failure line on error; defined before mtl_exec)
 uint64_t mtl_sub_commit(void) {
     defer_fallback();   // 推迟合并通道：提交结束仍有未回放的 P 绘制（正常路径不会到这里） | Deferred merged pass: at the end of the submission there are still P draws not replayed (the normal path never gets here)
@@ -762,7 +760,6 @@ uint64_t mtl_sub_commit(void) {
     MTL4CommitOptions *o = [MTL4CommitOptions new];
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) { (void)f; for (dispatch_block_t block in commit_blocks) block(); }];
     uint64_t gpu_f = atomic_load(&g_cur_frame); gpu_tag_begin(gpu_f);
-    int dbg_pd = passdump(); uint64_t dbg_t0 = gpu_ticks();   // [DEBUG-flk1] 窗口内的计数写回与提交→完成时长 | counter write-backs and commit→completion time inside the dump window
     NSString *cctx = @(cctx_snap());
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
         gpu_tag_done(gpu_f, cb.GPUStartTime, cb.GPUEndTime);
@@ -776,8 +773,6 @@ uint64_t mtl_sub_commit(void) {
             }
             else { uint64_t t = gpu_ticks(), rec[2] = {ops[i].type == 0 || ops[i].type == 0x10 ? t : 0, t}; memcpy((void *)ops[i].addr, rec, sizeof rec); }
         }
-        if (dbg_pd) { uint64_t t1 = gpu_ticks(); MLOG("[DEBUG-flk1] 完成 F%llu fence=%llu 提交→完成 %.2f ms GPU %.2f ms 写回 %d 项", (unsigned long long)gpu_f, (unsigned long long)fence, (t1 - dbg_t0) * 625.0 / 12 / 1e6, (cb.GPUEndTime - cb.GPUStartTime) * 1e3, n);
-            for (int i = 0; i < n; i++) if (ops[i].kind != 1) { const uint64_t *w = (const uint64_t *)ops[i].addr; MLOG("[DEBUG-flk1]   计数 F%llu kind=%d type=%#x dst=%#llx 值=%llu 时戳=%llu", (unsigned long long)gpu_f, ops[i].kind, ops[i].type, (unsigned long long)ops[i].addr, (unsigned long long)w[0], (unsigned long long)w[1]); } }
         free(ops);
         pthread_mutex_lock(&g_mu); if (fence > g_done) g_done = fence; pthread_cond_broadcast(&g_cv); pthread_mutex_unlock(&g_mu);
         defer_drain();
@@ -4747,7 +4742,6 @@ frz_plain:;
                S.has_vp ? S.vp[0][0] : 0, S.has_vp ? S.vp[0][1] : 0, S.has_vp ? S.vp[0][2] : (float)tw, S.has_vp ? S.vp[0][3] : (float)th);
         }
     }
-    { extern const char *g_np_vs, *g_np_fs; extern int g_np_cnt; g_np_vs = pr->sh[0] ? pr->sh[0]->key : "-"; g_np_fs = pr->sh[1] ? pr->sh[1]->key : "-"; g_np_cnt = dw ? dw->count : di->count; }   // [DEBUG-flk1]
     if (rt_range_on() && !rt_range_pr_ro(pr)) g_pass.range_external=1;
     rt_range_note_depth();
 #ifdef NVN_RT_RANGE_TEST
@@ -5587,13 +5581,11 @@ static void shot(id<MTLTexture> src, const char *path, int screen, const int cro
 // Diagnostic: before the first render pass of the next frame is opened, wait for the GPU to finish, then draw each one (the mip level used by that frame) by full-screen sampling into RGBA8 and save as PNG (float formats are clamped to [0,1])
 static long g_td_frame = -2; static const char *g_td_path; static NSMutableArray *g_td_list; static int g_td_done;
 static void td_dump(void);
-static int g_td_stat_left = -1;   // [DEBUG-flk1] DM_DBG_TEXSTAT=N：连续 N 帧只记统计行（不存图） | DM_DBG_TEXSTAT=N: log stats lines only (no images) for N consecutive frames
 void td_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
-    if (g_td_frame == -2) { const char *e = getenv("DM_NVN_TEXDUMP"), *c = e ? strchr(e, ':') : NULL; g_td_frame = c ? atol(e) : -1; g_td_path = c ? c + 1 : NULL; g_td_list = [NSMutableArray array];
-        const char *s = getenv("DM_DBG_TEXSTAT"); g_td_stat_left = s ? atoi(s) : -1; }
+    if (g_td_frame == -2) { const char *e = getenv("DM_NVN_TEXDUMP"), *c = e ? strchr(e, ':') : NULL; g_td_frame = c ? atol(e) : -1; g_td_path = c ? c + 1 : NULL; g_td_list = [NSMutableArray array]; }
     if (g_td_frame < 0 || g_td_done) return;
     long f = (long)atomic_load(&g_cur_frame);
-    if (f > g_td_frame) { td_dump(); if (g_td_stat_left > 0) { g_td_frame = f; g_td_done = 0; } else return; }   // [DEBUG-flk1] 统计模式：接着记本帧 | stats mode: go on recording this frame
+    if (f > g_td_frame) { td_dump(); return; }
     if (f != g_td_frame) return;
     for (NSUInteger i = 0; i < nc && i < 8; i++) {
         id<MTLTexture> t = pd.colorAttachments[i].texture; if (!t) continue;
@@ -5603,109 +5595,10 @@ void td_note(MTL4RenderPassDescriptor *pd, NSUInteger nc) {
         if (!seen) [g_td_list addObject:@[t, @(ser), @(lv)]];
     }
 }
-// [DEBUG-flk1] DM_DBG_NANPROBE=1（配合 DM_NVN_TEXDUMP 的帧）：该帧每次绘制后在同一编码器里插一个全屏探针，用 framebuffer fetch 读颜色附件 0，
-// 在 4×4 网格上按位判 NaN（不受快速数学影响）并原子加到本次绘制的计数槽；不写附件（写掩码全关）、不测深度。帧末与绘制描述（通道、着色器键、顶点数）一起记日志：
-// 计数从 ~0 跳起的第一次绘制就是产生 NaN 的那一个
-// [DEBUG-flk1] DM_DBG_NANPROBE=1 (with the DM_NVN_TEXDUMP frame): after every draw in that frame, insert a full-screen probe into the same encoder that reads color attachment 0 through framebuffer fetch,
-// tests for NaN bitwise on a 4×4 grid (immune to fast math) and atomically adds to this draw's counter slot; it writes nothing (write mask off) and does no depth test. At the end of the frame the counts are logged
-// together with each draw's description (pass, shader keys, vertex count): the first draw where the count jumps from ~0 is the one producing NaN
-const char *g_np_vs = "-", *g_np_fs = "-"; int g_np_cnt;
-#define NP_MAX 4096
-static int g_np_on = -1, g_np_n; static long g_np_frame = -1; static id<MTLBuffer> g_np_buf; static id<MTL4ArgumentTable> g_np_at; static id<MTLDepthStencilState> g_np_dss;
-static NSMutableDictionary<NSString *, id<MTLRenderPipelineState>> *g_np_pso; static id<MTLFunction> g_np_vfn, g_np_ffn; static char (*g_np_desc)[112];
-static void np_after_draw(id<MTL4RenderCommandEncoder> e) {
-    if (g_np_on < 0) g_np_on = getenv("DM_DBG_NANPROBE") != NULL;
-    if (!g_np_on || g_td_frame < 0 || g_td_done || (long)atomic_load(&g_cur_frame) != g_td_frame || !e) return;
-    uint32_t f0 = g_pass.cfmt[0];
-    if (f0 != MTLPixelFormatRG11B10Float && f0 != MTLPixelFormatRGBA16Float && f0 != MTLPixelFormatRGBA32Float && f0 != MTLPixelFormatRG16Float && f0 != MTLPixelFormatR16Float) return;   // 只看能存 NaN 的格式 | only formats that can hold NaN
-    if (g_enc_vis) return;   // 遮挡计数开着：探针会算进游戏的结果，跳过 | occlusion counting on: the probe would count into the game's result, skip
-    if (!g_np_buf) {
-        g_np_buf = [g_dev newBufferWithLength:NP_MAX * 4 options:MTLResourceStorageModeShared]; res_add(g_np_buf); res_commit(); g_np_desc = calloc(NP_MAX, sizeof *g_np_desc);
-        MTL4ArgumentTableDescriptor *ad = [MTL4ArgumentTableDescriptor new]; ad.maxBufferBindCount = 1; NSError *ae = nil; g_np_at = [g_dev newArgumentTableWithDescriptor:ad error:&ae];
-        const char *src = "#include <metal_stdlib>\nusing namespace metal;\nstruct V { float4 p [[position]]; };\n"
-            "vertex V vs(uint id [[vertex_id]]) { float2 uv = float2((id << 1) & 2, id & 2); V o; o.p = float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
-            "static bool nanb(float x) { uint u = as_type<uint>(x); return (u & 0x7f800000u) == 0x7f800000u && (u & 0x007fffffu) != 0u; }\n"
-            "fragment float4 fs(V in [[stage_in]], float4 c [[color(0)]], device atomic_uint *n [[buffer(0)]]) { uint2 q = uint2(in.p.xy);\n"
-            "  if (((q.x | q.y) & 3u) == 0u && (nanb(c.x) || nanb(c.y) || nanb(c.z) || nanb(c.w))) atomic_fetch_add_explicit(n, 1u, memory_order_relaxed); return c; }\n";
-        NSError *le = nil; id<MTLLibrary> lib = [g_dev newLibraryWithSource:@(src) options:nil error:&le];
-        if (!lib || !g_np_at) { MLOG("【红】[DEBUG-flk1] NaN 探针建不出：%s", le.localizedDescription.UTF8String); g_np_on = 0; return; }
-        g_np_vfn = [lib newFunctionWithName:@"vs"]; g_np_ffn = [lib newFunctionWithName:@"fs"]; g_np_pso = [NSMutableDictionary dictionary];
-        MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new]; dd.depthCompareFunction = MTLCompareFunctionAlways; dd.depthWriteEnabled = NO; g_np_dss = [g_dev newDepthStencilStateWithDescriptor:dd];
-    }
-    long f = (long)atomic_load(&g_cur_frame);
-    if (f != g_np_frame) { g_np_frame = f; g_np_n = 0; memset(g_np_buf.contents, 0, NP_MAX * 4); }
-    if (g_np_n >= NP_MAX) return;
-    NSString *k = [NSString stringWithFormat:@"%u,%u,%u,%u,%u,%u,%u,%u|%u|%u|%u", g_pass.cfmt[0], g_pass.cfmt[1], g_pass.cfmt[2], g_pass.cfmt[3], g_pass.cfmt[4], g_pass.cfmt[5], g_pass.cfmt[6], g_pass.cfmt[7], g_pass.dfmt, g_pass.sfmt, g_pass.samples];
-    id<MTLRenderPipelineState> ps = g_np_pso[k];
-    if (!ps) {
-        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new]; pd.vertexFunction = g_np_vfn; pd.fragmentFunction = g_np_ffn; pd.rasterSampleCount = g_pass.samples ? g_pass.samples : 1;
-        for (int i = 0; i < 8; i++) if (g_pass.cfmt[i]) { pd.colorAttachments[i].pixelFormat = (MTLPixelFormat)g_pass.cfmt[i]; pd.colorAttachments[i].writeMask = MTLColorWriteMaskNone; }
-        if (g_pass.hd) pd.depthAttachmentPixelFormat = (MTLPixelFormat)g_pass.dfmt;
-        if (g_pass.hs) pd.stencilAttachmentPixelFormat = (MTLPixelFormat)g_pass.sfmt;
-        NSError *pe = nil; ps = [g_dev newRenderPipelineStateWithDescriptor:pd error:&pe];
-        if (!ps) { RED_ONCE(67, "[DEBUG-flk1] NaN 探针管线建不出（%s）：%s", k.UTF8String, pe.localizedDescription.UTF8String); return; }
-        g_np_pso[k] = ps;
-    }
-    int slot = g_np_n++;
-    snprintf(g_np_desc[slot], sizeof *g_np_desc, "p%llu vs=%.16s fs=%.16s n=%d fmt=%u %lux%lu", (unsigned long long)g_stat_pass, g_np_vs, g_np_fs, g_np_cnt, f0, (unsigned long)g_pass.tw, (unsigned long)g_pass.th);
-    [g_np_at setAddress:g_np_buf.gpuAddress + (uint64_t)slot * 4 atIndex:0];
-    [e setArgumentTable:g_np_at atStages:MTLRenderStageFragment];
-    [e setRenderPipelineState:ps]; [e setDepthStencilState:g_np_dss];
-    [e setViewport:(MTLViewport){0, 0, (double)g_pass.tw, (double)g_pass.th, 0, 1}]; [e setScissorRect:(MTLScissorRect){0, 0, g_pass.tw, g_pass.th}];
-    [e setCullMode:MTLCullModeNone]; [e setTriangleFillMode:MTLTriangleFillModeFill];
-    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-    [e setArgumentTable:g_ft atStages:MTLRenderStageFragment];   // 还原：游戏的片元参数表；管线 / 深度状态缓存作废，下次绘制重设（视口 / 剪裁 / 剔除等每次绘制本来就重设） | restore: the game's fragment table; invalidate the pipeline / depth caches so the next draw sets them (viewport / scissor / cull etc. are set on every draw anyway)
-    g_enc_pso = nil; g_enc_dss = nil;
-}
-static void np_report(long frame) {
-    if (!g_np_n || g_np_frame != frame) return;
-    const uint32_t *c = g_np_buf.contents; uint32_t prev = 0;
-    MLOG("[DEBUG-flk1] NaN 探针 F%ld 共 %d 次绘制（计数 = 4×4 网格上的 NaN 像素，×16 约为全屏）", frame, g_np_n);
-    for (int i = 0; i < g_np_n; i++) { if (c[i] != prev || i == 0 || i == g_np_n - 1) MLOG("[DEBUG-flk1] 探针 F%ld #%d %s NaN=%u%s", frame, i, g_np_desc[i], c[i], c[i] > prev + 64 ? "  ←跳" : ""); prev = c[i]; }
-    g_np_n = 0;
-}
-// [DEBUG-flk1] 颜色目标统计：各通道均值、NaN / Inf 个数、最大有限值、黑像素占比（RGB 都 < 1/255） | color target stats: per-channel mean, NaN / Inf counts, largest finite value, black share (RGB all < 1/255)
-static float td_f11(uint32_t v, int mb) { uint32_t e = (v >> mb) & 31, m = v & ((1u << mb) - 1); if (e == 31) return m ? NAN : INFINITY; return e ? ldexpf(1 + (float)m / (1 << mb), (int)e - 15) : ldexpf((float)m / (1 << mb), -14); }
-static void td_stat(id<MTLTexture> t, uint64_t ser, NSUInteger lv, long frame) {
-    MTLPixelFormat pf = t.pixelFormat; size_t bpp = pf == MTLPixelFormatRGBA16Float ? 8 : pf == MTLPixelFormatRGBA32Float ? 16 : pf == MTLPixelFormatR16Float || pf == MTLPixelFormatRG8Unorm ? 2 : pf == MTLPixelFormatR8Unorm ? 1 : 4;
-    int known = pf == MTLPixelFormatRGBA16Float || pf == MTLPixelFormatRG11B10Float || pf == MTLPixelFormatRGBA8Unorm || pf == MTLPixelFormatRGBA8Unorm_sRGB || pf == MTLPixelFormatBGRA8Unorm || pf == MTLPixelFormatBGRA8Unorm_sRGB
-             || pf == MTLPixelFormatR16Float || pf == MTLPixelFormatRG16Float || pf == MTLPixelFormatR32Float || pf == MTLPixelFormatRGBA32Float || pf == MTLPixelFormatR8Unorm;
-    NSUInteger w = MAX(t.width >> lv, 1u), h = MAX(t.height >> lv, 1u);
-    if (!known) { MLOG("[DEBUG-flk1] 统计 F%ld ser=%llu lv=%lu 格式 %lu %lux%lu（格式未解）", frame, ser, (unsigned long)lv, (unsigned long)pf, (unsigned long)w, (unsigned long)h); return; }
-    id<MTLBuffer> rb = [g_dev newBufferWithLength:w * h * bpp options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> rc = q_cb(); id<MTLBlitCommandEncoder> bb = [rc blitCommandEncoder];
-    [bb copyFromTexture:t sourceSlice:0 sourceLevel:lv sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(w, h, 1) toBuffer:rb destinationOffset:0 destinationBytesPerRow:w * bpp destinationBytesPerImage:w * h * bpp];
-    [bb endEncoding]; [rc commit]; [rc waitUntilCompleted];
-    const uint8_t *p = rb.contents; double sum[4] = {0}; uint64_t nan = 0, inf = 0, black = 0, n = (uint64_t)w * h; float mx = 0;
-    for (uint64_t i = 0; i < n; i++) {
-        float c[4] = {0, 0, 0, 1};
-        switch (pf) {
-            case MTLPixelFormatRGBA16Float: for (int k = 0; k < 4; k++) c[k] = (float)((const __fp16 *)p)[i * 4 + k]; break;
-            case MTLPixelFormatRGBA32Float: for (int k = 0; k < 4; k++) c[k] = ((const float *)p)[i * 4 + k]; break;
-            case MTLPixelFormatR16Float: c[0] = (float)((const __fp16 *)p)[i]; c[1] = c[2] = 0; break;
-            case MTLPixelFormatRG16Float: c[0] = (float)((const __fp16 *)p)[i * 2]; c[1] = (float)((const __fp16 *)p)[i * 2 + 1]; c[2] = 0; break;
-            case MTLPixelFormatR32Float: c[0] = ((const float *)p)[i]; c[1] = c[2] = 0; break;
-            case MTLPixelFormatRG11B10Float: { uint32_t v = ((const uint32_t *)p)[i]; c[0] = td_f11(v & 0x7ff, 6); c[1] = td_f11((v >> 11) & 0x7ff, 6); c[2] = td_f11(v >> 22, 5); break; }
-            case MTLPixelFormatR8Unorm: c[0] = p[i] / 255.f; c[1] = c[2] = 0; break;
-            default: for (int k = 0; k < 4; k++) c[k] = p[i * 4 + k] / 255.f; if (pf == MTLPixelFormatBGRA8Unorm || pf == MTLPixelFormatBGRA8Unorm_sRGB) { float r = c[0]; c[0] = c[2]; c[2] = r; } break;
-        }
-        int bad = 0;
-        for (int k = 0; k < 4; k++) { if (isnan(c[k])) { nan++; bad = 1; } else if (isinf(c[k])) { inf++; bad = 1; } else { sum[k] += c[k]; if (fabsf(c[k]) > mx) mx = fabsf(c[k]); } }
-        if (!bad && c[0] < 1 / 255.f && c[1] < 1 / 255.f && c[2] < 1 / 255.f) black++;
-    }
-    MLOG("[DEBUG-flk1] 统计 F%ld ser=%llu lv=%lu 格式 %lu %lux%lu 均值 %.4g,%.4g,%.4g,%.4g NaN %llu Inf %llu 最大 %.4g 黑 %.4f", frame, ser, (unsigned long)lv, (unsigned long)pf, (unsigned long)w, (unsigned long)h,
-         sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n, (unsigned long long)nan, (unsigned long long)inf, mx, (double)black / n);
-}
 static void td_dump(void) {
     g_td_done = 1;
     rp_end(); if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
     mtl_finish_gpu();
-    if (g_td_stat_left > 0) {   // [DEBUG-flk1] 统计模式 | stats mode
-        MLOG("[DEBUG-flk1] 统计 帧 %ld 共 %lu 张颜色目标", g_td_frame, (unsigned long)g_td_list.count);
-        np_report(g_td_frame);
-        for (NSArray *e in g_td_list) { id<MTLTexture> t = e[0]; if (t.textureType == MTLTextureType2D) td_stat(t, [e[1] unsignedLongLongValue], [e[2] unsignedIntegerValue], g_td_frame); }
-        [g_td_list removeAllObjects]; g_td_stat_left--; return;
-    }
     static id<MTLRenderPipelineState> ps; static id<MTLSamplerState> sp;
     if (!ps) {
         static const char *src_msl =
@@ -5969,7 +5862,7 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
     }
     // DM_NVN_SHOT=帧号[,帧号…]:路径（路径里的 %d 换成帧号）
     // DM_NVN_SHOT=frame number[,frame number...]:path (%d in the path is replaced with the frame number)
-    static long shots[4096]; static int nshot = -1; static const char *shot_path;   // [DEBUG-flk1]
+    static long shots[4096]; static int nshot = -1; static const char *shot_path;   // 最多 4096 帧（连拍一段帧给逐帧打分用） | up to 4096 frames (a burst over a frame range, for scoring frame by frame)
     if (nshot < 0) {
         nshot = 0; const char *e = getenv("DM_NVN_SHOT"), *c = e ? strchr(e, ':') : NULL;
         if (c) { shot_path = c + 1; for (const char *q = e; q < c && nshot < 4096; q = strchr(q, ',') ? strchr(q, ',') + 1 : c) shots[nshot++] = atol(q); }
