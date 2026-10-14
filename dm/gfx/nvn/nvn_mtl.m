@@ -881,6 +881,7 @@ static int alias_has(id o) { return g_alias_set && o && CFSetContainsValue(g_ali
 // On memory pool Finalize, evict the textures built on that pool from the sharing table (collect the keys first, then delete: deletion shifts entries back). The sharing table used not to evict: Mario's pools stay for good, so entries are bounded;
 // Engage frees pools on scene changes and rebuilds on new ones, so the old pools' render targets and other private textures stayed in the table forever (about 0.8 GB more GPU memory over 850 s of the title demo), and linear textures built directly on a pool also kept the whole pool buffer alive.
 // Also, when a pool object's address is reused, old entries would hand a texture on the old storage to the new pool's texture at the same offset and description. Evicted textures go through deferred release; if the serial table still holds one, that is just one more reference
+static void treg_drop_pool_views(const void *pool);
 void mtl_alias_drop_pool(const void *pool) {
     if (!pool) return;
     pthread_mutex_lock(&g_smu);
@@ -901,6 +902,7 @@ void mtl_alias_drop_pool(const void *pool) {
     if (n) { g_ser_gen++; g_alias_evicted += n; }
     pthread_mutex_unlock(&g_smu);
     free(ks);
+    treg_drop_pool_views(pool);   // 在 g_smu 外：贴图号登记表的锁 g_rmu 在 g_smu 之前取 | outside g_smu: the texture ID registry lock g_rmu is taken before g_smu
 }
 static __unsafe_unretained id serial_get(uint64_t k) { pthread_mutex_lock(&g_smu); __unsafe_unretained id o = hm_get_id(&g_by_serial, &k); pthread_mutex_unlock(&g_smu); return o; }
 static void serial_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); id old = hm_get_id(&g_by_serial, &k); if (old) { if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); } hm_put_id(&g_by_serial, &k, o); g_ser_gen++; pthread_mutex_unlock(&g_smu); }
@@ -1488,7 +1490,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
     pthread_mutex_lock(&g_smu); unsigned ns = g_by_serial.n, ashared = g_alias.n; pthread_mutex_unlock(&g_smu);
     unsigned long dead_n = 0; unsigned long long dead_mb = 0;
-    pthread_mutex_lock(&g_mu); for (id<MTLBuffer> b in g_dead_pools) { dead_n++; dead_mb += b.length; } pthread_mutex_unlock(&g_mu); dead_mb >>= 20;   // 按序号挂着的宿主对象（贴图 / 预排布贴图 / 程序）：显卡已分配一路涨而它也一路涨，就是贴图没放 | host objects held by serial (textures / packaged textures / programs): if it climbs along with GPU allocated, textures are not being released
+    // 弱引用表取出的对象是「保留 + 自动释放」：帧钩子在客体线程上，没有会排空的自动释放池，不包一层就把数到的缓冲永远钉住（读数自己造出泄漏）
+    // Objects read from a weak table come back retained + autoreleased: the frame hook runs on a guest thread with no autorelease pool that drains, so without this wrapper every buffer counted would be pinned for good (the readout creating the leak itself)
+    @autoreleasepool { pthread_mutex_lock(&g_mu); for (id<MTLBuffer> b in g_dead_pools) { dead_n++; dead_mb += b.length; } pthread_mutex_unlock(&g_mu); } dead_mb >>= 20;   // 按序号挂着的宿主对象（贴图 / 预排布贴图 / 程序）：显卡已分配一路涨而它也一路涨，就是贴图没放 | host objects held by serial (textures / packaged textures / programs): if it climbs along with GPU allocated, textures are not being released
     MLOG("内存 至帧 %llu：常驻 %llu MB，显卡已分配 %llu MB，延迟释放队列 %lu，驻留集 %lu 个，序号对象 %u 个，内存池 %d 个（峰值 %d / 跟踪表容量 %d；已释放仍活 %lu 个 %llu MB），共用贴图 %u 张（随池淘汰累计 %llu），贴图重传累计 %llu 次，每帧竞技场累计新建 %llu 块", frame, rss_mb, gpu, nd, nr, ns, live, peak, cap, dead_n, dead_mb, ashared, (unsigned long long)g_alias_evicted, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made);
     if (g_allocprof > 0) { char ab[256]; int o = 0; for (int i = 0; i < g_alloc_n && o < 200; i++) o += snprintf(ab + o, sizeof ab - o, " #%d %llu MB", i, (unsigned long long)(g_alloc4[i].allocatedSize >> 20));
         for (int i = 0; i < 3 && o < 240; i++) o += snprintf(ab + o, sizeof ab - o, " 传%d %llu 出%d %llu", i, (unsigned long long)(g_up_alloc4[i].allocatedSize >> 20), i, (unsigned long long)(g_present_alloc4[i].allocatedSize >> 20));
@@ -2429,6 +2433,17 @@ static treg_t *g_treg; static int g_ntreg;
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
 static _Atomic uint64_t g_tser[1 << 20];
 static samp_par *g_sreg; static uint8_t *g_sreg_ok; static void **g_sview; static uint64_t *g_srid; static int g_nsreg;   // g_sview：采样器号 → MTLSamplerState（持有） | g_sview: sampler ID → MTLSamplerState (retained)
+// 内存池 Finalize：贴图号登记表里贴图建在这个池上的号，丢掉缓存的 MTLTexture（视图或基贴图）。缓存原先要等这个号被重新登记才放，
+// 池上直建的线性贴图就一直拖着整块池缓冲（Engage 标题演示里常有 6–17 块 16 MB 的已释放池缓冲活着）。号若还在用，下次取用走慢路重建
+// Memory pool Finalize: for texture IDs whose registered texture lives on this pool, drop the cached MTLTexture (view or base texture). The cache used to be released only when the ID was registered again,
+// so a linear texture built directly on a pool kept the whole pool buffer alive (6 to 17 finalized 16 MB pool buffers stayed alive in Engage's title demo). If the ID is still used, the next lookup rebuilds it on the slow path
+static void treg_drop_pool_views(const void *pool) {
+    pthread_mutex_lock(&g_rmu);
+    for (int i = 0; i < g_ntreg; i++)
+        if (g_treg[i].view && g_treg[i].ok && (const void *)g_treg[i].t.pool == pool) {
+            defer_obj_unref((__bridge id)g_treg[i].view); CFRelease(g_treg[i].view); g_treg[i].view = NULL; g_treg[i].view_id = g_treg[i].view_rid = 0; }
+    pthread_mutex_unlock(&g_rmu);
+}
 void mtl_reg_tex(int tid, const tex_t *t, const view_t *v) {
     int id_ = tid; if (id_ < 0) return;
     pthread_mutex_lock(&g_rmu);
