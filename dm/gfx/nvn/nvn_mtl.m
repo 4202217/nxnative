@@ -21,7 +21,7 @@
 #include "nvn_cover.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN：本源码树期望的 B 着色器库翻译链版本（在游戏档案目录，Makefile 给 -I） | DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree (in the game profile folder, -I from the Makefile)
 #include "game_profile.h"   // 游戏档案常数（NVN 驱动常量段基址、档案名） | game profile constants (NVN driver constant segment bases, profile id)
-_Static_assert(DM_GAME_NVN_TEX_SLOTS <= 128 && DM_GAME_NVN_IMG_SLOTS <= 32 && DM_GAME_NVN_TEX_BASE + 8 * DM_GAME_NVN_TEX_SLOTS <= 0xA00 && DM_GAME_NVN_IMG_BASE + 8 * DM_GAME_NVN_IMG_SLOTS <= 0xA00, "游戏档案的 NVN 句柄表超出驱动段缓冲（0xA00）或绑定表 | the profile's NVN handle tables exceed the driver segment buffer (0xA00) or the binding tables");
+_Static_assert(DM_GAME_NVN_TEX_SLOTS <= 128 && DM_GAME_NVN_IMG_SLOTS <= 32 && DM_GAME_NVN_TEX_BASE + 8 * DM_GAME_NVN_TEX_SLOTS <= 0xA00 && DM_GAME_NVN_IMG_BASE + 8 * DM_GAME_NVN_IMG_SLOTS <= 0xA00 && DM_GAME_NVN_SAMP_BASE + 8 * 128 <= 0xA00, "游戏档案的 NVN 句柄表超出驱动段缓冲（0xA00）或绑定表 | the profile's NVN handle tables exceed the driver segment buffer (0xA00) or the binding tables");
 #include "nvn_hmap.h"
 #include "../../host/dm.h"
 #import <CommonCrypto/CommonDigest.h>
@@ -1325,13 +1325,33 @@ static id<MTLTexture> tex_linear(const tex_t *t) {
     d.usage = MTLTextureUsageShaderRead | (t->d.flags & NVN_TEXTURE_FLAGS_IMAGE ? MTLTextureUsageShaderWrite : 0) | (t->d.flags & NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET ? MTLTextureUsageRenderTarget : 0);
     return [b newTextureWithDescriptor:d offset:mo bytesPerRow:row];
 }
+// CPU 写过的块线性贴图（WriteTexels）：游戏没给预排布、每帧用 CPU 改内容（Engage 的影片帧：Y 平面 R8 + UV 平面 RG8，每帧 WriteTexels）。
+// 原先只有预排布贴图从客体内存上传，这类贴图建成纯 GPU 贴图、内容永远是 0。记下序号，解析时走预排布路径（上传 + 脏页重传）
+// CPU-written block-linear textures (WriteTexels): the game gave no packaged layout and changes the content from the CPU each frame (Engage's movie frames: a Y plane R8 + a UV plane RG8, WriteTexels every frame).
+// Only packaged textures used to be uploaded from guest memory, so such a texture became a GPU-only texture whose content stayed 0. Their serials are recorded and they resolve through the packaged path (upload + re-upload on dirty pages)
+static pthread_mutex_t g_cpu_tex_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableSetRef g_cpu_tex;
+void mtl_tex_cpu_written(const tex_t *t) {
+    uint64_t serial = t->serial;
+    if (!serial) return;
+    pthread_mutex_lock(&g_cpu_tex_mu);
+    if (!g_cpu_tex) g_cpu_tex = CFSetCreateMutable(NULL, 0, NULL);
+    if (!CFSetContainsValue(g_cpu_tex, (const void *)(uintptr_t)serial)) {
+        CFSetAddValue(g_cpu_tex, (const void *)(uintptr_t)serial);
+        static int n; if (n++ < 16) MLOG("CPU 写贴图 ser=%llu %ux%ux%u 格式 %#x 目标 %d 级 %u：按预排布贴图上传 / 重传", (unsigned long long)serial, t->d.width, t->d.height, t->d.depth, t->d.format, t->d.target, t->d.levels);
+    }
+    pthread_mutex_unlock(&g_cpu_tex_mu);
+}
+static int tex_cpu_written(uint64_t serial) {
+    pthread_mutex_lock(&g_cpu_tex_mu); int r = g_cpu_tex && CFSetContainsValue(g_cpu_tex, (const void *)(uintptr_t)serial); pthread_mutex_unlock(&g_cpu_tex_mu);
+    return r;
+}
 static id<MTLTexture> tex_mtl_(const tex_t *ct);
 static id<MTLTexture> tex_mtl(const tex_t *ct) { AP_B; id<MTLTexture> r = tex_mtl_(ct); AP_E(4); return r; }
 static uint64_t g_texinfo_ser[8]; static int g_texinfo_n;
 static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial) return nil;
-    int packaged = t->has_layout && t->mem;
+    int packaged = (t->has_layout || tex_cpu_written(t->serial)) && t->mem;
     {   // 诊断 DM_NVN_TEXINFO=宽x高：该尺寸的贴图首次解析时记下存储与描述（判两张贴图是否同一块存储、为何没合用） | Diagnostic DM_NVN_TEXINFO=WxH: log storage and description of textures of that size on first resolution (to tell whether two textures share storage and why they were not merged)
         static int ti = -1; static uint32_t tw, th; static uint64_t last[64]; static int nl;
         if (ti > 0 && t->d.width == tw && t->d.height == th && g_texinfo_n < 8) { int dup = 0; for (int i = 0; i < g_texinfo_n; i++) dup |= g_texinfo_ser[i] == t->serial; if (!dup && !(t->d.flags & 8)) g_texinfo_ser[g_texinfo_n++] = t->serial; }   // 非渲染目标（无 COMPRESSIBLE）的记下，供 DM_NVN_TEXRAW=info | remember the non-render-target ones (no COMPRESSIBLE) for DM_NVN_TEXRAW=info
@@ -1346,7 +1366,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     }
     id have = serial_get(t->serial);
     if (packaged) {
-        NvPkg *pk = have;
+        NvPkg *pk = [have isKindOfClass:[NvPkg class]] ? have : nil;   // 先按纯 GPU 贴图解析过、后来才被 CPU 写的：丢掉旧的，按预排布重建 | resolved as GPU-only before the CPU wrote it: dropped and rebuilt as packaged
         if (pk) {   // 已上传：自上次检查后有过客体写才查覆盖页 | Already uploaded: check the covered pages only if there has been a guest write since the last check
             uint64_t now = nvn_dirty_now();
             int tracked = nvn_dirty_tracked(t->mem, t->L.size);
@@ -2322,12 +2342,9 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
     shmap_load();
     NvProg *o = [NvProg new];
     for (unsigned i = 0; i < p->nstage; i++) {
-        // 键 = sha256(控制段前 0x880 字节 + 代码区)：本作大量着色器控制段相同、代码不同（dm/gfx/tools/shader_split.py）；代码区长在控制段 +0x704，缓冲地址即宿主指针
-        // Key = sha256(first 0x880 bytes of the control section + code area): many of this game's shaders share a control section but differ in code (dm/gfx/tools/shader_split.py); the code length is at control +0x704, and a buffer address is a host pointer
-        uint8_t md[32]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc); CC_SHA256_Update(&hc, p->sd[i].control, 0x880);
-        uint32_t ncode; memcpy(&ncode, (const uint8_t *)p->sd[i].control + 0x704, 4);
-        if (p->sd[i].data && ncode && ncode < (1u << 24)) CC_SHA256_Update(&hc, (const void *)(uintptr_t)p->sd[i].data, ncode);
-        CC_SHA256_Final(md, &hc);
+        // 键 = sha256(控制段前 0x880 字节 + 代码区)：马力欧大量着色器控制段相同、代码不同（dm/gfx/tools/shader_split.py）。SetShaders 时已算好（hle_nvn.c）：这时控制段可能已被游戏释放
+        // Key = sha256(first 0x880 bytes of the control section + code area): many of Mario's shaders share a control section but differ in code (dm/gfx/tools/shader_split.py). It was computed at SetShaders (hle_nvn.c): by now the game may have freed the control section
+        uint8_t md[8]; prog_key(p, i, md);
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *zh = g_shmap[k];
         if (!zh) {   // 不在包里：查 main 本体内嵌的计算核（nvn_builtin.h） | Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
@@ -2337,7 +2354,7 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
             // DM_NVN_SHDUMP=目录：不在表里的着色器存成 <键>.ctl（控制段 0x880 字节）与 <键>.code（代码区，长度取控制段 +0x704），供离线查来源 / 补进映射表
             // DM_NVN_SHDUMP=directory: shaders missing from the map are saved as <key>.ctl (0x880-byte control section) and <key>.code (code area, length from control +0x704), to trace their source / add them to the map offline
             static const char *shd; static int shd_init; if (!shd_init) { shd = getenv("DM_NVN_SHDUMP"); shd_init = 1; }
-            if (shd) { char path[1024]; FILE *f;
+            if (shd) { char path[1024]; FILE *f; uint32_t ncode; memcpy(&ncode, (const uint8_t *)p->sd[i].control + 0x704, 4);   // 设了 SHDUMP 时控制段是宿主留的副本 | with SHDUMP set the control section is the host's copy
                 snprintf(path, sizeof path, "%s/%s.ctl", shd, k.UTF8String); if ((f = fopen(path, "wb"))) { fwrite(p->sd[i].control, 1, 0x880, f); fclose(f); }
                 snprintf(path, sizeof path, "%s/%s.code", shd, k.UTF8String);
                 if (p->sd[i].data && ncode && ncode < (1u << 24) && (f = fopen(path, "wb"))) { fwrite((const void *)(uintptr_t)p->sd[i].data, 1, ncode, f); fclose(f); } }
@@ -3055,7 +3072,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
             USE(support_buf(), MTLResourceUsageRead);
         } else if (b->kind == NVN_RB_DRV0 || b->kind == NVN_RB_DRV2) {
             // NVN 驱动常量段：出包时静态统计证明不读的供 0；读的按当前绑定现填——c0 = 存储缓冲表（基址 + 0x10 r：地址 64 位、大小 32 位），
-            // c2 = 贴图句柄表与图像句柄表（基址与槽数取自游戏档案 nvn_*；马力欧 0x20 + 8 r、0x120 + 8 r），值即游戏绑定时给的 NVN 句柄；读到表外的位置出包时已登记、加载时报红
+            // c2 = 贴图句柄表、图像句柄表与分离采样器句柄表（基址与槽数取自游戏档案 nvn_*；马力欧 0x20 + 8 r、0x120 + 8 r），值即游戏绑定时给的 NVN 句柄；读到表外的位置出包时已登记、加载时报红
             // NVN driver constant segments: those proven unread by static analysis at packaging time are supplied as 0; those read are filled on the spot from the current bindings - c0 = storage buffer table (base + 0x10 r: address 64 bits, size 32 bits),
             // c2 = texture handle table (0x168 + 8 r) and sampler handle table (0x568 + 8 r), the values being the NVN handles the game gave at bind time; positions read outside the tables are registered at packaging time and reported a failure at load time
             int bank = b->kind == NVN_RB_DRV2 ? 2 : 0;
@@ -3069,6 +3086,9 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
                 } else {
                     for (int r = 0; r < DM_GAME_NVN_TEX_SLOTS; r++) { uint32_t th = (uint32_t)S.tex[nvn_stage][r]; memcpy(d + DM_GAME_NVN_TEX_BASE + 8 * r, &th, 4); }
                     for (int r = 0; r < DM_GAME_NVN_IMG_SLOTS; r++) { uint32_t ih = (uint32_t)S.img[nvn_stage][r]; memcpy(d + DM_GAME_NVN_IMG_BASE + 8 * r, &ih, 4); }   // 图像句柄表 0x120 + 8 r | image handle table 0x120 + 8 r   // 本作（NVN 55）贴图句柄表 0x20 + 8 r（dm/gfx/tools/dmsh_build.py TEX_BASE） | This game (NVN 55): texture handle table at 0x20 + 8 r (dm/gfx/tools/dmsh_build.py TEX_BASE)
+                    // 分离采样器句柄表（Engage 等旧驱动布局：贴图 0x168 + 8 r、采样器 0x568 + 8 r；马力欧不用分离采样器，这里全 0）
+                    // separate sampler handle table (older driver layout such as Engage's: textures 0x168 + 8 r, samplers 0x568 + 8 r; Mario uses no separate samplers, so this is all zero)
+                    for (int r = 0; r < 128; r++) { uint32_t sh_ = (uint32_t)S.samp[nvn_stage][r]; memcpy(d + DM_GAME_NVN_SAMP_BASE + 8 * r, &sh_, 4); }
                 }
                 slots[aid] = g_cur_arena->gpu + doff;
                 USE(db, MTLResourceUsageRead);

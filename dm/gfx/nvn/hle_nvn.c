@@ -27,6 +27,8 @@
 #include "../../host/front.h"
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
+#include <CommonCrypto/CommonDigest.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
 #include <TargetConditionals.h>
 #include <unistd.h>
@@ -350,11 +352,61 @@ NVN(nvnSamplerFinalize, void, NVNsampler *s) { ((samp_t *)s)->magic = 0; }
 NVN(nvnProgramInitialize, NVNboolean, NVNprogram *p, NVNdevice *d) {
     (void)d; memset(p, 0, sizeof(prog_t)); ((prog_t *)p)->magic = MAGIC('P', 'R', 'O', 'G'); return 1;
 }
-NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; }
+static void pk_drop(const void *p);
+NVN(nvnProgramFinalize, void, NVNprogram *p) { mtl_prog_release((prog_t *)p); ((prog_t *)p)->magic = 0; pk_drop(p); }
+// 程序的各阶段键（旁表：客体 NVNprogram 地址 → 宿主对象；ok 第 i 位 = 第 i 阶段已算） | a program's per-stage keys (side table: guest NVNprogram address → host object; bit i of ok = stage i computed)
+typedef struct { uint8_t key[6][8]; uint8_t ok; } prog_keys_t;
+static pthread_mutex_t g_pk_mu = PTHREAD_MUTEX_INITIALIZER; static CFMutableDictionaryRef g_pk;   // 专用表（不与别的旁表共用键） | a dedicated table (keys not shared with other side tables)
+static prog_keys_t *pk_get(const void *p, int make) {
+    pthread_mutex_lock(&g_pk_mu);
+    if (!g_pk) g_pk = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    prog_keys_t *k = (prog_keys_t *)CFDictionaryGetValue(g_pk, p);
+    if (!k && make) { k = calloc(1, sizeof *k); CFDictionarySetValue(g_pk, p, k); }
+    pthread_mutex_unlock(&g_pk_mu);
+    return k;
+}
+static void pk_drop(const void *p) {
+    pthread_mutex_lock(&g_pk_mu);
+    prog_keys_t *k = g_pk ? (prog_keys_t *)CFDictionaryGetValue(g_pk, p) : NULL;
+    if (k) { CFDictionaryRemoveValue(g_pk, p); free(k); }
+    pthread_mutex_unlock(&g_pk_mu);
+}
+// mapped = 1：代码区须在已登记的内存池里才算（SetShaders 时：马力欧有程序先拿未映射的地址 SetShaders，首次绘制前才填好）
+// mapped = 1: computed only when the code area is in a registered memory pool (at SetShaders: Mario sets some programs with an unmapped address first and fills it in before the first draw)
+static int keys_hash(const NVNshaderData *sd, int mapped, uint8_t out[8]) {
+    uint32_t ncode = 0; void *mb; uint64_t mo;
+    if (!sd->control) return 0;
+    memcpy(&ncode, (const uint8_t *)sd->control + 0x704, 4);
+    int code = sd->data && ncode && ncode < (1u << 24);
+    if (mapped && !(code && mtl_addr(sd->data, ncode, &mb, &mo))) return 0;
+    uint8_t md[CC_SHA256_DIGEST_LENGTH]; CC_SHA256_CTX hc; CC_SHA256_Init(&hc);
+    CC_SHA256_Update(&hc, sd->control, 0x880);
+    if (code) CC_SHA256_Update(&hc, (const void *)(uintptr_t)sd->data, ncode);
+    CC_SHA256_Final(md, &hc); memcpy(out, md, 8);
+    return 1;
+}
+int prog_key(const prog_t *p, unsigned st, uint8_t key[8]) {
+    if (st >= p->nstage) return 0;
+    prog_keys_t *k = pk_get(p, 1);
+    if (!(k->ok >> st & 1)) { keys_hash(&p->sd[st], 0, k->key[st]); k->ok |= (uint8_t)(1u << st); }
+    memcpy(key, k->key[st], 8);
+    return 1;
+}
 NVN(nvnProgramSetShaders, NVNboolean, NVNprogram *p, int n, const NVNshaderData *sd) {
     prog_t *o = (prog_t *)p;
     if (n < 0 || n > 6) { LOG("【红】ProgramSetShaders 阶段数 %d", n); return 0; }
     mtl_prog_release(o); o->nstage = n; memcpy(o->sd, sd, n * sizeof *sd); o->serial = nvn_new_serial();
+    // 键在这里算（见 nvn_obj.h prog_key）：控制段只在本调用期间保证有效；代码区在内存池里，程序在用期间一直有效
+    // The keys are computed here (see prog_key in nvn_obj.h): the control section is only guaranteed valid during this call; the code area lives in a memory pool and stays valid while the program is in use
+    static int dump = -1; if (dump < 0) dump = getenv("DM_NVN_SHDUMP") != NULL;
+    prog_keys_t *k = pk_get(p, 1);
+    k->ok = 0;
+    for (int i = 0; i < n; i++) {
+        if (keys_hash(&sd[i], 1, k->key[i])) k->ok |= (uint8_t)(1u << i);
+        // DM_NVN_SHDUMP（调试）：留一份控制段，供回放层把不在映射表里的着色器存盘（不释放）
+        // DM_NVN_SHDUMP (debugging): keep a copy of the control section so the replay layer can save shaders missing from the map (never freed)
+        if (dump && sd[i].control) { void *c = malloc(0x880); memcpy(c, sd[i].control, 0x880); o->sd[i].control = c; }
+    }
     OLOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)p, n, n ? (unsigned long long)sd[0].data : 0ull);
     return 1;
 }
@@ -1503,6 +1555,7 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
         if (!is3d || z == nz - 1) nvn_swizzle(&t->d, level, layer, lin, lp, t->mem);
     }
     free(lin);
+    mtl_tex_cpu_written(t);
 }
 NVN(nvnTextureWriteTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const void *src) { write_texels(CTX(t), (const view_t *)v, r, src, 0, 0); }
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // 统一内存 + 脏页跟踪：无需刷 | unified memory + dirty page tracking: nothing to flush

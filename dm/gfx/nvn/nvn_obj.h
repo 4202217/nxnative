@@ -56,6 +56,8 @@ typedef struct { uint8_t minf, magf, ws, wt, wr, cmp_mode, cmp_func; float lod_m
 typedef struct { NVNdevice *dev; samp_par p; } samp_builder_t;                                FITS(samp_builder_t, NVNsamplerBuilder);
 typedef struct { uint32_t magic; samp_par p; } samp_t;                                        FITS(samp_t, NVNsampler);
 
+// 各阶段的着色器键不放在 prog_t 里：游戏的 NVNprogram 实际可能小于头文件的 0xC0（马力欧加大 prog_t 后写坏了相邻对象），见 hle_nvn.c prog_keys
+// The per-stage shader keys are not kept in prog_t: the game's real NVNprogram may be smaller than the header's 0xC0 (growing prog_t corrupted the adjacent object in Mario); see prog_keys in hle_nvn.c
 typedef struct { uint32_t magic, nstage; NVNshaderData sd[6]; uint64_t serial; } prog_t;     FITS(prog_t, NVNprogram);   // serial：回放层解析结果的表键 | serial: table key for the replay layer's resolved result
 
 typedef struct { uint32_t magic, fenced; uint64_t fence; } sync_t;                            FITS(sync_t, NVNsync);
@@ -190,6 +192,13 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 // 描述符池登记（贴图号 / 采样器号 → 对象快照）、程序释放
 // Descriptor pool registration (texture ID / sampler ID → object snapshot), program release
 void mtl_reg_tex(int id, const tex_t *t, const view_t *v);
+// WriteTexels 写过的贴图（按序号记）：回放层当作预排布贴图，从客体内存上传、脏页重传 | textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
+void mtl_tex_cpu_written(const tex_t *t);
+// 程序各阶段的着色器键（hle_nvn.c）：sha256(控制段前 0x880 字节 + 代码区) 前 8 字节。SetShaders 时就算好（NVN 允许返回后释放控制段，Unity 即如此）；
+// 那时代码区还不在任何内存池里的阶段，第一次取时再算。返回 0 = 没有该阶段
+// A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
+// a stage whose code area was not yet in any memory pool then is computed the first time it is asked for. Returns 0 = no such stage
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
 void mtl_reg_samp(int id, const samp_par *p);
 void mtl_prog_release(prog_t *p);
 // 新序号（> 0，全局递增）
