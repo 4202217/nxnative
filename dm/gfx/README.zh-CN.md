@@ -44,18 +44,18 @@ Switch 原版着色器包
 
 - **键**：每个着色器以「控制段（前 0x880 字节）+ 代码区」的 sha256 前 16 位十六进制为键（马力欧有很多着色器控制段相同、代码不同）。运行时游戏把两者交给 `nvnProgramSetShaders`，回放层算出同一个键去找库。
 - **产物**：`<键>_b.metallib`（着色器库）、`<键>_b.json`（回放用的反射：各绑定的种类、槽号、在参数缓冲里的序号等）、`<键>_b.metal`（MSL 源）。部分片元着色器另有 `<键>_bf.metallib`，是「可读 tile」版本，供通道合并用（见 `tools/dmsh_fetch.py` 文件头）。目录里的 `_b_build.json` 记本次每个键的成败。
-- **`nvn/shader_map.tsv`**：着色器映射表，每个着色器变体一行。运行时只用其中「键 → 阶段（顶点 / 片元 / 计算）」。
-- **`nvn/shader_facts.tsv`**：翻译查询的作答表。翻译器需要知道一些机器码里读不出的事实（贴图的维度类型、图像格式、顶点属性与片元输出的分量类型、计算着色器的线程组大小与共享内存字节数），这张表按键给出答案。表随仓库，出着色器库只读这张表；表由 `tools/dmsh_facts.py` 维护，文件头有说明。
-- **翻译链版本与 `b-<V>/` 目录**：版本 V 是一串 12 位十六进制，由翻译链涉及的源文件内容、翻译选项和工具指纹（`tools/dmsh_chain.lock`）一起哈希得出，`tools/dmsh_chain.py` 负责计算。着色器库写进 `<输出目录>/b-<V>/`，每个反射 json 里也记着 V。宿主编译时从 `nvn/dmsh_chain.h` 取 V，只从 `b-<V>/` 加载，并逐个核对 json 里的版本；对不上就报红、不加载。所以改了链上任何一个文件、或换了工具，都要重新出库并重编宿主。
+- **`dm/games/<名>/shader_map.tsv`**：着色器映射表，每个着色器变体一行。运行时只用其中「键 → 阶段（顶点 / 片元 / 计算）」。
+- **`dm/games/<名>/shader_facts.tsv`**：翻译查询的作答表。翻译器需要知道一些机器码里读不出的事实（贴图的维度类型、图像格式、顶点属性与片元输出的分量类型、计算着色器的线程组大小与共享内存字节数），这张表按键给出答案。表随仓库，出着色器库只读这张表；表由 `tools/dmsh_facts.py` 维护，文件头有说明。
+- **翻译链版本与 `b-<V>/` 目录**：版本 V 是一串 12 位十六进制，由翻译链涉及的源文件内容、翻译选项和工具指纹（`tools/dmsh_chain.lock`）一起哈希得出，`tools/dmsh_chain.py` 负责计算。着色器库写进 `<输出目录>/b-<V>/`，每个反射 json 里也记着 V。宿主编译时从 `dm/games/<名>/dmsh_chain.h` 取 V，只从 `b-<V>/` 加载，并逐个核对 json 里的版本；对不上就报红、不加载。所以改了链上任何一个文件、或换了工具，都要重新出库并重编宿主。
   - `dmsh_chain.py`：打印 V。
   - `dmsh_chain.py --check-tools`：核对本机工具与锁文件一致。
   - `dmsh_chain.py --update-lock`：按本机工具重写锁文件。
-  - `dmsh_chain.py --header`：重写 `nvn/dmsh_chain.h`。
+  - `dmsh_chain.py --header`：重写 `dm/games/<名>/dmsh_chain.h`。
   - 本机的 Xcode 或 spirv-cross 版本与仓库登记的不同是正常的，`setup.sh` 会自动按本机工具重新登记。
-- **`nvn/c1_full.tsv`**：着色器自带常数段（c1）的下标清单，由 `tools/c1_guard.py` 扫描翻译出的 MSL 生成，列出「运行时下标没能证明有界」的着色器键。首行记着它对应的 `b-<V>`。回放层对清单里的着色器给 c1 单独分配整块 64 KiB 缓冲；清单缺失或版本对不上时报红，并对全部着色器都这样保守处理。
-- **`nvn/shader_pairs.tsv`**：每个 BNSH 变体的（顶点键, 像素键），由 `tools/shader_split.py` 写出。Metal 要求像素着色器的每个输入都是顶点着色器的输出才肯建管线，而 Maxwell 对没写的属性给缺省值；所以 `dmsh_build.py` 给顶点着色器补上配对像素着色器读、它却没写的输出，值为 (0, 0, 0, 1)（`vs_pad`）。这张表算进翻译链版本。
+- **`dm/games/<名>/c1_full.tsv`**：着色器自带常数段（c1）的下标清单，由 `tools/c1_guard.py` 扫描翻译出的 MSL 生成，列出「运行时下标没能证明有界」的着色器键。首行记着它对应的 `b-<V>`。回放层对清单里的着色器给 c1 单独分配整块 64 KiB 缓冲；清单缺失或版本对不上时报红，并对全部着色器都这样保守处理。
+- **`dm/games/<名>/shader_pairs.tsv`**：每个 BNSH 变体的（顶点键, 像素键），由 `tools/shader_split.py` 写出。Metal 要求像素着色器的每个输入都是顶点着色器的输出才肯建管线，而 Maxwell 对没写的属性给缺省值；所以 `dmsh_build.py` 给顶点着色器补上配对像素着色器读、它却没写的输出，值为 (0, 0, 0, 1)（`vs_pad`）。这张表算进翻译链版本。
 - **多个游戏版本**：`shader_split.py` 的 RomFS 与 `main` 参数可写成逗号分隔的列表（基础版在前），输出并集；映射表、作答表、配对表目前覆盖马力欧 v0 与 1.2.1。
-- **`nvn/pso_manifest.tsv`**：随包的预热种子清单：启动时预建的着色器（`S`）、渲染管线（`R`，即 `nvn/nvn_pso_skey.h` 里 `pso_skey` 的十六进制）与计算管线（`C`）。行序就是预建顺序（首次使用的顺序），不要排序。与它配套的是 `pso_user.tsv`：宿主每次不得不当场建着色器或管线时追加记到存档目录旁，下次启动在种子清单之后预建。两者都只以键指认着色器、只描述管线设置，所以一台设备录的清单在别的设备上同样有效；本构建用不上的行跳过。录到的行可以追加到种子清单表头之后（目前为空）。
+- **`dm/games/<名>/pso_manifest.tsv`**：随包的预热种子清单：启动时预建的着色器（`S`）、渲染管线（`R`，即 `nvn/nvn_pso_skey.h` 里 `pso_skey` 的十六进制）与计算管线（`C`）。行序就是预建顺序（首次使用的顺序），不要排序。与它配套的是 `pso_user.tsv`：宿主每次不得不当场建着色器或管线时追加记到存档目录旁，下次启动在种子清单之后预建。两者都只以键指认着色器、只描述管线设置，所以一台设备录的清单在别的设备上同样有效；本构建用不上的行跳过。录到的行可以追加到种子清单表头之后（目前为空）。
 - **程序本体内嵌的着色器**：主程序里另有 4 个计算着色器不在着色器包里，按反汇编手写成 MSL，在 `nvn/nvn_builtin.h`。
 
 翻译时遵循的绑定约定（`tools/maxwell_refs.py` 文件头）：
@@ -79,7 +79,7 @@ Switch 原版着色器包
 | `nvn/nvn_hmap.h`、`nvn/nvn_cover.h`、`nvn/nvn_pace.h`、`nvn/nvn_pso_skey.h` | 哈希表、全覆盖绘制的几何证明、出图节拍器、管线清单键 |
 | `nvn/nvn_builtin.h` | 主程序内嵌的 4 个计算着色器的手写 MSL |
 | `nvn/include/nvn.h` | NVN 接口声明（第三方，许可证见文件头） |
-| `nvn/*.tsv`、`nvn/names.txt`、`nvn/dmsh_chain.h` | 上文讲的各张表与翻译链版本头 |
+| `nvn/names.txt`、`nvn/nvn_slots.tsv` | NVN 接口名表与 D2R 的槽位证据。上文讲的各张游戏表与 `dmsh_chain.h` 在游戏档案 `dm/games/<名>/`（工具用 `DM_GAME` 选，make 用 `GAME`，缺省 `smbw`） |
 | `tex/` | 贴图格式映射、解排布、BC 解压，见 [tex/README.zh-CN.md](tex/README.zh-CN.md) |
 | `metal/` | 独立的最小 Metal 离屏示例，不编进宿主，见 [metal/README.zh-CN.md](metal/README.zh-CN.md) |
 | `tools/` | 离线工具，见下 |
@@ -143,7 +143,7 @@ make -C dm/gfx/metal run        # 离屏示例自测，见 metal/README.zh-CN.md
 
 | 开关 | 作用 |
 |---|---|
-| `DM_NVN_SHMAP=路径` | 着色器映射表。缺省是可执行文件目录下的 `../gfx/nvn/shader_map.tsv`；`c1_full.tsv` 与 `pso_manifest.tsv` 取同目录 |
+| `DM_NVN_SHMAP=路径` | 着色器映射表。缺省是可执行文件目录下的 `../games/<名>/shader_map.tsv`；`c1_full.tsv` 与 `pso_manifest.tsv` 取同目录 |
 | `DM_MSL_DIR=目录` | 着色器库的上级目录，宿主从其下的 `b-<V>/` 加载。在 Mac 上跑宿主时设为 `$DM_ROOT/build/cache/metal_shader_cache` |
 | `DM_PSO_MANIFEST=路径` 或 `off` | 换一份预热清单，或关掉预热 |
 | `DM_PSO_RECORD=路径` | 把本次运行用到的着色器与管线追加记到文件，用来重录预热清单 |

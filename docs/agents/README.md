@@ -16,15 +16,20 @@ Everything here was learned on two titles: Diablo II: Resurrected (SDK ~12, NVN 
 
 - **Bring your own files.** Keys, NSPs and anything extracted from them stay in the user's workspace (`~/<title>-work`), never in the repository, never in a commit, never printed. Print key *names* and lengths only.
 - **Measure, then change.** Each fix in this repository started from a concrete observation (a crash address and its decompilation, a census over all shaders, a memory profile). Write the evidence into the code comment next to the fix, the way the existing code does; the next title will need it.
-- **One title per repository.** smbw-mobile is a copy of d2r-mobile's generic parts with D2R-specific code removed. Constants that are title- or SDK-specific (texture handle base, depth mode, address-space partition, program ID) are changed in place with a comment, not hidden behind runtime switches.
+- **One repository, one profile per title.** smbw-mobile started as a copy of d2r-mobile's generic parts. Title- or SDK-specific constants live in the game profile `dm/games/<id>/` ([dm/games/README.md](../../dm/games/README.md)). That covers program ID, known builds, modules, address-space partition, NVN driver tables, the shader tables and the app identity. The code reads the profile through `game_profile.h` (host) or `dm/games/game.py` (tools). Behaviour that fits only one title's code is gated by that title's build ID (`dm_main_build()`), never left on for every title. Some things are still built into the translator: the texture / sampler handle bases and the depth mode (see [04](04-graphics.md)). `dmsh_build.py` refuses a profile whose bases differ from the translator's.
 - **Keep the bilingual comment style** of the code base (Chinese line, then the English line), and the `【红】` prefix for red log lines that mark something unimplemented or wrong.
 - **Test where it runs.** The Mac host (`dm/host/dmhost`) is the development loop; the iOS app reuses the same host and graphics code. Never claim something works on iOS without running it there.
 
 ## Checklist for a new title
 
-1. Extract base (and update, if in scope) — [01](01-extract.md).
-2. Survey the binaries and the RomFS — [02](02-survey.md). Write down: SDK version, NVN API version, module list, imports the host lacks, SVCs, instruction census, NVN loader pattern, shader containers.
-3. Make a new repository from the previous port: copy the generic host / gfx / tools / third_party, delete title-specific modules, set the program ID.
+1. Run `dm/ios/tools/build_ipa_from_nsp.py` on the title's NSP folder. With no profile for its title ID, it writes `<NSP folder>/<title ID>_survey/survey.md`:
+   - modules and build IDs, SDK version and components, engine and graphics API markers;
+   - RomFS containers;
+   - the rewrite-site census and imports vs. host hooks.
+
+   It extracts only the code modules plus a RomFS list.
+2. Extract base (and update, if in scope) — [01](01-extract.md). Finish the survey — [02](02-survey.md). Write down: SDK version, NVN API version, module list, imports the host lacks, SVCs, instruction census, NVN loader pattern, shader containers.
+3. Add a game profile `dm/games/<id>/game.tsv` (start from `smbw/game.tsv`: identity, `build` rows, `modules`; keep the memory / NVN values until they are measured) and build the host for it with `make -C dm/host GAME=<id>`.
 4. Run the rewriter (`DM_RULESET=native`) and check its counts against `insn_census.py`.
 5. Boot on the Mac and iterate on the failure catalogue in [03](03-bringup.md) until the game reaches its frame loop.
 6. Extract and translate the shaders, find the binding layout by census, and get the first frame — [04](04-graphics.md).

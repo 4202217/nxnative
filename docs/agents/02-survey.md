@@ -2,6 +2,27 @@
 
 Do this before touching the host. Every item answers "what will break, and how much work is it".
 
+**The first pass is automatic.** Run `dm/ios/tools/build_ipa_from_nsp.py` on the title's NSP folder. When no game profile (`dm/games/*/game.tsv`) has its title ID, the script does no build. It extracts only the code modules plus a RomFS manifest (`nx_extract --manifest`: path, size and first 32 bytes of every file, with no game files written). It then writes `<NSP folder>/<title ID>_survey/survey.md`, which covers:
+
+- game name and display version (from the NACP). Newer SDKs compress the NACP's title area: a u16 size, then raw deflate that inflates to 32 language entries of 0x300 bytes (Mario 1.2.1 does this). LibHac 0.19 does not decode it; `nx_extract` and the script do;
+- base / update / DLC NSPs;
+- every module with its build ID and segment sizes;
+- program ID;
+- SDK version and components, the Unity version;
+- engine / API markers (NVN, Vulkan, EGL, IL2CPP, sead / agl, Wwise, CRIWARE, …);
+- RomFS folders, header magics and extensions;
+- the `insn_census.py` counts per module;
+- `nso_syms.py` imports vs. host hooks;
+- a short list of what that means for a port.
+
+Fire Emblem Engage, for example, came out as:
+- Unity 2020.3 IL2CPP on SDK 12.3.7 with NVN;
+- an extra `subsdk0` module (Nintendo's movie player);
+- 27,152 UnityFS bundles holding the shaders;
+- 101 `nn::hid` imports, plus `irsensor`, `ro` and `swkbd`.
+
+The tables below are what to check by hand afterwards.
+
 ## Identity and versions
 
 | Question | How |
@@ -9,11 +30,11 @@ Do this before touching the host. Every item answers "what will break, and how m
 | Program ID | NCA header / `main.npdm`. The host reports it from `svcGetInfo(ProgramId)` (`hle_svc.c`, `DM_PROGRAM_ID` overrides); some SDK code checks it. |
 | SDK version | Strings in `sdk`: `SDK MW+Nintendo+NintendoSDK_nnSdk-16_2_1-Release` style. SDK 16 changed several object sizes and service paths compared with D2R's SDK. |
 | NVN API version | The game calls `nvnDeviceGetInteger(API_MAJOR/MINOR)` and refuses to run if the host reports an older version. Mario required 55.x with minor ≥ 15 (`DM_NVN_API`). Its device setup *returns silently* on a failed check, so a missing frame loop with no error is a hint. |
-| Modules | ExeFS listing. Only `main` + `sdk` so far; `subsdk*` would need loader support. |
+| Modules | ExeFS listing. The loader takes up to 8 modules, in the order given; a game profile's `modules` key lists them for the rewriter, packaging and the host's default load list. Only `main` + `sdk` have been run so far. |
 
 ## Imports vs. host hooks
 
-`dm/tools/nso_syms.py <repo dm/host dir> <gameA ExeFS> <gameB ExeFS>` compares the dynamic imports of the new title (B) with the title the host already supports (A) and with the host's hook names.
+`dm/tools/nso_syms.py <repo dm/host dir> <gameA ExeFS | -> <gameB ExeFS>` compares the dynamic imports of the new title (B) with the title the host already supports (A) and with the host's hook names. Use `-` for A when no supported title's ExeFS is at hand; the survey mode does.
 
 - Mario imported 1,107 symbols, 692 of which D2R never imported (biggest gaps: `nn::audio` 197, `nn::hid` 48). 172 of the host's 186 hook names existed in Mario's `sdk`.
 - Not every import needs a hook. Many SDK functions run natively inside `sdk`; only the ones that end in an IPC to a system service (they reach `nn::sm::Initialize` / `svcSendSyncRequest`) must be replaced by a host hook on the **public entry point**. A missing one shows up at run time as an abort in `nn::sm::Initialize` with a backtrace: hook the outermost public function in that backtrace.
