@@ -28,6 +28,7 @@ static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap;
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
 static uint8_t *g_alias; static size_t g_alias_cap;
+static _Atomic uint64_t *g_alias_bits;   // 别名区页位图（alias_pages） | alias region page bitmap (alias_pages)
 static uint8_t *g_stack; static size_t g_stack_cap;
 
 static void mem_init(void) {
@@ -49,6 +50,7 @@ static void mem_init(void) {
     g_alias = g_as + 0x10000000; g_alias_cap = DM_GAME_MEM_ALIAS;
     g_stack = g_alias + g_alias_cap; g_stack_cap = DM_GAME_MEM_STACK;
     g_heap  = g_stack + g_stack_cap; g_heap_cap  = RESERVE - (size_t)(g_heap - g_as);
+    if (!(g_alias_bits = calloc((g_alias_cap >> 18) + 1, sizeof *g_alias_bits))) die("别名区页位图 calloc");
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
 }
 
@@ -91,6 +93,19 @@ static void map_add(uint64_t b, uint64_t n, uint64_t src, uint32_t st) {
     pthread_mutex_unlock(&g_map_lock);
 }
 static void map_del(int i) { pthread_mutex_lock(&g_map_lock); g_map[i] = g_map[--g_nmap]; pthread_mutex_unlock(&g_map_lock); }
+
+// 别名区每个 4 KB 页一位（已映射 = 1）：Map 置位、Unmap 清位，返回状态真变了的页数（带符号：Map 为正、Unmap 为负）
+// One bit per 4 KB page of the alias region (mapped = 1): Map sets bits, Unmap clears them; returns the number of pages whose state really changed (signed: positive for Map, negative for Unmap)
+static int64_t alias_pages(uint64_t off, uint64_t n, int map) {
+    int64_t ch = 0;
+    for (uint64_t p = off >> 12, e = (off + n + 0xFFF) >> 12; p < e; ) {
+        uint64_t sh = p & 63, k = 64 - sh < e - p ? 64 - sh : e - p, m = (k == 64 ? ~0ull : (1ull << k) - 1) << sh;
+        uint64_t old = map ? atomic_fetch_or(&g_alias_bits[p >> 6], m) : atomic_fetch_and(&g_alias_bits[p >> 6], ~m);
+        ch += __builtin_popcountll((map ? ~old : old) & m);
+        p += k;
+    }
+    return map ? ch : -ch;
+}
 
 int svc_thread(int num, uint64_t *regs);   // hle_thread.c：线程与同步类 | hle_thread.c: thread and synchronization kind
 
@@ -205,8 +220,11 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         if (num == 0x2C) { static _Atomic uint64_t hw; uint64_t end = (uint64_t)(a + size - g_alias), old = atomic_load(&hw);
             while (end > old && !atomic_compare_exchange_weak(&hw, &old, end)) {}
             if (end > old && end >> 28 != old >> 28) LOG("[内存] 别名区映射到 +%.2f GB（别名区 %.2f GB）", end / 1073741824.0, g_alias_cap / 1073741824.0); }
-        // 别名区实际映射的总量（每跨 256 MB 记一行，涨跌都记）：看游戏用了多少物理内存、有没有一直涨 | total actually mapped in the alias region (one line per 256 MB crossed, up or down): how much physical memory the game uses and whether it keeps growing
-        { static _Atomic int64_t tot; int64_t d = num == 0x2C ? (int64_t)size : -(int64_t)size, before = atomic_fetch_add(&tot, d), after = before + d;
+        // 别名区实际映射的总量（每跨 256 MB 记一行，涨跌都记）：看游戏用了多少物理内存、有没有一直涨。按页位图计，只数状态真变了的页——
+        // SDK 会对已映射的页再 Map、对比映射更大的范围 Unmap（Engage 先解 0x1000000 再解同址 0x103f000），按请求大小计会算成负数
+        // Total actually mapped in the alias region (one line per 256 MB crossed, up or down): how much physical memory the game uses and whether it keeps growing. Counted with a page bitmap, only pages whose state really changed --
+        // the SDK maps pages that are already mapped and unmaps ranges larger than what it mapped (Engage unmaps 0x1000000 and then 0x103f000 at the same address), so counting requested sizes went negative
+        { static _Atomic int64_t tot; int64_t d = alias_pages((uint64_t)(a - g_alias), size, num == 0x2C) << 12, before = atomic_fetch_add(&tot, d), after = before + d;
           if (before >> 28 != after >> 28) LOG("[内存] 别名区已映射 %.2f GB（应用池 %.2f GB）", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
     }

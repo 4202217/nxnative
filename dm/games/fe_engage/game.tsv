@@ -34,6 +34,10 @@ zip_store	.bundle:.wem:.unity3d:.metallib
 # 整块 6 GB = 前置 256 MB + 别名区 5.375 GB + 栈区 256 MB + 堆区 128 MB，正好是 iOS 不带「扩展虚拟寻址」授权时单块预留的上限（原先 Mac 起机用 8 GB、别名区 5.5 GB）
 # Engage never calls SetHeapSize: all its memory goes through the alias region (MapPhysicalMemory; measured mappings reach the top of the alias region), and thread stacks are placed at random in the stack region. So the heap region keeps only 128 MB,
 # and the 6 GB block = 256 MB in front + 5.375 GB alias region + 256 MB stack region + 128 MB heap region, exactly the largest single reservation iOS allows without the "extended virtual addressing" entitlement (Mac bring-up used 8 GB with a 5.5 GB alias region)
+# 别名区的地址也是 Unity 的：它的低层虚拟分配器自己 AllocateAddressRegion（每块按尺寸对齐，2.25 MB 占 4 MB、16.25 MB 占 20 MB），序章战斗前已占约 1.2 GB。
+# 节点区 1 GB 再占掉就不够了，所以 patch_nso.py 给本作 sdk 构建登记了剪口，把节点区缩到 62 MB（真机别名区 64 GB，不在乎这点）。
+# The alias region's address space is Unity's too: its low-level virtual allocator calls AllocateAddressRegion itself (each block aligned by size: 2.25 MB takes 4 MB, 16.25 MB takes 20 MB), about 1.2 GB before the prologue battle.
+# With the 1 GB node area taken as well that is not enough, so patch_nso.py registers a cut for this game's sdk build that shrinks the node area to 62 MB (the hardware's alias region is 64 GB and does not care).
 mem_reserve	0x180000000
 mem_alias	0x158000000
 mem_stack	0x10000000

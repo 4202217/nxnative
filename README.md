@@ -12,7 +12,7 @@ The project is built from the generic parts of [d2r-mobile](../d2r-mobile) (MIT)
 | Game | Profile | State |
 |---|---|---|
 | Super Mario Bros. Wonder (base game v0, update 1.2.1) | `smbw` | **Playable on the iPhone with sound through several levels**: an 11-minute session at 60 fps with no crash and no audio dropouts. Scripted Mac runs reach the opening course. Notes are in the [Super Mario Bros. Wonder](#super-mario-bros-wonder-smbw) section |
-| Fire Emblem Engage | `fe_engage` | Bring-up (Unity 2020.3 IL2CPP, SDK 12.3.7): **on the Mac it reaches the title screen** and, left idle, its 3D attract demo. `shader_split.py` reads the shaders out of the Unity bundles (9,268 of 9,269 compile). Movies play through a host decoder (VP9 with libvpx). Scripted input starts a new game and reaches the prologue cutscene and first battle map. Not yet: a heap-allocator crash a few minutes into that battle, a crash in the attract demo, iOS (the profile now fits iOS's 6 GB reservation) |
+| Fire Emblem Engage | `fe_engage` | Bring-up (Unity 2020.3 IL2CPP, SDK 12.3.7): **on the Mac it reaches the title screen** and, left idle, its 3D attract demo. `shader_split.py` reads the shaders out of the Unity bundles (9,268 of 9,269 compile). Movies play through a host decoder (VP9 with libvpx). Scripted input starts a new game and plays into the prologue battle (a 12-minute run ends without a crash). Not yet: a crash in the attract demo, iOS (the profile now fits iOS's 6 GB reservation) |
 
 ## Status
 

@@ -164,7 +164,22 @@ CUTS = {
     (0x5d8040, 'a005fe97', '411100d4', '玩家进局取出生点调用点 bl 0x5596c0 → svc #0x8a：宿主原样代调，进局在城镇时出生点换成小站旁（hle.h SVC_HOST_JOIN_SPAWN）', '仅宿主'),
     (0x5d8400, 'b004fe97', '611100d4', '进局给尸体取落点调用点 bl 0x5596c0 → svc #0x8b：同上，尸体与人取同一个点（hle.h SVC_HOST_JOIN_CORPSE）', '仅宿主'),
     (0x11f0914, '77100094', '811000d4', '段读取 0x11f07d0 逐块解码 bl 0x11f4af0(ctx, 块, 长度) → svc #0x84：同上（hle.h SVC_HOST_GRANNY_B）', '仅宿主'),
-]}
+  ],
+  # 火焰纹章 Engage 2.0.0（v327680）sdk：AddressRegionManager 节点区 0x3fe00000（约 1 GB）→ 0x3e00000（62 MB）。
+  # 构造函数（sdk+0x346420）在别名区开头划出节点区（0x30 字节一个节点的单元堆，用到才映射），其后才给 AllocateAddressRegion 分区域。
+  # 真机别名区 64 GB，这 1 GB 无所谓；宿主别名区受 iOS 单块预留 6 GB 所限只有 5.375 GB，StandardAllocator 一块 3.14 GB（按 1 GB 对齐）之后
+  # Unity 的低层虚拟分配器（main+0x9aa0f4 → AllocateAddressRegion）只剩约 1.2 GB，序章战斗约 357 s 时分不到 → 返回 0 → main+0x9a4664 写空崩溃。
+  # 62 MB 够约 135 万个节点（实测活着的区域几百个）。两条 mov 必须一起改：+0x346430 定节点区上限，+0x3464cc 把它登记成已占区域。
+  # Fire Emblem Engage 2.0.0 (v327680) sdk: AddressRegionManager node area 0x3fe00000 (about 1 GB) → 0x3e00000 (62 MB).
+  # The constructor (sdk+0x346420) carves the node area out of the start of the alias region (a unit heap of 0x30-byte nodes, mapped only as used) before AllocateAddressRegion hands out regions.
+  # The hardware alias region is 64 GB, so the 1 GB does not matter there; the host's alias region is only 5.375 GB (iOS caps a single reservation at 6 GB), and after StandardAllocator's 3.14 GB block (1 GB aligned)
+  # Unity's low-level virtual allocator (main+0x9aa0f4 → AllocateAddressRegion) had only about 1.2 GB left; about 357 s into the prologue battle it got no region → returned 0 → null write crash at main+0x9a4664.
+  # 62 MB holds about 1.35 million nodes (a few hundred regions are live in measurements). Both movs must change together: +0x346430 sets the node area limit, +0x3464cc registers it as an occupied region.
+  '56ec24747ec9e7f19b3efb062483a19d': [
+    (0x346430, '08fca752', '087ca052', 'AddressRegionManager 构造：节点区上限 mov w8,#0x3fe00000 → mov w8,#0x3e00000', '仅宿主'),
+    (0x3464cc, '09fca752', '097ca052', 'AddressRegionManager 构造：节点区登记为已占区域的长度 mov w9,#0x3fe00000 → mov w9,#0x3e00000', '仅宿主'),
+  ],
+}
 # ---- 已登记观测门：{NSO 构建号: [(偏移, 编号, 原指令字, 理由)]}。编号与宿主 hle.h 的 OBS_* 一致；
 # 原指令须与位置无关（不得 PC 相对 / 分支 / 涉 x18·tpidr），离线断言；宿主未挂回调时门块进出一次即返回 ----
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
