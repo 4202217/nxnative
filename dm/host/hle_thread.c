@@ -564,7 +564,11 @@ int svc_thread(int num, uint64_t *regs) {
         if (type != 0) {
             int32_t nv = val + 1;
             if (type == 2) {
-                if (cnt <= 0) nv = nw > 0 ? val - 1 : val + 1;
+                // 全部唤醒（个数 ≤ 0）且有人等时减 2，不是减 1（mesosphere KAddressArbiter::SignalAndModifyByWaitingCountIfEqual；Ryujinx、yuzu 同）。
+                // 原先减 1：Unity（Engage）的作业栅栏按这个值判断作业做完没有，等待方提前放行，粒子几何作业与主线程算的个数对不上，写出界（索引写进贴图对象、写空指针崩）。
+                // Waking all (count <= 0) with waiters subtracts 2, not 1 (mesosphere KAddressArbiter::SignalAndModifyByWaitingCountIfEqual; Ryujinx and yuzu agree).
+                // It used to subtract 1: Unity's (Engage) job fences decide from this value whether jobs are done, waiters were let through early, and the particle geometry job disagreed with the main thread's counts and wrote out of bounds (indices into texture objects, writes to a null pointer).
+                if (cnt <= 0) nv = nw > 0 ? val - 2 : val + 1;
                 else nv = nw == 0 ? val + 1 : nw <= cnt ? val - 1 : val;
             }
             uint32_t e = (uint32_t)val;
