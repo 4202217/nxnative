@@ -28,13 +28,13 @@ Two conventions that run through the whole table:
 | Queue | Metal command queue | `SubmitCommands` = replay and submit |
 | Sync | The fence value of a submission | `FenceSync` records the fence value of the most recent submission; `SyncWait` lets the caller through only after the GPU has actually completed up to that value (the completed value of an `MTLSharedEvent`). Waiting on a sync object that was never fenced returns a timeout directly |
 | Event | A 32-bit value in game memory | The value is written after the GPU completes |
-| Window | The game's own swapchain textures ↔ `CAMetalLayer` | `AcquireTexture` returns the index of a swapchain texture, and the wait for vertical sync happens here; `QueuePresentTexture` only puts the presentation into a queue and returns immediately, and the presentation thread draws that texture onto the drawable using the crop region given by `WindowSetCrop` |
+| Window | The game's own swapchain textures ↔ `CAMetalLayer` | `AcquireTexture` returns the index of a swapchain texture, and the wait for vertical sync happens here; `QueuePresentTexture` only puts the presentation into a queue and returns immediately, and the presentation thread draws that texture onto the drawable using the crop region given by `WindowSetCrop`. It draws the stored bytes as the Switch's scan-out sends them: an sRGB swapchain texture is sampled through a non-sRGB view (`present_raw_src`) |
 
 ## 2. Commands
 
 | NVN command | Metal | Notes |
 |---|---|---|
-| SetRenderTargets | Ends the current render encoder and opens a new render pass | Clears before the first command in the pass are folded into the attachment's load action (load = Clear) |
+| SetRenderTargets | Ends the current render encoder and opens a new render pass | Clears before the first command in the pass are folded into the attachment's load action (load = Clear). A view that changes the format (an `RGBA8_SRGB` view of an `RGBA8` texture) is attached as a Metal view of that format, so writes are encoded as on the Switch |
 | ClearColor / ClearDepthStencil | Same as above | Clears in the middle of a pass, and color clears with a partial mask or partial scissor, are not implemented and report red when encountered |
 | ClearTexture / ClearTextureui | Clears one texture on its own | Some forms are not implemented and report red when encountered |
 | BindProgram and the various state Bind* calls | Recorded into the current state; the pipeline is fetched as needed before the next draw | — |

@@ -28,13 +28,13 @@ English: [nvn_metal_mapping.md](nvn_metal_mapping.md)
 | Queue | Metal 命令队列 | `SubmitCommands` = 回放并提交 |
 | Sync | 提交的栅栏值 | `FenceSync` 记下最近一次提交的栅栏值；`SyncWait` 只在 GPU 真正完成到该值之后放行（`MTLSharedEvent` 的已完成值）。没围栏过的同步对象等待直接返回超时 |
 | Event | 游戏内存里的一个 32 位值 | 写值在 GPU 完成之后发生 |
-| Window | 游戏自己的交换链贴图 ↔ `CAMetalLayer` | `AcquireTexture` 返回交换链贴图的下标，垂直同步的等待发生在这里；`QueuePresentTexture` 只把出图排进队列立即返回，由出图线程把该贴图按 `WindowSetCrop` 给的裁切区画到 drawable 上 |
+| Window | 游戏自己的交换链贴图 ↔ `CAMetalLayer` | `AcquireTexture` 返回交换链贴图的下标，垂直同步的等待发生在这里；`QueuePresentTexture` 只把出图排进队列立即返回，由出图线程把该贴图按 `WindowSetCrop` 给的裁切区画到 drawable 上。画的是贴图里存的字节，和 Switch 扫描输出一致：sRGB 交换链贴图经非 sRGB 视图采样（`present_raw_src`） |
 
 ## 2. 命令
 
 | NVN 命令 | Metal | 说明 |
 |---|---|---|
-| SetRenderTargets | 结束当前渲染编码器，开新的渲染通道 | 通道里第一条命令之前的清除并进附件的读入动作（load = Clear） |
+| SetRenderTargets | 结束当前渲染编码器，开新的渲染通道 | 通道里第一条命令之前的清除并进附件的读入动作（load = Clear）。换格式的视图（`RGBA8` 贴图的 `RGBA8_SRGB` 视图）挂成该格式的 Metal 视图，写入时与 Switch 一样编码 |
 | ClearColor / ClearDepthStencil | 同上 | 通道中途的清除、带部分掩码或部分剪裁的清色没有实现，遇到报红 |
 | ClearTexture / ClearTextureui | 单独清一张贴图 | 部分形态没有实现，遇到报红 |
 | BindProgram 与各状态 Bind* | 记进当前状态，下一次绘制前按需取管线 | — |
