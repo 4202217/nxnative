@@ -36,9 +36,9 @@ All of them default to `smbw`. To query a profile:
 | `zip_store` | Extensions the IPA stores without compressing |
 | `mem_reserve`, `mem_alias`, `mem_stack`, `app_pool` | Guest address-space partition and application pool (`hle_svc.c`) |
 | `nvn_tex_base`, `nvn_tex_slots`, `nvn_samp_base`, `nvn_img_base`, `nvn_img_slots`, `nvn_ssbo_bases` | NVN driver constant segments, measured over all shaders |
-| `shader_groups`, `shader_note` | `shader_split.py` source groups and the map header note |
+| `shader_groups`, `shader_note` | `shader_split.py` source groups and the map header note (Engage: `engine` for `data.unity3d` and `Resources/`, `assets` for the Addressables bundles) |
 
-The translator (`dmsh_xlate/Program.cs`) still has the texture / sampler bases and the depth convention built in. `dmsh_build.py` stops if a profile's `nvn_tex_base` / `nvn_samp_base` differ, so a game that needs other values must make the translator configurable first.
+The translator (`dmsh_xlate/Program.cs`) still has Mario's texture / sampler bases and the depth convention built in. It uses the bases only to look up per-slot texture / image types in `shader_facts.tsv`; `dmsh_build.py` decodes the bindings from the profile. So a profile with other bases (Engage: `0x168` / `0x568`) builds as long as its facts table has no per-slot texture / image entries; otherwise `dmsh_build.py` stops, and the translator must take the bases from the profile first.
 
 ## Adding a game
 

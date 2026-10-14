@@ -265,7 +265,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     notes = []
     if 'NVN' not in found: notes.append('没找到 NVN：宿主只实现了 NVN | no NVN found: the host implements only NVN')
     if extra: notes.append(f'除 main / sdk 外还有 {", ".join(extra)}：装载器能装最多 8 个模块，但打包与改写目前只处理 main + sdk | modules besides main / sdk: {", ".join(extra)}; the loader takes up to 8 modules, but packaging and rewriting handle only main + sdk today')
-    if mags['UnityFS'] or 'Unity IL2CPP' in found: notes.append('Unity：着色器在 UnityFS 包里，shader_split.py 读不到，要先写 UnityFS 读取与 Unity 的 NVN 着色器格式 | Unity: shaders sit inside UnityFS bundles, which shader_split.py cannot read; a UnityFS reader and Unity\'s NVN shader format come first')
+    if mags['UnityFS'] or 'Unity IL2CPP' in found: notes.append('Unity：着色器是 UnityFS 包与 data.unity3d 里的 Shader 对象，shader_split.py 经 unityfs.py 读出（按 Unity 2020.3 的 Switch 格式写成，别的 Unity 版本先核对） | Unity: the shaders are Shader objects in UnityFS bundles and data.unity3d, which shader_split.py reads through unityfs.py (written for Unity 2020.3\'s Switch format; check other Unity versions first)')
     if not (mags['BNSH'] or mags['BAHS']) and not mags['UnityFS']: notes.append('顶层没有 BNSH / BAHS：着色器在压缩包或别的容器里，要先找到 | no BNSH / BAHS at the top level: the shaders are inside compressed or other containers and must be located first')
     major = {v.split('_')[0] for v in sdkver}
     if not major: notes.append('没找到 SDK 版本串 | no SDK version string found')

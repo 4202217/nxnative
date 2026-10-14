@@ -84,6 +84,7 @@ def header(g):
          f'#define DM_GAME_NVN_SSBO_BASE(stage) ({sb})',
          f'#define DM_GAME_NVN_TEX_BASE {g.int("nvn_tex_base"):#x}',
          f'#define DM_GAME_NVN_TEX_SLOTS {g.int("nvn_tex_slots")}',
+         f'#define DM_GAME_NVN_SAMP_BASE {g.int("nvn_samp_base"):#x}',
          f'#define DM_GAME_NVN_IMG_BASE {g.int("nvn_img_base"):#x}',
          f'#define DM_GAME_NVN_IMG_SLOTS {g.int("nvn_img_slots")}',
          f'#define DM_GAME_DISPLAY_VERSIONS {vers}',

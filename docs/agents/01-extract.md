@@ -48,4 +48,4 @@ ht -t nca --exefsdir=$W/data/v0/ExeFS --romfsdir=$W/data/v0/RomFS $W/build/nsp/<
 ## Compressed RomFS content
 
 - Newer EPD titles store most files as `*.zs` (plain zstd, no dictionary in Mario; Zelda TotK needs `ZsDic.pack` dictionaries). Check for `*dic*` files before assuming plain zstd.
-- `*.sarc` / `*.pack` / `*.blarc` / `*.bfarc` are SARC archives; `*.byml` / `*.bgyml` are BYML (version 7 in Mario). A minimal reader for both is short enough to write inline when needed (see `shader_split.py` for SARC).
+- `*.sarc` / `*.pack` / `*.blarc` / `*.bfarc` are SARC archives; `*.byml` / `*.bgyml` are BYML (version 7 in Mario). A minimal reader for both is short enough to write inline when needed (see `shader_split.py` for SARC). Unity titles: `dm/gfx/tools/unityfs.py` reads UnityFS bundles, serialized files and objects by type tree (`bundle_files`, `serialized_objects`).

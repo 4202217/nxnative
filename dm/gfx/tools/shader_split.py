@@ -7,6 +7,9 @@
 #   · BAHS（agl 的 sharcb：agl / gsys 资源包、Secred 包里的 GameAglShader）：文件头 +0x1c 代码区起点、+0x18 代码区长；
 #       表区里每条二进制项 16 字节 {代码偏移（相对代码区，0x100 对齐）, 0, 控制段长 0x880 / 0x88c, 控制段相对本项地址的有符号偏移}。
 #       控制段在多个程序间共用，所以按项配对，不能按控制段找代码；项靠「控制段魔数 + 代码区魔数 + 长度自洽」三重核对认出。
+#   · Unity（UnityFS 资源包、Data 下的序列化文件，读法见 unityfs.py）：每个 Shader 对象的 Switch 平台子程序，程序代码 = 0x60 头 + 各阶段块。
+#       头是 4 个 i32 ×6 数组，下标按 NVN 阶段（0 顶点 1 像素 2 几何 3 外壳 4 域 5 计算）：[0] 未用（0 或暂存大小）、[1] 块偏移（相对 +0x60，−1 = 无此阶段）、[2] 控制段长、[3] 代码区长；
+#       块 = 控制段 + 代码区。一个程序的顶点 / 像素阶段即一对。游戏本体的序列化文件（data.unity3d、unity default resources）不带类型树，借资源包里同哈希的 Shader 类型树（第二遍）
 # 代码区：0x30 头 + （图形）0x50 SPH + 指令；头魔数图形 0x12345678、计算 0x12345679。控制段 0x98761234 开头，+0x704 = 代码区长，
 #   +0x700 = c1 常数段在代码区内的起点；计算着色器 +0x748 线程组 xyz（u32 ×3）、+0x754 共享内存字节（D2R 22 个计算着色器与 PC 反射逐条核对）。
 # 阶段：BNSH 取阶段槽；BAHS 取 SPH 第 0 字 bits 10..13（1 顶点 2 外壳 3 域 4 几何 5 像素），计算头的为计算。
@@ -16,7 +19,8 @@
 #   映射表行与 D2R 的 shader_map.tsv 同列（第 5 列记首次出现的位置）；作答表每个计算着色器一行 {"local", "shared"}（共享内存按 16 字节向上取整，同 D2R 口径）。
 # 用法：shader_split.py <RomFS 目录> <ExeFS main> <输出包目录> <输出映射表> <输出作答表> [<输出配对表>]   （解 main 要 lz4：用 dm 的 venv python 跑）   环境 J=并发（缺省 8）
 #   带更新包：RomFS 与 main 都写成逗号分隔的列表（基础版在前，如 data/v0/RomFS,data/v327680/RomFS），输出两版的并集（见 main()）
-# 配对表：BNSH 每个变体的（顶点键, 像素键），dmsh_build 据此给顶点着色器补上像素着色器读而它没写的输出（见 dmsh_build.py vs_pad）
+#   Unity 的类型树字符串要 Unity 的公共字符串表，取自第一个 main
+# 配对表：BNSH 每个变体（Unity 每个程序）的（顶点键, 像素键），dmsh_build 据此给顶点着色器补上像素着色器读而它没写的输出（见 dmsh_build.py vs_pad）
 # All of Mario's shaders → the "package directory" dmsh_build.py understands + the shader map + the translation query answer table (thread group / shared memory of compute shaders).
 # Sources (a full scan, not relying on file names): every file under RomFS (.zs is zstd-decompressed first, SARC is expanded member by member) and ExeFS main (NSO, lz4-decompressed), looking for
 #   · BNSH ('BNSH\0\0\0\0', carried by bfsha / particle effect esetb / UI layout blarc / embedded in main):
@@ -25,6 +29,9 @@
 #   · BAHS (agl's sharcb: the agl / gsys resource packs, GameAglShader in the Secred pack): file header +0x1c code region start, +0x18 code region length;
 #       each binary entry in the table area is 16 bytes {code offset (relative to the code region, 0x100-aligned), 0, control length 0x880 / 0x88c, signed offset of the control relative to this entry's address}.
 #       Control sections are shared between programs, so pairing goes by entry, never by finding code from a control; entries are recognized by a triple check of "control magic + code magic + consistent lengths".
+#   · Unity (UnityFS bundles and the serialized files under Data, read by unityfs.py): the Switch subprograms of each Shader object; the program code = a 0x60 header + one block per stage.
+#       The header is 4 i32 ×6 arrays indexed by NVN stage (0 vertex 1 pixel 2 geometry 3 hull 4 domain 5 compute): [0] unused (0 or a scratch size), [1] block offset (from +0x60, -1 = no such stage), [2] control length, [3] code length;
+#       block = control section + code area. A program's vertex / pixel stages form a pair. The game's own serialized files (data.unity3d, unity default resources) carry no type trees and borrow the bundles' Shader type tree of the same hash (second pass)
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -34,7 +41,8 @@
 #   map rows have the same columns as D2R's shader_map.tsv (column 5 records where the key first appeared); the answer table has one row per compute shader {"local", "shared"} (shared memory rounded up to 16 bytes, as D2R did).
 # Usage: shader_split.py <RomFS dir> <ExeFS main> <output package dir> <output map> <output answer table> [<output pair table>]   (decompressing main needs lz4: run with dm's venv python)   Environment J=concurrency (default 8)
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
-# Pair table: (vertex key, pixel key) of every BNSH variation; dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
+#   Unity type trees need Unity's common string table, which is taken from the first main
+# Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
 GAME = _game.load()   # 当前游戏档案（DM_GAME，缺省 smbw）：来源组规则与表头说明 | the current game profile (DM_GAME, default smbw): source group rules and the table header note
@@ -97,6 +105,40 @@ def sarc_members(d):
         nm = d[names + (attr & 0xffffff) * 4:].split(b'\0')[0].decode('utf-8', 'replace') if attr >> 24 else f'#{i}'
         yield nm, d[doff + s:doff + e]
 
+NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN 阶段序 | NVN stage order
+COMMON, TREES = None, {}   # Unity 公共字符串表、借用的类型树（进程池初始化时给） | Unity common strings and borrowed type trees (given when the pool starts)
+
+def _pool_init(common, trees):
+    global COMMON, TREES
+    COMMON, TREES = common, trees
+
+def unity_program(code, where):
+    """Unity 的 Switch 程序代码 → [(阶段, 控制段, 代码区)] | Unity's Switch program code → [(stage, control, code)]"""
+    h = struct.unpack_from('<24i', code, 0); out = []; end = 0x60
+    for i, st in enumerate(NV_STAGES):
+        off, nctl, ncode = h[6 + i], h[12 + i], h[18 + i]
+        if off == -1: continue
+        a = 0x60 + off; ctl, cd = code[a:a + nctl], code[a + nctl:a + nctl + ncode]
+        why = check(where, st, ctl, cd) if a + nctl + ncode <= len(code) else '块越界'
+        if why: red(f'{where} {st}：{why}')
+        out.append((st, ctl, cd)); end = max(end, a + nctl + ncode)
+    if end != len(code): red(f'{where}：程序代码 {len(code):#x} 字节，各阶段块只到 {end:#x}')
+    return out
+
+def unity_shaders(d, label, out, trees):
+    """UnityFS 包或序列化文件里的 Shader → out；没有类型树可用时抛 NoTree | Shaders in a UnityFS bundle or serialized file → out; raises NoTree when no type tree is available"""
+    import unityfs
+    if COMMON is None: red(f'{label}：是 Unity 资源，但 main 里没有 Unity 公共字符串表')
+    sers = unityfs.bundle_files(d) if d[:8] == b'UnityFS\0' else [('', d)]
+    for node, x in sers:
+        if not unityfs.is_serialized(x): continue
+        for cid, pid, o in unityfs.serialized_objects(x, COMMON, {unityfs.CLASS_SHADER}, trees):
+            name = o['m_ParsedForm']['m_Name'] if 'm_ParsedForm' in o else o.get('m_Name', '?')
+            for plat, k, sp in unityfs.shader_programs(o):
+                where = f'{label}{":" + node if node else ""}#{name}#var{plat}.{k}'
+                code = unityfs.subprogram(sp)[4]
+                out.extend((where, st, ctl, cd) for st, ctl, cd in unity_program(code, where))
+
 def scan_blob(d, label, out):
     if d[:4] == b'SARC':
         for nm, m in sarc_members(d): scan_blob(m, f'{label}/{nm}', out)
@@ -121,16 +163,22 @@ def var_pairs(found):
     return {(v['vs'], v['ps']) for v in var.values() if 'vs' in v and 'ps' in v}
 
 def scan_file(args):
+    """→ (相对路径, {键: …}, 配对, 额外)；额外 = 本文件的 Unity 类型树，或 'defer'（缺类型树，第二遍再扫） | → (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, or 'defer' (no type tree, scanned again in the second pass)"""
     path, rel = args
     d = subprocess.run(['zstd', '-d', '-c', '-q', path], capture_output=True, check=True).stdout if path.endswith('.zs') else open(path, 'rb').read()
-    if b'BNSH\0\0\0\0' not in d and b'BAHS' not in d: return rel, {}, set()
-    found = []; scan_blob(d, '/' + rel, found)
+    found = []; trees = {}
+    if d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and __import__('unityfs').is_serialized(d)):
+        import unityfs
+        try: unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
+        except unityfs.NoTree: return rel, {}, set(), 'defer'
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d: return rel, {}, set(), {}
+    else: scan_blob(d, '/' + rel, found)
     uniq = {}
     for where, st, ctl, code in found:
         key = hashlib.sha256(ctl[:0x880] + code).hexdigest()[:16]
         if key in uniq and (uniq[key][2] != ctl or uniq[key][3] != code): red(f'键 {key} 相同而控制段或代码区不同（{where}）')
         uniq.setdefault(key, (where, st, ctl, code))
-    return rel, uniq, var_pairs(found)
+    return rel, uniq, var_pairs(found), trees
 
 def nso_image(path):
     import lz4.block
@@ -151,16 +199,34 @@ def main():
     # The first version's source column is unchanged; later versions are prefixed with their workspace directory name (e.g. v327680): /v327680/Shader/…, main@v327680. They sort after the first version, so existing rows keep their package indices.
     romfs_v, main_v = romfs_l.split(','), main_l.split(',')
     if len(romfs_v) != len(main_v): red(f'RomFS {len(romfs_v)} 个、main {len(main_v)} 个，要一一对应')
-    files, results = [], []
+    files, results, common = [], [], None
     for i, (romfs, mainnso) in enumerate(zip(romfs_v, main_v)):
         tag = os.path.basename(os.path.dirname(os.path.abspath(romfs))) if i else ''
         files += sorted((os.path.join(dp, f), (tag + '/' if tag else '') + os.path.relpath(os.path.join(dp, f), romfs)) for dp, _, fs in os.walk(romfs) for f in fs)
-        found = []; scan_blob(nso_image(mainnso), 'main' + ('@' + tag if tag else ''), found)
-        results.append(('main', {hashlib.sha256(c[:0x880] + k).hexdigest()[:16]: (w, s, c, k) for w, s, c, k in found}, var_pairs(found)))
+        img = nso_image(mainnso)
+        if not i:
+            import unityfs
+            try: common = unityfs.common_strings(img)
+            except ValueError: common = None   # 不是 Unity 游戏 | not a Unity game
+        found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
+        results.append(('main', {hashlib.sha256(c[:0x880] + k).hexdigest()[:16]: (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
     keys = {}
-    with cf.ProcessPoolExecutor(int(os.environ.get('J', '8'))) as ex: results += list(ex.map(scan_file, files, chunksize=16))
+    # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
+    # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
+    J = int(os.environ.get('J', '8'))
+    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {})) as ex: results += list(ex.map(scan_file, files, chunksize=16))
+    trees, defer = {}, []
+    for rel, uniq, pr, extra in results:
+        if extra == 'defer': defer.append(rel)
+        elif extra: trees.update(extra)
+    if defer:
+        byrel = {r: p for p, r in files}
+        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        for rel, uniq, pr, extra in again:
+            if extra == 'defer': red(f'{rel}：Unity 序列化文件没有类型树，资源包里也没有同哈希的 Shader 类型树可借')
+        results = [r for r in results if r[3] != 'defer'] + again
     per_src = collections.Counter(); pairs = set()
-    for rel, uniq, pr in results:
+    for rel, uniq, pr, _ in results:
         pairs |= pr
         for key, v in uniq.items():
             if key in keys:
@@ -185,7 +251,8 @@ def main():
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
-        f.write(f'# kind: evidence  {NOTE}（RomFS + main 里的 BNSH / BAHS）→ 控制段 + 代码区键（dm/gfx/tools/shader_split.py）\n')
+        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] for r in rows))) if hit)
+        f.write(f'# kind: evidence  {NOTE}（RomFS + main 里的 {kinds}）→ 控制段 + 代码区键（dm/gfx/tools/shader_split.py）\n')
         f.write('# 第 5 列记每个键首次出现的位置；本作没有 PC 版配对\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')

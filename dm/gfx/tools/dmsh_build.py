@@ -47,11 +47,13 @@ MAC_RECORD = 'xcrun -sdk macosx metal -c; xcrun -sdk macosx metallib'
 #   This game uses only combined handles (nvnCommandBufferBindTexture), with no separate samplers; the image handle table is still at 0x120 + 8 r (8 slots, right after the texture table; measured 0x120 / 0x128 / 0x130 on agl's 10 compute shaders, the same address as D2R).
 TEX_BASE, TEX_SLOTS, SAMP_BASE, IMG_BASE, IMG_SLOTS = (GAME.int(k) for k in ('nvn_tex_base', 'nvn_tex_slots', 'nvn_samp_base', 'nvn_img_base', 'nvn_img_slots'))
 SSBO = {k: int(v, 0) for k, v in GAME.pairs('nvn_ssbo_bases')}   # c0 存储缓冲表基址（按阶段） | c0 storage buffer table bases (per stage)
-# 翻译器（dmsh_xlate/Program.cs）内置了贴图 / 采样器句柄表基址：与档案不同时翻出来的绑定是错的，先让翻译器可配再出包
-# The translator (dmsh_xlate/Program.cs) has the texture / sampler handle table bases built in: if the profile differs, the bindings it produces are wrong, so make the translator configurable before building
+# 翻译器（dmsh_xlate/Program.cs）内置了贴图 / 采样器句柄表基址，只用来把句柄换成槽号、去作答表里查该槽的贴图 / 图像类型（TexSlot）；绑定的槽号由本脚本按档案解（decode_tex）。
+#   所以只有作答表里有按槽的贴图 / 图像事实时，档案的基址才必须与翻译器内置值相同（否则查错槽）；Engage（0x168 / 0x568）作答表没有这类事实，翻译器不用改
+# The translator (dmsh_xlate/Program.cs) has the texture / sampler handle table bases built in, used only to turn a handle into a slot and look up that slot's texture / image type in the answer table (TexSlot); the bindings' slots are decoded by this script from the profile (decode_tex).
+#   So the profile's bases must equal the translator's only when the answer table has per-slot texture / image facts (otherwise the wrong slot is looked up); Engage (0x168 / 0x568) has no such facts, so the translator needs no change
 _xb = re.search(r'const int TexBase = (0x[0-9a-fA-F]+), SampBase = (0x[0-9a-fA-F]+);', open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dmsh_xlate/Program.cs')).read())
-if not _xb or (int(_xb.group(1), 16), int(_xb.group(2), 16)) != (TEX_BASE, SAMP_BASE):
-    sys.exit(f'【红】游戏档案 {GAME.id} 的 nvn_tex_base / nvn_samp_base（{TEX_BASE:#x} / {SAMP_BASE:#x}）与翻译器内置值不同（dmsh_xlate/Program.cs TexBase / SampBase）：先让翻译器按档案取值')
+if (not _xb or (int(_xb.group(1), 16), int(_xb.group(2), 16)) != (TEX_BASE, SAMP_BASE)) and any(f.get('tex') or f.get('img') for f in FACTS.values()):
+    sys.exit(f'【红】游戏档案 {GAME.id} 的 nvn_tex_base / nvn_samp_base（{TEX_BASE:#x} / {SAMP_BASE:#x}）与翻译器内置值不同（dmsh_xlate/Program.cs TexBase / SampBase），而作答表里有按槽的贴图 / 图像事实：先让翻译器按档案取值')
 
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
@@ -390,7 +392,9 @@ def reflect(key, stage, msl, res):
     return binds
 
 DRV_FILL = {0: [(b, b + 0x100) for b in sorted(SSBO.values())],   # c0：存储缓冲地址表（顶点 / 计算 / 像素，各 16 槽 × 0x10） | c0: storage buffer address tables (vertex / compute / pixel, 16 slots × 0x10 each)
-            2: [(TEX_BASE, TEX_BASE + 8 * TEX_SLOTS), (IMG_BASE, IMG_BASE + 8 * IMG_SLOTS)]}   # c2：贴图句柄表（本作 0x20 + 8 r，32 槽）、图像句柄表（0x120 + 8 r，8 槽） | c2: texture handle table (this game: 0x20 + 8 r, 32 slots), image handle table (0x120 + 8 r, 8 slots)
+            2: [(TEX_BASE, TEX_BASE + 8 * TEX_SLOTS), (IMG_BASE, IMG_BASE + 8 * IMG_SLOTS), (SAMP_BASE, SAMP_BASE + 8 * 128)]}
+# c2：贴图句柄表（马力欧 0x20 + 8 r、32 槽；Engage 0x168 + 8 r、128 槽）、图像句柄表（0x120 + 8 r，8 槽）、分离采样器句柄表（0x568 + 8 r，128 槽；回放层都现填）
+# c2: texture handle table (Mario 0x20 + 8 r, 32 slots; Engage 0x168 + 8 r, 128 slots), image handle table (0x120 + 8 r, 8 slots), separate sampler handle table (0x568 + 8 r, 128 slots; the replay layer fills them all)
 
 def drv_reads(src):
     """MSL 里对驱动段 c0 / c2 的读取：常量下标 → 字节区间；非常量下标记为动态 | Reads of driver segments c0 / c2 in the MSL: constant index → byte range; non-constant indices are recorded as dynamic"""
@@ -409,7 +413,9 @@ def unfillable(dr):
     for bank, d in dr.items():
         if d['dynamic']: bad.append(f'c{bank} 动态下标')
         for o in d['vec4_offsets']:
-            if not any(a <= o and o + 16 <= b or (a <= o < b) for a, b in DRV_FILL[int(bank)]): bad.append(f'c{bank}+{o:#x}')
+            # 读的是 16 字节一行：与任一张表相交即可（Engage 读 c2+0x160 那一行，是为了其中 0x168 的贴图槽 0）
+            # a read is a 16-byte row: overlapping any table is enough (Engage reads the c2+0x160 row for texture slot 0 at 0x168 in it)
+            if not any(o < b and a < o + 16 for a, b in DRV_FILL[int(bank)]): bad.append(f'c{bank}+{o:#x}')
     return bad
 
 RULES = []   # 按着色器名挂的 MSL 改写规则（函数, 适用判定）；原有的暗部重映射 toe 已删（回到 Switch 原版亮度） | MSL rewrite rules attached by shader name (function, applicability test); the former dark-range remap toe has been removed (back to the original Switch brightness)
