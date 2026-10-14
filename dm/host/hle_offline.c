@@ -12,6 +12,7 @@ static _Alignas(16) uint8_t g_ev_ldn[0x100];
 // ---------- prepo: telemetry reports. Saving / submitting all report success; nothing is sent ----------
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", "遥测报告保存（用户）；不发送，报成功", Result, h_prepo_SaveU, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveEv", "遥测报告保存；不发送，报成功", Result, h_prepo_Save, void *self) { (void)self; return RES_OK; }
+HLE_FORCE("_ZN2nn5prepo10InitializeEv", "遥测初始化：原版连 prepo 服务（经 sm），宿主没有服务进程；空操作（Engage 显式调用）", Result, h_prepo_Init, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "遥测立即上传；不发送，报成功", Result, h_prepo_Tx, void) { return RES_OK; }
 
 // ---------- ldn：本地无线。初始化即失败，状态恒为「无」 ----------

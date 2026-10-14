@@ -152,6 +152,22 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                 if (g_map[i].base > addr && g_map[i].base < hi) hi = g_map[i].base;
             }
             base=lo; size=hi-lo; state=0; perm=0; }
+        else if (module_of(a)) {
+            // 已装模块：照 Horizon 的布局回报分区——代码 [0, ro) Code+RX、只读 [ro, data) Code+R、数据与 bss [data, 补丁区) CodeData+RW。
+            // SDK 的 C++ 异常展开（nn::ro::detail::GetExceptionInfo）从 PC 起往回并「Code+RX」区找模块首、往前并 Code 再并 CodeData 找模块尾，再从模块首读 MOD0 取 .eh_frame_hdr。
+            // 原先回报「所在 4 KiB 页、Code+RX」：往回一直并到别的内存，读不到 MOD0 就中止（Engage 的 IL2CPP 每次托管异常都抛 C++ 异常）。
+            // 改写器的补丁区报 CodeData+RX：模块在宿主里首尾相接，补丁区（可执行）若报 Code+RX，往回找模块首会并进前一个模块
+            // Loaded module: report the regions in Horizon's layout -- code [0, ro) Code+RX, read-only [ro, data) Code+R, data and bss [data, patch area) CodeData+RW.
+            // The SDK's C++ exception unwinding (nn::ro::detail::GetExceptionInfo) walks back from the PC over "Code+RX" regions to find the module start, forward over Code then CodeData to find its end, then reads MOD0 at the module start for .eh_frame_hdr.
+            // Previously "the 4 KiB page around it, Code+RX" was reported: the backward walk ran on into other memory, found no MOD0 and aborted (Engage's IL2CPP throws a C++ exception for every managed exception).
+            // The rewriter's patch area is reported as CodeData+RX: modules sit back to back in the host, and an executable patch area reported as Code+RX would merge the previous module into the backward walk
+            module_t *mm = module_of(a); uint64_t off = (uint64_t)(a - mm->base), mb = (uint64_t)mm->base;
+            uint64_t ro = mm->ro_off ? mm->ro_off : mm->text_end, da = mm->data_off ? mm->data_off : ro, pa = mm->patch_off ? mm->patch_off : mm->size;
+            if (off < ro)      { base = mb;      size = ro;            state = 3/*Code*/;     perm = 5; }
+            else if (off < da) { base = mb + ro; size = da - ro;       state = 3/*Code*/;     perm = 1; }
+            else if (off < pa) { base = mb + da; size = pa - da;       state = 4/*CodeData*/; perm = 3; }
+            else               { base = mb + pa; size = mm->size - pa; state = 4/*CodeData*/; perm = 5; }
+        }
         else {
             // 地址落在「当前宿主线程的栈」里：回报整段栈（状态 0xB = 栈）。SDK 初始化主线程记录时拿当时的 sp 查这里，把回报的区间当主线程栈；
             // 之后 nn::os::GetCurrentStackInfo 会断言 sp 仍在那个区间里，不在就中止。原先对客体地址空间之外的地址一律回报「它所在的 4 KiB 页」，
@@ -163,7 +179,9 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // This Diablo build does not call GetCurrentStackInfo (main / subsdk0 do not import it and the SDK has no internal call site; the host reaches the main menu with 12 different environment padding lengths), so it was never hit; reporting "one page" is wrong in itself, so fix it anyway.
             uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
-            else { base=addr & ~0xFFFull; size=0x1000; state=3/*Code*/; perm=5; } }
+            // 其余宿主内存：照 Horizon 对未映射地址的回报给「空闲、无权限」（所在 4 KiB 页）。原先报 Code+RX，GetExceptionInfo 从 main 往回并区时会一路并进宿主内存直到 0
+            // Other host memory: report "free, no permissions" (the 4 KiB page around it) as Horizon does for unmapped addresses. It used to report Code+RX, and GetExceptionInfo walking back from main merged on through host memory down to 0
+            else { base=addr & ~0xFFFull; size=0x1000; state=0/*Free*/; perm=0; } }
         if (mi) { uint64_t *m=(uint64_t*)mi; m[0]=base; m[1]=size; ((uint32_t*)mi)[4]=state; ((uint32_t*)mi)[5]=0; ((uint32_t*)mi)[6]=perm; ((uint32_t*)mi)[7]=0; ((uint32_t*)mi)[8]=0; }
         regs[0] = 0; regs[1] = 0; return 0;
     }

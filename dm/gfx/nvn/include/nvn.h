@@ -1353,7 +1353,7 @@ typedef void (*PFNNVNTEXTUREFLUSHTEXELSPROC)(const NVNtexture*, const NVNtexture
                                              const NVNcopyRegion*);
 typedef void (*PFNNVNTEXTUREINVALIDATETEXELSPROC)(const NVNtexture*, const NVNtextureView*,
                                                   const NVNcopyRegion*);
-typedef NVNmemoryPool (*PFNNVNTEXTUREGETMEMORYPOOLPROC)(const NVNtexture*);
+typedef NVNmemoryPool* (*PFNNVNTEXTUREGETMEMORYPOOLPROC)(const NVNtexture*);
 typedef ptrdiff_t (*PFNNVNTEXTUREGETMEMORYOFFSETPROC)(const NVNtexture*);
 typedef int (*PFNNVNTEXTUREGETSTORAGESIZEPROC)(const NVNtexture*);
 typedef NVNboolean (*PFNNVNTEXTURECOMPAREPROC)(const NVNtexture*, const NVNtexture*);

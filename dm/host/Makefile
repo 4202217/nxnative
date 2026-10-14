@@ -36,5 +36,12 @@ dm_bright_levels.inc: ../tools/gen_bright_levels.py ../ios/tools/touch_layout.py
 game_profile: $(GAME_H)
 $(GAME_H): $(GAME_DIR)/game.tsv ../games/game.py
 	python3 ../games/game.py header $(GAME) $@
-dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GAME_H) $(GAME_DIR)/dmsh_chain.h
+# 记下宿主是按哪个游戏编的：换 GAME 时戳记内容变、宿主重编（否则 make 看 dmhost 比两份表头都新，照旧用另一个游戏的宿主）
+# Records which game the host was built for: changing GAME changes the stamp's content and rebuilds the host (otherwise make sees dmhost as newer than both headers and keeps the other game's host)
+GAME_STAMP = gen/game.stamp
+$(GAME_STAMP): FORCE
+	@mkdir -p gen; echo $(GAME) | cmp -s - $@ || echo $(GAME) > $@
+.PHONY: FORCE
+FORCE:
+dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GAME_H) $(GAME_DIR)/dmsh_chain.h $(GAME_STAMP)
 	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -fobjc-arc -o $@ $(SRC) $(GFX) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers

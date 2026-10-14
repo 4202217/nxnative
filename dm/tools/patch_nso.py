@@ -298,6 +298,11 @@ def ADDI(dd, n, imm12, sh=0): return 0x91000000 | (sh << 22) | (imm12 << 10) | (
 def ADDR(dd, n, m): return 0x8B000000 | (m << 16) | (n << 5) | dd
 def SUBI(dd, n, imm12, sh=0): return 0xD1000000 | (sh << 22) | (imm12 << 10) | (n << 5) | dd
 def BR(n): return 0xD61F0000 | (n << 5)
+def CMPR(n, m): return 0xEB00001F | (m << 16) | (n << 5)   # cmp xn, xm（subs xzr） | cmp xn, xm (subs xzr)
+def BEQ(frm, to):
+    off = to - frm; assert -(1 << 20) <= off < (1 << 20) and off % 4 == 0
+    return 0x54000000 | (((off >> 2) & 0x7FFFF) << 5)
+def BRK(imm): return 0xD4200000 | ((imm & 0xFFFF) << 5)
 def BLR(n): return 0xD63F0000 | (n << 5)
 NOP = 0xD503201F
 
@@ -356,6 +361,19 @@ def site_plain(ins):
     emit(LDP(S, T, 31, save - dlt)); emit(B(here(), ins.address + 4))
     return start
 
+def site_sp(ins):
+    """目标是 sp、源里有 x18（Engage 的 alloca：mov x18, sp; sub x18, x18, x0; mov sp, x18）。site_plain 的暂存按旧 sp 存、按新 sp 取，会取错：
+    先把旧 sp 抄进 T，指令执行后按 T 恢复 S / T（ldp 不写回时基址寄存器可以同时是目标）。x18 不被写，不写回槽
+    Destination is sp and a source is x18 (Engage's alloca: mov x18, sp; sub x18, x18, x0; mov sp, x18). site_plain saves its scratch relative to the old sp and would restore it relative to the new one:
+    copy the old sp into T first, and after the instruction restore S / T relative to T (without writeback, ldp may use the base register as a destination). x18 is not written, so the slot is not written back"""
+    S, T = pick(regs_in(ins))
+    start = here()
+    emit(STP(S, T, 31, -16)); emit(MRS_TPIDRRO(T)); emit_slot_addr(T, S, 'K18'); emit(LDRX(S, T))
+    emit(ADDI(T, 31, 0))             # mov T, sp（add 立即数里 31 是 sp） | mov T, sp (in add immediate, 31 is sp)
+    emit(subst(ins, S))
+    emit(LDP(S, T, T, -16)); emit(B(here(), ins.address + 4))
+    return start
+
 def site_cond(ins):
     w = struct.unpack('<I', ins.bytes)[0]
     S, T = pick(regs_in(ins))
@@ -404,6 +422,34 @@ def site_br(ins, base, count):
     for i in range(count):
         emit(0xF85F0000 | (31 << 5) | 16)      # ldur x16,[sp,#-16]
         emit(B(here(), base + 4 * i))
+    return start
+
+def site_br_tab(ins, targets):
+    """偏移表 br x18（ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB）：目标 = 表基 + 有符号表项；表是常量，改写时读出全部目标。
+    x16 = 客体 x18，逐个与目标比（adrp + add 取目标地址到 x17），命中处恢复 x16 / x17 再跳原目标；都不中就 brk（原码的界检查已挡掉越界）
+    Offset-table br x18 (ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB): target = table base + signed entry; the table is constant, so all targets are read at rewrite time.
+    x16 = guest x18, compared with each target in turn (adrp + add put the target address in x17); on a match restore x16 / x17 and jump to the original target; no match → brk (the original bounds check already stops out-of-range indices)"""
+    start = here()
+    emit(STUR(16, 31, -16)); emit(STUR(17, 31, -24))   # 同 site_br：x16 / x17 借用前存红区 | as in site_br: save x16 / x17 to the red zone before borrowing
+    emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16))
+    uniq = sorted(set(targets))
+    pads = here() + 4 * (4 * len(uniq) + 1)
+    for k, t in enumerate(uniq):
+        emit(ADRP(17, here(), t)); emit(ADDI(17, 17, t & 0xFFF)); emit(CMPR(16, 17)); emit(BEQ(here(), pads + 12 * k))
+    emit(BRK(0x18))
+    for t in uniq:
+        emit(LDUR(16, 31, -16)); emit(LDUR(17, 31, -24)); emit(B(here(), t))
+    return start
+
+def site_blr(ins):
+    """blr x18（Engage main+0x9ff324）：x16 = 客体 x18，x30 = 原 blr 的下一条，br x16。调用点上 x16 / x17 按调用约定是过程间临时寄存器，不必存；
+    返回地址照原样，被调者直接返回原处（IL2CPP 的 C++ 异常要按返回地址查展开表，不能停在补丁区）
+    blr x18 (Engage main+0x9ff324): x16 = guest x18, x30 = the instruction after the original blr, br x16. At a call site x16 / x17 are intra-procedure-call temporaries under the calling convention, so they need no saving;
+    the return address is the original one, so the callee returns straight there (IL2CPP's C++ exceptions look up unwind tables by return address and must not stop in the patch area)"""
+    start = here()
+    emit(MRS_TPIDRRO(16)); emit_slot_addr(16, 17, 'K18'); emit(LDRX(16, 16))
+    ret = ins.address + 4
+    emit(ADRP(30, here(), ret)); emit(ADDI(30, 30, ret & 0xFFF)); emit(BR(16))
     return start
 
 def site_sysreg_read(ins, kind):
@@ -566,7 +612,30 @@ import bisect
 def func_of(a):
     i = bisect.bisect_right(starts, a) - 1
     return (starts[i], starts[i + 1] if i + 1 < len(starts) else TEXT_END) if i >= 0 else (a, a + 4)
-done = set(); windows = []; jumps = {}
+done = set(); windows = []; jumps = {}; tabjumps = {}
+def jump_offsets(insl, j):
+    """br x18 前是偏移表形（Engage main+0x12eec94）：cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB。
+    表基 xB 往回找最近的写者：须是 add xB,xB,#lo，再往前的写者须是 adrp xB。返回全部目标，认不出返回 None
+    The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
+    For the table base xB, search back for the nearest writer: it must be add xB,xB,#lo, and the writer before it must be adrp xB. Returns all targets, or None if not recognized"""
+    ctx = insl[max(0, j - 16):j]
+    add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x18, x\d+', p.op_str)), None)
+    if not add: return None
+    rb = add.op_str.split(', ')[2]
+    ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and p.op_str == f'x18, [{rb}, x18, lsl #2]'), None)
+    cmp = next((p for p in reversed(ctx) if p.mnemonic == 'cmp' and re.fullmatch(r'w18, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
+    if not ld or not cmp: return None
+    n = int(cmp.op_str.split('#')[1], 0) + 1
+    k = insl.index(ld); lo = page = None
+    for p in reversed(insl[max(0, k - 256):k]):   # 表基的写者链 | the writer chain of the table base
+        _, w = p.regs_access()
+        if not any(p.reg_name(r) == rb for r in w): continue
+        if lo is None and p.mnemonic == 'add' and re.fullmatch(rf'{rb}, {rb}, #(0x[0-9a-f]+|\d+)', p.op_str): lo = int(p.op_str.split('#')[1], 0); continue
+        if lo is not None and p.mnemonic == 'adrp' and p.op_str.startswith(rb + ','): page = p.operands[1].imm
+        break
+    if page is None: return None
+    tb = page + lo
+    return [tb + struct.unpack_from('<i', IMG, tb + 4 * i)[0] for i in range(n)]
 funcs = sorted({func_of(a) for a, (k, _) in kinds.items() if k == 'x18'})
 for fa, fb in funcs:
     insl = list(md.disasm(bytes(IMG[fa:fb]), fa))
@@ -587,7 +656,10 @@ for fa, fb in funcs:
                         if q.mnemonic in ('ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx: width = 65536
                         if width: break
                     break
-            assert base and width, f'jump table {ins.address:x}'
+            if not (base and width):
+                tgt = jump_offsets(insl, j)
+                assert tgt, f'jump table {ins.address:x}'
+                tabjumps[ins.address] = tgt; continue
             jumps[ins.address] = (base, width)
     # 不许有跳转落进窗口中间
     # No jump may land in the middle of a window
@@ -596,6 +668,8 @@ for fa, fb in funcs:
         if x.mnemonic in ('b', 'bl', 'cbz', 'cbnz', 'tbz', 'tbnz') or x.mnemonic.startswith('b.'):
             t = x.operands[-1].imm
             assert not (t in inwin and t not in heads), f'branch into window {x.address:x}'
+    for a_, tgt in tabjumps.items():
+        if fa <= a_ < fb: assert not any(t in inwin and t not in heads for t in tgt), f'jump table target into window {a_:x}'
 
 def put_branch(at, to): struct.pack_into('<I', IMG, at, B(at, to))
 for wseg in windows:
@@ -606,10 +680,12 @@ for a in sorted(kinds):
     ins = dis(struct.unpack_from('<I', IMG, a)[0], a)
     if k == 'x18':
         m = ins.mnemonic
-        if m == 'br': st = site_br(ins, *jumps[a]); stat('br')
+        if m == 'br': st = site_br_tab(ins, tabjumps[a]) if a in tabjumps else site_br(ins, *jumps[a]); stat('br')
         elif m in ('cbz', 'cbnz', 'tbz', 'tbnz'): st = site_cond(ins); stat('cond')
         elif m in ('adr', 'adrp'): st = site_pcrel(ins); stat('pcrel')
-        elif m in ('blr', 'ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
+        elif m == 'blr': st = site_blr(ins); stat('blr')
+        elif re.match(r'(sp|wsp),', ins.op_str): st = site_sp(ins); stat('sp')
+        elif m in ('ret', 'b', 'bl') or (m == 'ldr' and '[' not in ins.op_str): raise RuntimeError(f'{a:x} {m} {ins.op_str}')
         else: st = site_plain(ins); stat('plain')
     elif k == 'tpidr_r': st = site_sysreg_read(ins, 'KTLS'); stat(k)
     elif k == 'tpidrro_r': st = site_sysreg_read(ins, 'KTLR'); stat(k)
@@ -880,6 +956,7 @@ with open(P('sites.tsv'), 'w') as f:
         if a not in done: f.write(f'{a:#x}\t{kinds[a][0]}\n')
     for wseg in windows: f.write(f'{wseg[0].address:#x}\tW\t{wseg[-1].address + 4:#x}\n')
     for a, (b, c) in jumps.items(): f.write(f'{a:#x}\tJ\t{b:#x}\t{c}\n')
+    for a, tgt in tabjumps.items(): f.write(f'{a:#x}\tT\t' + ' '.join(f'{t:#x}' for t in tgt) + '\n')   # 偏移表跳转与全部目标 | offset-table jump and all its targets
 with open(P('cuts.tsv'), 'w') as f:
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')
     for off, ob, nb, why, scope in cuts: f.write(f'{off:#x}\t{ob}\t{nb}\t{scope}\t{why}\n')   # 列：偏移 原字节 新字节 作用域 理由 | Columns: offset, original bytes, new bytes, scope, reason

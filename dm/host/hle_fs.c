@@ -254,6 +254,13 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv；rom → 宿主 RomFS 目录", 
     }
     return r;
 }
+// IsMounted：SDK 原版查它自己的挂载表，宿主接管了挂载、那张表一直是空的。Engage（IL2CPP）开文件前用它验「rom:」挂没挂，答否就报参数错（0x57）开不了 global-metadata.dat
+// IsMounted: the original SDK checks its own mount table, which stays empty because the host takes over mounting. Engage (IL2CPP) uses it to check whether "rom:" is mounted before opening a file; a "no" fails with an invalid-parameter error (0x57) and global-metadata.dat cannot be opened
+HLE_FORCE("_ZN2nn2fs9IsMountedEPKc", "fsp-srv；查宿主挂载表", int, h_fs_IsMounted, const char *name) {   // bool 在 w0：1 / 0 | bool in w0: 1 / 0
+    PATH_LOCK();
+    for (int i = 0; name && i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) return 1;
+    return 0;
+}
 HLE_FORCE("_ZN2nn2fs21MountTemporaryStorageEPKc", "fsp-srv；临时区 → 宿主目录", Result, h_fs_MountTemp, const char *name) {
     char b[1024]; return mount(name, envdir("DM_TEMP", "run/platform/temp", b, sizeof b), 0);
 }
