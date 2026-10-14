@@ -1,4 +1,9 @@
 DM_ROOT ?= $(HOME)/dm-work
+# 游戏档案（dm/games/<名>/）：宿主按它编（make GAME=名，缺省 smbw）。game_profile.h 由 game.tsv 生成在 gen/<名>/，dmsh_chain.h 在档案目录
+# Game profile (dm/games/<id>/): the host is built for it (make GAME=id, default smbw). game_profile.h is generated from game.tsv into gen/<id>/, dmsh_chain.h lives in the profile folder
+GAME ?= smbw
+GAME_DIR = ../games/$(GAME)
+GAME_H = gen/$(GAME)/game_profile.h
 CFLAGS=-O1 -g -Wall -Wno-unused-function
 # 服务层接管 hle_*.c 按通配纳入：新增文件不改这一行（免合并冲突）
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
@@ -27,5 +32,9 @@ dm_hud_exp.h: ../ios/tools/gen_hud_exp.py ../ios/tools/romfs_art.py
 dm_bright_levels.inc: ../tools/gen_bright_levels.py ../ios/tools/touch_layout.py
 	$(NEED_ROMFS)
 	python3 ../tools/gen_bright_levels.py "$(ROMFS)" > $@.tmp && mv $@.tmp $@
-dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H)
-	clang $(CFLAGS) -I../gfx/nvn/include -fobjc-arc -o $@ $(SRC) $(GFX) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers
+.PHONY: game_profile
+game_profile: $(GAME_H)
+$(GAME_H): $(GAME_DIR)/game.tsv ../games/game.py
+	python3 ../games/game.py header $(GAME) $@
+dmhost: $(SRC) $(GFX) dm.h hle.h dm_input.h front.h touch_mac.h ../ios/Sources/dm_touch_controls.[ch] $(GFX_H) $(GAME_H) $(GAME_DIR)/dmsh_chain.h
+	clang $(CFLAGS) -I../gfx/nvn/include -I$(dir $(GAME_H)) -I$(GAME_DIR) -fobjc-arc -o $@ $(SRC) $(GFX) -framework Cocoa -framework QuartzCore -framework Metal -framework AudioToolbox -framework ImageIO -framework UniformTypeIdentifiers

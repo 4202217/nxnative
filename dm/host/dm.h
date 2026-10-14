@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "game_profile.h"   // 当前游戏档案的常数（dm/games/<名>/game.tsv 生成，Makefile 的 GAME 选） | constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 #define MAX_MOD 8
 #define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
@@ -40,6 +41,10 @@ typedef struct {
 
 extern module_t g_mod[MAX_MOD];
 extern int g_nmod;
+// main 模块的构建号（没有则空串）。DM_D2R_BUILD = d2r-mobile 带来的 D2R 构建：写死 D2R 地址或改 D2R 存档的代码只在它上面开
+// main's build ID (empty if none). DM_D2R_BUILD = the D2R build that the code inherited from d2r-mobile belongs to: code with fixed D2R addresses or that edits D2R saves runs only on it
+#define DM_D2R_BUILD "db0507f36b84200ac05f75d76ed5026f"
+static inline const char *dm_main_build(void) { for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) return g_mod[i].build_id; return ""; }
 // 四个线程本地槽：K18 = Switch 的 x18、KTLS = tpidr_el0、KTLR = tpidrro_el0（ThreadLocalRegion）、KGATE = 宿主门入口；实际键号由装载器写入键页
 // Four thread-local slots: K18 = the Switch's x18, KTLS = tpidr_el0, KTLR = tpidrro_el0 (ThreadLocalRegion), KGATE = host gate entry; the actual key numbers are written into the key page by the loader
 extern pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;

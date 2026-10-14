@@ -7,6 +7,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>
+#include "game_profile.h"   // 游戏档案常数（RomFS 认定路径） | game profile constants (the RomFS marker path)
 
 int dm_main(int argc, char **argv);   // dm/host/main.c 以 -Dmain=dm_main 编入 | dm/host/main.c compiled in with -Dmain=dm_main
 void dm_host_preload_start(int argc, char **argv);
@@ -19,7 +20,7 @@ static NSString *romfs_locate(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *doc = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0];
     for (NSString *d in @[[doc stringByAppendingPathComponent:@"romfs"], [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"romfs"]])
-        if ([fm fileExistsAtPath:[d stringByAppendingPathComponent:@"System/Resource"]]) return d;   // 有资源尺寸表的目录才算 | Only a directory with the resource size table counts
+        if ([fm fileExistsAtPath:[d stringByAppendingPathComponent:@DM_GAME_ROMFS_MARKER]]) return d;   // 有游戏档案 romfs_marker 那个路径的目录才算（马力欧：System/Resource，资源尺寸表） | only a directory containing the game profile's romfs_marker path counts (Mario: System/Resource, the resource size table)
     return nil;
 }
 

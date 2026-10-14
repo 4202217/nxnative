@@ -1,5 +1,5 @@
-# SMBW Mobile 的 iOS 工程（xcodegen）。tools/build_ipa.sh 先生成 Gen/（宿主源文件链接、内嵌的改写后模块、iOS 着色器库、宿主表），再出包。
-# iOS project for SMBW Mobile (xcodegen). tools/build_ipa.sh generates Gen/ first (host source links, the embedded rewritten modules, iOS shader libraries, host tables), then packages.
+# iOS 工程（xcodegen），App 名、包名、分类取自游戏档案（dm/games/<名>/game.tsv，build_ipa.sh 经环境变量给）。tools/build_ipa.sh 先生成 Gen/（宿主源文件链接、内嵌的改写后模块、iOS 着色器库、宿主表），再出包。
+# iOS project (xcodegen); the app name, bundle ID and category come from the game profile (dm/games/<id>/game.tsv, passed by build_ipa.sh through environment variables). tools/build_ipa.sh generates Gen/ first (host source links, the embedded rewritten modules, iOS shader libraries, host tables), then packages.
 name: DmIOS
 options:
   bundleIdPrefix: ${DM_BUNDLE_ID}
@@ -27,7 +27,7 @@ targets:
     info:
       path: Sources/Info.plist
       properties:
-        CFBundleDisplayName: SMBW Mobile
+        CFBundleDisplayName: ${DM_DISPLAY_NAME}   # 游戏档案 app_name（build_ipa.sh 设） | game profile app_name (set by build_ipa.sh)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleShortVersionString: $(MARKETING_VERSION)
         UILaunchStoryboardName: ""
@@ -39,7 +39,7 @@ targets:
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false
-        LSApplicationCategoryType: public.app-category.action-games
+        LSApplicationCategoryType: ${DM_APP_CATEGORY}   # 游戏档案 app_category | game profile app_category
         LSSupportsGameMode: true
         GCSupportsControllerUserInteraction: true   # 实体手柄（GameController） | Physical controllers (GameController)
         GCSupportedGameControllers:

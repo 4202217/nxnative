@@ -20,7 +20,7 @@
 // about 4.2 GB in total; on iOS without the "extended virtual addressing" entitlement a single reservation can be at most 6 GB
 // (read on a real device: 6 GB succeeds, 7 GB fails), so it cannot be made any wider --
 // with an 8 GB reservation, builds from developer accounts that cannot sign that entitlement (free accounts) would exit at this step.
-#define RESERVE (5ull << 30)   // SMBW：堆只要 1.47 GB，整块与 D2R 一样 5 GB（真机已跑通的总量；6 GB 单块虽能预留，但还要给 Metal 等留地址） | SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB like D2R (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
+#define RESERVE DM_GAME_MEM_RESERVE   // 游戏档案 mem_reserve。SMBW：堆只要 1.47 GB，整块与 D2R 一样 5 GB（真机已跑通的总量；6 GB 单块虽能预留，但还要给 Metal 等留地址） | SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB like D2R (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
 static uint8_t *g_as;              // ASLR 区基址 = 整块 | ASLR region base = the whole block
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap;
 // 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
@@ -43,9 +43,11 @@ static void mem_init(void) {
     // SMBW also defines a 1792000 KB (1.75 GB) VirtualAddressMemory in HeapDef (System/HeapSize): it is subtracted from the memory pool before the heap is opened (SetHeapSize asks for only 0x5be00000),
     //   and resource loading then MapPhysicalMemory's into the alias region after the node area on demand. With a 1.25 GB alias region only about 256 MB was left there, and 3 MB-class layout archives (WipeCourseIn / WipeWarp)
     //   got no address, were skipped, and crashed on a null pointer when used (main +0x373e04). So alias = node area + 1.75 GB + slack; the heap needs only 1.47 GB, and 2.625 GB is plenty.
-    g_alias = g_as + 0x10000000; g_alias_cap = 0xB8000000;
-    g_stack = g_as + 0xC8000000; g_stack_cap = 0x10000000;
-    g_heap  = g_as + 0xD8000000; g_heap_cap  = RESERVE - 0xD8000000;
+    // 别名区与栈区的大小取自游戏档案（mem_alias / mem_stack），堆占剩下的；马力欧：别名 0xB8000000、栈 0x10000000 → 栈在 +0xC8000000、堆在 +0xD8000000
+    // The alias and stack sizes come from the game profile (mem_alias / mem_stack), the heap takes the rest; Mario: alias 0xB8000000, stack 0x10000000 → stack at +0xC8000000, heap at +0xD8000000
+    g_alias = g_as + 0x10000000; g_alias_cap = DM_GAME_MEM_ALIAS;
+    g_stack = g_alias + g_alias_cap; g_stack_cap = DM_GAME_MEM_STACK;
+    g_heap  = g_stack + g_stack_cap; g_heap_cap  = RESERVE - (size_t)(g_heap - g_as);
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
 }
 
@@ -57,7 +59,7 @@ static void mem_init(void) {
 // and hands the whole block to its own StandardAllocator (main+0x32137a0) -- so heap size = pool − image footprint, it has only as much as the host reports.
 // Previously 3 GB was reported here and SetHeapSize never failed: the heap was about 150 MB smaller than on the real device, at the run entry peak the main heap had only about 18 MB left, and under high local load a timing shift made a 128 KB request return null,
 // which the guest writes to without a null check (CRASH main+0x1b36138, re-verified after merge with inv_tap).
-#define APP_POOL 0xCD500000ull
+#define APP_POOL DM_GAME_APP_POOL   // 游戏档案 app_pool（马力欧 0xCD500000） | game profile app_pool (Mario 0xCD500000)
 static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) n += g_mod[i].size; return (n + 0x1fffff) & ~(size_t)0x1fffff; }
 
 // 内存账（memstat.m）用：客体地址空间整块范围（未初始化时 base = NULL）
@@ -209,7 +211,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
         case I_DebuggerAttached: v = 0; break;
         case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
-        case I_ProgramId: { static uint64_t pid; if (!pid) { const char *e = getenv("DM_PROGRAM_ID"); pid = e ? strtoull(e, NULL, 16) : 0x010015100B514000ull; } v = pid; break; }   // 缺省 SMBW；DM_PROGRAM_ID=十六进制 可改 | default SMBW; DM_PROGRAM_ID=hex overrides
+        case I_ProgramId: { static uint64_t pid; if (!pid) { const char *e = getenv("DM_PROGRAM_ID"); pid = e ? strtoull(e, NULL, 16) : DM_GAME_PROGRAM_ID; } v = pid; break; }   // 缺省取游戏档案 program_id；DM_PROGRAM_ID=十六进制 可改 | default from the game profile's program_id; DM_PROGRAM_ID=hex overrides
         case I_IsApplication: v = 1; break;
         case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // 用户异常上下文区：较新 SDK 的 SetDyingMessageRegion 往 +0x1c0 写（给 0 会写空指针）| user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
         default: v = 0; break;

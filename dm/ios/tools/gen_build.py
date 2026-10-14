@@ -12,6 +12,7 @@
 # Usage: gen_build.py <dm/host dir> <Gen dir>
 import os, shlex, subprocess, sys
 host, gen = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+subprocess.run(['make', '-s', '-C', host, 'game_profile'], check=True)   # 先真生成游戏档案头（下面 make -n 只打印不执行；GAME 随环境） | generate the game profile header for real first (make -n below only prints; GAME comes from the environment)
 cmd = subprocess.run(['make', '-s', '-n', '-B', '-C', host, 'dmhost'], capture_output=True, text=True, check=True).stdout
 toks = shlex.split(next(l for l in cmd.splitlines() if l.lstrip().startswith('clang')))
 srcs, incs, defs, fws = [], [], [], []

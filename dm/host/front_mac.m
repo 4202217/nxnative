@@ -68,7 +68,7 @@ void front_run(void (*guest)(void)) {
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
-        win.title = @"SMBW Mobile";
+        win.title = @DM_GAME_APP_NAME;   // 游戏档案 app_name | game profile app_name
         NSView *v = win.contentView;
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];

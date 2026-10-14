@@ -34,7 +34,7 @@ HLE_FORCE("time", "按返回点认出建局种子那一处（DM_FIXED_TIME）；
         module_t *ms = NULL, *mm = NULL;
         for (int i = 0; i < g_nmod; i++) { if (!strcmp(g_mod[i].name, "sdk")) ms = &g_mod[i]; if (!strcmp(g_mod[i].name, "main")) mm = &g_mod[i]; }
         void *f = ms ? module_sym(ms, "time") : NULL; if (!f) die("SDK 里找不到 time");
-        uint32_t w = mm ? *(uint32_t *)(mm->base + 0x3509a0) : 0;
+        uint32_t w = mm && !strcmp(mm->build_id, DM_D2R_BUILD) ? *(uint32_t *)(mm->base + 0x3509a0) : 0;   // 只在 D2R 构建上读（别的游戏这里是不相干的代码，main 小于 3.3 MB 还会越界） | read only on the D2R build (elsewhere this is unrelated code, and a main smaller than 3.3 MB would be read past its end)
         if ((w & 0xfc000000) == 0x94000000) seed_ret = (uint64_t)mm->base + 0x3509a4;               // bl time（构建 db0507f3…；改写器会改跳转目标，只认 bl 本身） | bl time (build db0507f3…; the rewriter changes the branch target, so only the bl itself is matched)
         else if (fixed_time() >= 0) LOG("【红】DM_FIXED_TIME：main 0x3509a0 不是预期的 bl time（%#x），建局 time() 未固定", w);
         sdk_time = (int64_t (*)(int64_t *))f;

@@ -93,7 +93,7 @@ static void host_preload(int argc, char **argv) {
     int i = 2;
     for (; i < argc && strcmp(argv[i], "--") && n < MAX_MOD; i++) names[n++] = argv[i];
     if (i < argc && !strcmp(argv[i], "--")) for (i++; i < argc && g_argc < 63; i++) g_argv[g_argc++] = argv[i];
-    if (!n) { names[n++] = "main"; names[n++] = "sdk"; }
+    if (!n) { static const char *def[] = DM_GAME_MODULES; for (int k = 0; k < DM_GAME_NMOD && n < MAX_MOD; k++) names[n++] = def[k]; }   // 缺省模块表取自游戏档案 modules（马力欧 main sdk） | default module list from the game profile's modules (Mario: main sdk)
     load_modules(argv[1], names, n);
     uint64_t ta = now_ns();
     probe_install();   // DM_PROBE 探针（诊断用） | DM_PROBE probes (for diagnostics)

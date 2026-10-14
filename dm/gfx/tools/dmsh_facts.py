@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 翻译查询的作答表 nvn/shader_facts.tsv：每个 Switch 着色器键一行，记翻译器问得到、但 Switch 机器码里读不出的那几项事实——
+# 翻译查询的作答表（游戏档案目录 dm/games/<名>/shader_facts.tsv）：每个 Switch 着色器键一行，记翻译器问得到、但 Switch 机器码里读不出的那几项事实——
 # 贴图 / 图像的维度类型、图像格式、顶点属性与片元输出的分量类型、计算着色器的线程组大小与共享内存字节数。
 # 这些事实取自与它一一配对的 PC 版着色器的反射（NVN 槽号 = D3D 寄存器号，见 dm/gfx/README.md）。表随仓库，出着色器库只读这张表，
 # 不需要 PC 版游戏文件；表里没有的键，翻译查询按缺省作答（出包汇总里单列）。
@@ -7,7 +7,7 @@
 #       dmsh_facts.py --check    重算一遍与仓内的表逐键比对，不一致报红退出 1（同上，要 PC 侧输入）
 #       dmsh_facts.py            打印表的行数与各项事实的覆盖数
 # 行格式：键 <TAB> JSON（键按字典序、紧凑写法；同样的输入逐字节同样的表）
-# Answer table for translation queries, nvn/shader_facts.tsv: one row per Switch shader key, recording the few facts the translator asks for but that cannot be read from the Switch machine code -
+# Answer table for translation queries (dm/games/<id>/shader_facts.tsv in the game profile folder): one row per Switch shader key, recording the few facts the translator asks for but that cannot be read from the Switch machine code -
 # dimension type of textures / images, image format, component types of vertex attributes and fragment outputs, thread group size and shared memory bytes of compute shaders.
 # These facts come from the reflection of the PC shader paired one-to-one with it (NVN slot number = D3D register number, see dm/gfx/README.md). The table ships with the repo; building the shader library reads only this table
 # and needs no PC game files; for keys not in the table, translation queries are answered with defaults (listed separately in the build summary).
@@ -18,7 +18,8 @@
 import json, os, re, subprocess, sys
 DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # 工作区根目录（游戏文件、产物、运行现场都在它下面） | Workspace root (game files, build outputs and run artifacts are all under it)
 HERE = os.path.dirname(os.path.abspath(__file__)); HOME = os.path.expanduser('~')
-TABLE = os.path.join(HERE, '../nvn/shader_facts.tsv'); MAP = os.path.join(HERE, '../nvn/shader_map.tsv')
+sys.path.insert(0, os.path.join(HERE, '../../games')); import game as _game   # 表在当前游戏档案目录（DM_GAME） | the tables are in the current game profile folder (DM_GAME)
+TABLE = str(_game.load().table('shader_facts.tsv')); MAP = str(_game.load().table('shader_map.tsv'))
 TT = {'texture1d': '1d', 'texture1darray': '1darray', 'texture2d': '2d', 'texture2darray': '2darray', 'texture2dms': '2dms',
       'texture2dmsarray': '2dmsarray', 'texture3d': '3d', 'texturecube': 'cube', 'texturecubearray': 'cubearray', 'buffer_typed': 'buffer'}
 CT = {'float': 'float', 'int': 'sint', 'uint': 'uint'}

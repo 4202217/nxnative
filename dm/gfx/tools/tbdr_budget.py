@@ -33,7 +33,7 @@ def tex_slots(key):
     try: return sum(1 for b in json.load(open(f'{LIB}/{key}_b.json'))['bindings'] if b.get('kind') in ('tex', 'samp_tex'))
     except Exception: return 4
 nm = {}
-for ln in open(__file__.rsplit('/', 1)[0] + '/../nvn/shader_map.tsv'):
+for ln in open(dmsh_chain.GAME.table('shader_map.tsv')):   # 当前游戏档案的映射表 | the current game profile's map
     c = ln.rstrip('\n').split('\t')
     if len(c) > 4 and c[0].endswith('.bin'): nm.setdefault(c[3], c[0][:-4])
 for l in open(log, errors='replace'):

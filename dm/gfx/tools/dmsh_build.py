@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # B 路线离线出包：Switch 原版着色器 → SPIR-V（dmsh_xlate，Ryujinx 翻译器）→ spirv-cross MSL → metallib + 回放反射 JSON。
 # 运行时不翻译（iOS 无 JIT）：产物进着色器缓存目录，文件名 = Switch 控制段键（dm_ctl_sha16，与 shader_map.tsv 第 4 列同）+「_b」。
-# 查询作答来源：仓内的作答表 nvn/shader_facts.tsv（dmsh_facts.py）——贴图类型、顶点属性 / 片元输出分量类型、计算线程组大小与共享内存；出包不需要 PC 版文件。
-# 用法：dmsh_build.py <Switch 包目录> <输出缓存目录> [键…]（不给键 = 全部）；产物实际写进 <输出缓存目录>/b-<链版本>/（IOSOUT 同），链版本见 dmsh_chain.py   环境：XLATE=翻译工具路径，DMSH_CAS=内容寻址缓存目录（缺省为输出缓存目录/cas），J=并发
+# 查询作答来源：游戏档案里的作答表 dm/games/<名>/shader_facts.tsv（dmsh_facts.py）——贴图类型、顶点属性 / 片元输出分量类型、计算线程组大小与共享内存；出包不需要 PC 版文件。
+# 用法：dmsh_build.py <Switch 包目录> <输出缓存目录> [键…]（不给键 = 全部）；产物实际写进 <输出缓存目录>/b-<链版本>/（IOSOUT 同），链版本见 dmsh_chain.py   环境：DM_GAME=游戏档案（缺省 smbw，dm/games/），XLATE=翻译工具路径（缺省仓内 dmsh_xlate_bin），DMSH_CAS=内容寻址缓存目录（缺省为输出缓存目录/cas），J=并发
 # 程序本体内嵌的图形着色器（映射表 main.rodata@偏移 行）从 MAIN（Switch main NSO，缺省 3.3.94012 Update/ExeFS/main）解出；解 NSO 要 lz4，用 dm 的 venv python 跑
 # 产物：<键>_b.metallib、<键>_b.json（回放反射，含驱动段 c0 / c2 的运行时读取偏移 drv_reads）、<键>_b.metal（MSL）
 # 环境 IOSOUT=目录：同一份 MSL 经 dm/ios/tools/ios_metal.compile 同时出 iphoneos metallib + 反射（chain_metal 记 iOS 编译口径）
 # 末尾汇总：成功 / 失败数与原因分布；驱动段读取的偏移分布（落在回放层能填的范围外的单列）
 # Route B offline build: original Switch shaders → SPIR-V (dmsh_xlate, the Ryujinx translator) → spirv-cross MSL → metallib + replay reflection JSON.
 # No translation at runtime (iOS has no JIT): build output goes into the shader cache directory, file name = Switch control segment key (dm_ctl_sha16, same as column 4 of shader_map.tsv) + "_b".
-# Source of query answers: the in-repo answer table nvn/shader_facts.tsv (dmsh_facts.py) - texture types, vertex attribute / fragment output component types, compute thread group size and shared memory; the build needs no PC version files.
-# Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is actually written to <output cache dir>/b-<chain version>/ (same for IOSOUT), for the chain version see dmsh_chain.py   Environment: XLATE=path to the translation tool, DMSH_CAS=content-addressed cache dir (default <output cache dir>/cas), J=concurrency
+# Source of query answers: the answer table in the game profile, dm/games/<id>/shader_facts.tsv (dmsh_facts.py) - texture types, vertex attribute / fragment output component types, compute thread group size and shared memory; the build needs no PC version files.
+# Usage: dmsh_build.py <Switch package dir> <output cache dir> [key...] (no keys = all); build output is actually written to <output cache dir>/b-<chain version>/ (same for IOSOUT), for the chain version see dmsh_chain.py   Environment: DM_GAME=game profile (default smbw, dm/games/), XLATE=path to the translation tool (default the in-repo dmsh_xlate_bin), DMSH_CAS=content-addressed cache dir (default <output cache dir>/cas), J=concurrency
 # Graphics shaders embedded in the executable itself (mapping table rows main.rodata@offset) are extracted from MAIN (Switch main NSO, default 3.3.94012 Update/ExeFS/main); extracting the NSO needs lz4, run with dm's venv python
 # Build output: <key>_b.metallib, <key>_b.json (replay reflection, including drv_reads, the runtime read offsets into driver segments c0 / c2), <key>_b.metal (MSL)
 # Environment IOSOUT=dir: the same MSL also goes through dm/ios/tools/ios_metal.compile to produce an iphoneos metallib + reflection (chain_metal records the iOS compile convention)
@@ -23,17 +23,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chai
 _bad = dmsh_chain.check_tools()
 if _bad: sys.exit('\n'.join('【红】翻译链工具与锁文件不符：' + b for b in _bad) + '\n（换了工具就 dmsh_chain.py --update-lock 并入仓；只是没重编翻译器就重编）')
 CHAIN = dmsh_chain.version(); out = os.path.join(out, 'b-' + CHAIN)
-if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'【红】nvn/dmsh_chain.h 不是当前翻译链版本 {CHAIN}：先跑 dmsh_chain.py --header（否则宿主找不到这批库）')
-XLATE = os.environ.get('XLATE', f'{DM_ROOT}/build/gfx/dmsh_xlate/dmsh_xlate')
+GAME = dmsh_chain.GAME   # 当前游戏档案（DM_GAME，缺省 smbw）：表与 NVN 常数都从这里取 | the current game profile (DM_GAME, default smbw): the tables and NVN constants come from here
+if f'"{CHAIN}"' not in open(dmsh_chain.HEADER).read(): sys.exit(f'【红】{dmsh_chain.HEADER} 不是当前翻译链版本 {CHAIN}：先跑 dmsh_chain.py --header（否则宿主找不到这批库）')
+XLATE = os.environ.get('XLATE', os.path.join(dmsh_chain.XLATE_DIR, 'dmsh_xlate'))
 FACTS = dmsh_facts.load()
-if not os.path.exists(dmsh_facts.TABLE): sys.exit('【红】没有作答表 nvn/shader_facts.tsv（随仓库；空表 = 全部按缺省作答）')
+if not os.path.exists(dmsh_facts.TABLE): sys.exit(f'【红】没有作答表 {dmsh_facts.TABLE}（随游戏档案；空表 = 全部按缺省作答）')
 IOSOUT = os.environ.get('IOSOUT')   # 设了就同时出 iOS 版（iphoneos metallib + 反射）到该目录 | if set, also build the iOS version (iphoneos metallib + reflection) into that directory
 if IOSOUT:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../ios/tools')); import ios_metal
     IOSOUT = os.path.join(IOSOUT, 'b-' + CHAIN); os.makedirs(IOSOUT, exist_ok=True)
 MAIN = os.environ.get('MAIN', f'{DM_ROOT}/data/switch/3.3.94012/Update/ExeFS/main')
-MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../nvn/shader_map.tsv')
-BF_WANT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../nvn/bf_want.tsv')
+MAP = str(GAME.table('shader_map.tsv'))
+BF_WANT_FILE = str(GAME.table('bf_want.tsv'))
 BF_WANT = {line.strip() for line in open(BF_WANT_FILE) if line.strip() and not line.lstrip().startswith('#')} if os.path.exists(BF_WANT_FILE) else set()
 XC = ['--msl', '--msl-version', '20300', '--msl-argument-buffers', '--msl-texture-buffer-native', '--msl-pad-fragment-output']
 CAS = os.environ.get('DMSH_CAS', os.path.join(cache_root, 'cas'))
@@ -44,7 +45,13 @@ MAC_RECORD = 'xcrun -sdk macosx metal -c; xcrun -sdk macosx metallib'
 #   本作只用合并句柄（nvnCommandBufferBindTexture），没有分离采样器；图像句柄表仍在 0x120 + 8 r（8 槽，紧接贴图表之后；agl 的 10 个计算着色器实测 0x120 / 0x128 / 0x130，与 D2R 同址）。
 # Texture handle table (the driver segment holding texture instructions' immediate handles): Mario (NVN 55) uses 0x20 + 8 r, 32 slots - the immediate handles of all 4888 shaders are exactly 0x20..0xF0 in steps of 8 (D2R's older driver used 0x168).
 #   This game uses only combined handles (nvnCommandBufferBindTexture), with no separate samplers; the image handle table is still at 0x120 + 8 r (8 slots, right after the texture table; measured 0x120 / 0x128 / 0x130 on agl's 10 compute shaders, the same address as D2R).
-TEX_BASE, TEX_SLOTS, SAMP_BASE, IMG_BASE, IMG_SLOTS = 0x20, 32, 0x568, 0x120, 8
+TEX_BASE, TEX_SLOTS, SAMP_BASE, IMG_BASE, IMG_SLOTS = (GAME.int(k) for k in ('nvn_tex_base', 'nvn_tex_slots', 'nvn_samp_base', 'nvn_img_base', 'nvn_img_slots'))
+SSBO = {k: int(v, 0) for k, v in GAME.pairs('nvn_ssbo_bases')}   # c0 存储缓冲表基址（按阶段） | c0 storage buffer table bases (per stage)
+# 翻译器（dmsh_xlate/Program.cs）内置了贴图 / 采样器句柄表基址：与档案不同时翻出来的绑定是错的，先让翻译器可配再出包
+# The translator (dmsh_xlate/Program.cs) has the texture / sampler handle table bases built in: if the profile differs, the bindings it produces are wrong, so make the translator configurable before building
+_xb = re.search(r'const int TexBase = (0x[0-9a-fA-F]+), SampBase = (0x[0-9a-fA-F]+);', open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dmsh_xlate/Program.cs')).read())
+if not _xb or (int(_xb.group(1), 16), int(_xb.group(2), 16)) != (TEX_BASE, SAMP_BASE):
+    sys.exit(f'【红】游戏档案 {GAME.id} 的 nvn_tex_base / nvn_samp_base（{TEX_BASE:#x} / {SAMP_BASE:#x}）与翻译器内置值不同（dmsh_xlate/Program.cs TexBase / SampBase）：先让翻译器按档案取值')
 
 def records(d):
     r = [m.start() for m in re.finditer(b'BTCDBTCD', d)]
@@ -370,7 +377,7 @@ def reflect(key, stage, msl, res):
         binds.append(e)
     # 存储缓冲：SPIR-V 绑定号 → c0 偏移 → NVN 存储缓冲槽（c0 基址：顶点 0x110、计算 0x310、像素 0x510，每槽 0x10）
     # Storage buffers: SPIR-V binding number → c0 offset → NVN storage buffer slot (c0 base: vertex 0x110, compute 0x310, pixel 0x510, 0x10 per slot)
-    base = {'vs': 0x110, 'cs': 0x310, 'ps': 0x510}.get(stage)   # 外壳 / 域阶段的存储缓冲基址未实测：遇到存储缓冲按「无槽」报 | storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported as 「无槽」(no slot)
+    base = SSBO.get(stage)   # 外壳 / 域阶段的存储缓冲基址未实测：遇到存储缓冲按「无槽」报 | storage buffer base for the hull / domain stages has not been measured: a storage buffer there is reported as 「无槽」(no slot)
     sb_sorted = sorted(res['sbufs'], key=lambda b: b['binding'])
     for e in binds:
         if e['kind'] == 'sbuf':
@@ -382,7 +389,7 @@ def reflect(key, stage, msl, res):
             e['rw'] = bool(b and b['flags'] & 2)
     return binds
 
-DRV_FILL = {0: [(0x110, 0x210), (0x310, 0x410), (0x510, 0x610)],   # c0：存储缓冲地址表（顶点 / 计算 / 像素，各 16 槽 × 0x10） | c0: storage buffer address tables (vertex / compute / pixel, 16 slots × 0x10 each)
+DRV_FILL = {0: [(b, b + 0x100) for b in sorted(SSBO.values())],   # c0：存储缓冲地址表（顶点 / 计算 / 像素，各 16 槽 × 0x10） | c0: storage buffer address tables (vertex / compute / pixel, 16 slots × 0x10 each)
             2: [(TEX_BASE, TEX_BASE + 8 * TEX_SLOTS), (IMG_BASE, IMG_BASE + 8 * IMG_SLOTS)]}   # c2：贴图句柄表（本作 0x20 + 8 r，32 槽）、图像句柄表（0x120 + 8 r，8 槽） | c2: texture handle table (this game: 0x20 + 8 r, 32 slots), image handle table (0x120 + 8 r, 8 slots)
 
 def drv_reads(src):
@@ -444,7 +451,7 @@ def int_inputs(src):
 
 # 顶点 / 像素配对（shader_split.py 从 BNSH 变体取出）：顶点键 → 配对的像素键 | vertex / pixel pairs (taken from BNSH variations by shader_split.py): vertex key → paired pixel keys
 PAIRS = collections.defaultdict(set)
-for _ln in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../nvn/shader_pairs.tsv')):
+for _ln in open(GAME.table('shader_pairs.tsv')):
     if _ln.strip() and not _ln.startswith('#'): _v, _p = _ln.split(); PAIRS[_v].add(_p)
 
 def vs_pad(key, src):

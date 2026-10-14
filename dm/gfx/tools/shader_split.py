@@ -36,6 +36,9 @@
 #   With an update: give RomFS and main as comma-separated lists (base game first, e.g. data/v0/RomFS,data/v327680/RomFS); the output is the union of both versions (see main())
 # Pair table: (vertex key, pixel key) of every BNSH variation; dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
+GAME = _game.load()   # 当前游戏档案（DM_GAME，缺省 smbw）：来源组规则与表头说明 | the current game profile (DM_GAME, default smbw): source group rules and the table header note
+GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
@@ -106,7 +109,7 @@ def scan_blob(d, label, out):
 def group(label):
     """来源组（包文件名的后半） | source group (second half of the package file name)"""
     if label.startswith('main'): return 'main'
-    for k, g in (('/Shader/SecredUber', 'SecredUber'), ('.sharcb', 'agl'), ('/Effect/', 'effect'), ('/Layout/', 'layout'), ('/Shader/', 'SecredUber')):
+    for k, g in GROUPS:   # 游戏档案 shader_groups，按顺序取第一个 | the profile's shader_groups, first match wins
         if k in label: return g
     return 'other'
 
@@ -182,7 +185,7 @@ def main():
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
-        f.write('# kind: evidence  马力欧着色器（RomFS + main 里的 BNSH / BAHS）→ 控制段 + 代码区键（dm/gfx/tools/shader_split.py）\n')
+        f.write(f'# kind: evidence  {NOTE}（RomFS + main 里的 BNSH / BAHS）→ 控制段 + 代码区键（dm/gfx/tools/shader_split.py）\n')
         f.write('# 第 5 列记每个键首次出现的位置；本作没有 PC 版配对\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
         for r in rows: f.write('\t'.join(map(str, r)) + '\n')

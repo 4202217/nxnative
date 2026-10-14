@@ -13,13 +13,10 @@
 
 // ---------- oe ----------
 HLE_FORCE("_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE", "CPU 加速档；宿主不调频", void, h_oe_CpuBoost, int m) { (void)m; }
-// DisplayVersion = char[16]（应用的显示版本号）：按 main 的构建号取该版控制数据（NACP）里的值，认不出的构建给 1.0.0
-// DisplayVersion = char[16] (the application's display version): the value from that version's control data (NACP), chosen by main's build ID; unknown builds get 1.0.0
+// DisplayVersion = char[16]（应用的显示版本号）：按 main 的构建号取该版控制数据（NACP）里的值（游戏档案的 build 行），认不出的构建给 1.0.0
+// DisplayVersion = char[16] (the application's display version): the value from that version's control data (NACP), chosen by main's build ID (the game profile's build rows); unknown builds get 1.0.0
 HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "显示版本号（按 main 构建号）", void, h_oe_DispVer, char *v) {
-    static const struct { const char *build, *ver; } k[] = {
-        {"cd6e42aee7934f4d8393cd43893ae25e", "1.0.0"},   // 马力欧 v0 | Mario v0
-        {"ff773e90972d544eb79406eaa65396d5", "1.2.1"},   // 马力欧更新 v327680 | Mario update v327680
-    };
+    static const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
     const char *ver = "1.0.0";
     for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main"))
         for (unsigned j = 0; j < sizeof k / sizeof *k; j++) if (!strcmp(g_mod[i].build_id, k[j].build)) ver = k[j].ver;
