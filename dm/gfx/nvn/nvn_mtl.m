@@ -354,8 +354,12 @@ void mtl_pool_add(const void *mem, uint64_t size) {
 void mtl_pool_del(const void *mem) {
     g_reg_gen++;
     pthread_mutex_lock(&g_mu);
+    // 零拷贝缓冲走延迟释放（提交过的命令跑完后出驻留集、放引用）。原先只从 g_keep 拿掉，驻留集还强引用着它：池释放后缓冲一直活着、包着那段客体内存，
+    // 客体再在原地址建池又包一份。Engage 的标题演示循环换场景，显卡已分配 850 s 里涨到 5.4 GB、常驻涨到 3.6 GB
+    // The no-copy buffer goes through deferred release (out of the residency set and unreferenced after submitted commands complete). It used to be removed only from g_keep while the residency set still held a strong reference: after the pool was freed the buffer stayed alive wrapping that guest memory,
+    // and a new pool at the same address wrapped it again. Engage's title demo cycles scenes; GPU allocated grew to 5.4 GB and resident memory to 3.6 GB in 850 s
     for (int i = 0; i < g_npool; i++)
-        if (g_pools[i].key == mem) { [g_keep removeObject:g_pools[i].buf]; g_pools[i] = g_pools[--g_npool]; break; }
+        if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; defer_obj_release(b); g_pools[i] = g_pools[--g_npool]; break; }
     pthread_mutex_unlock(&g_mu);
 }
 
