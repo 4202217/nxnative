@@ -335,6 +335,20 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv；rom → 宿主 RomFS 目录", 
     }
     return r;
 }
+// 追加内容（DLC）的 RomFS：DM_AOC_DIR/<序号>/，打包脚本从玩家的 DLC NSP 解出；只读挂载，与 rom 一样走目录索引。
+// 已拥有的序号表由 hle_misc.c 的 aoc 接口按同一目录报告；游戏只挂它报告过的序号，目录不在就答「目标不存在」（fs 2-1002，同真机没装该 DLC）
+// Add-on content (DLC) RomFS: DM_AOC_DIR/<index>/, extracted from the player's DLC NSPs by the packing script; mounted read-only, using the directory index like rom.
+// The owned index list is reported by the aoc calls in hle_misc.c from the same directory; the game only mounts indices it was given, and a missing directory answers "target not found" (fs 2-1002, as on hardware without that DLC)
+#define RES_TARGET_NOT_FOUND 0x7D402u   // fs 模块 2，描述 1002 | fs module 2, description 1002
+HLE_FORCE("_ZN2nn2fs31QueryMountAddOnContentCacheSizeEPmi", "fsp-srv；追加内容直读宿主目录，缓存只给最小值", Result, h_fs_QueryAocCache, size_t *out, int index) { (void)index; *out = 0x1000; return RES_OK; }
+HLE_FORCE("_ZN2nn2fs17MountAddOnContentEPKciPvm", "fsp-srv；追加内容 → DM_AOC_DIR/<序号>（只读）", Result, h_fs_MountAoc, const char *name, int index, void *cache, size_t sz) {
+    (void)cache; (void)sz; const char *base = getenv("DM_AOC_DIR"); char dir[1024]; struct stat st;
+    if (!base || !*base || snprintf(dir, sizeof dir, "%s/%d", base, index) >= (int)sizeof dir || stat(dir, &st) || !S_ISDIR(st.st_mode)) {
+        LOG("fs 挂载追加内容 %s: 序号 %d 不存在（DM_AOC_DIR=%s）", name, index, base ? base : "未设");
+        return RES_TARGET_NOT_FOUND;
+    }
+    return mount(name, dir, 1);   // mount_ex 记日志 | mount_ex logs it
+}
 // IsMounted：SDK 原版查它自己的挂载表，宿主接管了挂载、那张表一直是空的。Engage（IL2CPP）开文件前用它验「rom:」挂没挂，答否就报参数错（0x57）开不了 global-metadata.dat
 // IsMounted: the original SDK checks its own mount table, which stays empty because the host takes over mounting. Engage (IL2CPP) uses it to check whether "rom:" is mounted before opening a file; a "no" fails with an invalid-parameter error (0x57) and global-metadata.dat cannot be opened
 HLE_FORCE("_ZN2nn2fs9IsMountedEPKc", "fsp-srv；查宿主挂载表", int, h_fs_IsMounted, const char *name) {   // bool 在 w0：1 / 0 | bool in w0: 1 / 0

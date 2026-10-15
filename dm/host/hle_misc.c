@@ -3,40 +3,59 @@
 // Miscellaneous service layer: add-on content / shop / error applet / profanity filter / server name resolution / parental controls / software keyboard.
 // On the real device each goes through IPC or a system applet; the host gives results as single-player offline. Pure-computation SDK parts (hash, util, software Opus) are not taken over, the original implementation is used directly.
 #include "hle.h"
+#include <dirent.h>
 
-// ---------- aoc 追加内容（术士君临，保留）/ ec 商店（排除）----------
+// ---------- aoc 追加内容（D2R 的术士君临；别的游戏按玩家文件夹里的 DLC NSP）/ ec 商店（排除）----------
 // 术士君临（Reign of the Warlock）是 Switch 包里唯一的追加内容：AOC 0100726014353001 = 本体 0100726014352000 的追加内容序号 1。
 // 该 DLC 只是约 100 KB 的解锁凭证，内容本体已在主 RomFS；main 不导入 MountAddOnContent，只按「有没有序号 1」判断。
 // 复刻范围要求保留术士君临，所以报告已拥有序号 1；排除的是商店（ec），不是 DLC 本身。
-// ---------- aoc add-on content (Reign of the Warlock, kept) / ec shop (excluded) ----------
+// ---------- aoc add-on content (D2R's Reign of the Warlock; other games by the DLC NSPs in the player's folder) / ec shop (excluded) ----------
 // Reign of the Warlock is the only add-on content in the Switch package: AOC 0100726014353001 = add-on content index 1 of the base 0100726014352000.
 // This DLC is only an unlock ticket of about 100 KB, the content itself is already in the main RomFS; main does not import MountAddOnContent and only judges by "is index 1 present".
 // The reimplementation scope requires keeping Reign of the Warlock, so index 1 is reported as owned; what is excluded is the shop (ec), not the DLC itself.
 enum { AOC_WARLOCK = 1 };
-// DM_AOC_OWNED=0：测试开关，回到「无 DLC」前提（只用于对拍未装 DLC 时录的真值；缺省 = 拥有）
-// DM_AOC_OWNED=0: test switch, back to the "no DLC" premise (only for lockstep comparison against ground truth recorded without the DLC installed; default = owned)
-// 已拥有的追加内容（术士君临）只属于 D2R（main 构建 db0507f3…）：别的构建（马力欧）缺省 0 个——用户手里没有马力欧的追加内容文件，
-// 马力欧 1.2.1 在 Switch 2 上靠它判断有没有升级包。DM_AOC_OWNED=0 / 1 覆盖缺省
-// The owned add-on content (the Warlock expansion) belongs to D2R only (main build db0507f3…): other builds (Mario) default to none -- the user has no Mario add-on content files,
-// and on a Switch 2 Mario 1.2.1 uses it to tell whether the upgrade pack is owned. DM_AOC_OWNED=0 / 1 overrides the default
-static int aoc_owned(void) {
-    static int v = -1;
-    if (v < 0) {
-        const char *e = getenv("DM_AOC_OWNED"); v = 0;
-        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) v = !strcmp(g_mod[i].build_id, "db0507f36b84200ac05f75d76ed5026f");
-        if (e) v = strcmp(e, "0") != 0;
-        LOG("aoc：报告 %d 个追加内容（%s）", v, e ? "DM_AOC_OWNED" : "按 main 构建号");
+// 已拥有的追加内容序号表（升序），首次查询时定下：
+//   DM_AOC_DIR 下的数字子目录：每个是一份 DLC 的 RomFS，打包脚本只从玩家文件夹里真有的 DLC NSP 解出（标题号 = 本体 + 0x1000 + 序号）。
+//     Engage：F001 → 1（E0）、F002 → 2（H0），内容本体在 2.0.0 更新的 RomFS 里，DLC 包只有一个空标记文件；游戏按 ListAddOnContent 的序号逐个 MountAddOnContent（hle_fs.c）。
+//   没有 DM_AOC_DIR：D2R（main 构建 db0507f3…）报 {1}（术士君临，内容在主 RomFS，main 不导入 MountAddOnContent）；别的构建 0 个——
+//     马力欧 1.2.1 在 Switch 2 上靠它判断有没有升级包，用户手里没有马力欧的追加内容文件。
+//   DM_AOC_OWNED=0：一律 0 个（测试开关，对拍未装 DLC 时录的真值）；DM_AOC_OWNED=1 且没有 DM_AOC_DIR：报 {1}。
+// Owned add-on content indices (ascending), fixed at the first query:
+//   numeric subdirectories of DM_AOC_DIR: each is one DLC's RomFS, which the packing script extracts only from DLC NSPs really in the player's folder (title ID = base + 0x1000 + index).
+//     Engage: F001 → 1 (E0), F002 → 2 (H0); the content itself is in the 2.0.0 update's RomFS and each DLC package holds one empty marker file; the game calls MountAddOnContent for each index ListAddOnContent returns (hle_fs.c).
+//   No DM_AOC_DIR: D2R (main build db0507f3…) reports {1} (the Warlock expansion, content in the main RomFS, main does not import MountAddOnContent); other builds none --
+//     on a Switch 2 Mario 1.2.1 uses it to tell whether the upgrade pack is owned, and the user has no Mario add-on content files.
+//   DM_AOC_OWNED=0: always none (test switch, for lockstep comparison against ground truth recorded without the DLC installed); DM_AOC_OWNED=1 without DM_AOC_DIR: reports {1}.
+static int g_aoc[64], g_naoc = -1;
+static int aoc_int_cmp(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
+static void aoc_load(void) {
+    if (g_naoc >= 0) return;
+    g_naoc = 0;
+    const char *e = getenv("DM_AOC_OWNED"), *dir = getenv("DM_AOC_DIR"); const char *why = "按 main 构建号";
+    if (e && !strcmp(e, "0")) why = "DM_AOC_OWNED=0";
+    else if (dir && *dir) {
+        why = dir; DIR *d = opendir(dir); struct dirent *ent;
+        while (d && (ent = readdir(d)) && g_naoc < (int)(sizeof g_aoc / sizeof *g_aoc)) {
+            char *end; long i = strtol(ent->d_name, &end, 10);
+            if (ent->d_name[0] >= '1' && ent->d_name[0] <= '9' && !*end && i <= 2000) g_aoc[g_naoc++] = (int)i;
+        }
+        if (d) closedir(d);
+        qsort(g_aoc, g_naoc, sizeof *g_aoc, aoc_int_cmp);
+    } else {
+        int d2r = 0;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) d2r = !strcmp(g_mod[i].build_id, "db0507f36b84200ac05f75d76ed5026f");
+        if (e) why = "DM_AOC_OWNED";
+        if (d2r || e) g_aoc[g_naoc++] = AOC_WARLOCK;
     }
-    return v;
+    char list[256] = ""; for (int i = 0; i < g_naoc; i++) snprintf(list + strlen(list), sizeof list - strlen(list), "%s%d", i ? "," : "", g_aoc[i]);
+    LOG("aoc：报告 %d 个追加内容 {%s}（%s）", g_naoc, list, why);
 }
-HLE_FORCE("_ZN2nn3aoc17CountAddOnContentEv", "追加内容数：已拥有术士君临 1 个（复刻范围必须保留）", int, h_aoc_Count, void) { return aoc_owned() ? 1 : 0; }
-// ListAddOnContent(out, 起始下标, 最多个数)：按已拥有序号列表 {1} 从起始下标起写出，返回写出个数
-// ListAddOnContent(out, start index, max count): writes out from the owned index list {1} starting at the start index, returns the number written
-HLE_FORCE("_ZN2nn3aoc16ListAddOnContentEPiii", "追加内容列表：{1}（术士君临）", int, h_aoc_List, int *out, int off, int n) {
-    static const int owned[] = {AOC_WARLOCK};
-    int w = 0;
-    if (!aoc_owned()) return 0;
-    for (int i = off; i < (int)(sizeof owned / sizeof *owned) && w < n; i++) out[w++] = owned[i];
+HLE_FORCE("_ZN2nn3aoc17CountAddOnContentEv", "追加内容数：已拥有序号表的长度（D2R 术士君临 / DM_AOC_DIR）", int, h_aoc_Count, void) { aoc_load(); return g_naoc; }
+// ListAddOnContent(out, 起始下标, 最多个数)：按已拥有序号表从起始下标起写出，返回写出个数
+// ListAddOnContent(out, start index, max count): writes out from the owned index list starting at the start index, returns the number written
+HLE_FORCE("_ZN2nn3aoc16ListAddOnContentEPiii", "追加内容列表：已拥有序号表", int, h_aoc_List, int *out, int off, int n) {
+    int w = 0; aoc_load();
+    for (int i = off < 0 ? 0 : off; i < g_naoc && w < n; i++) out[w++] = g_aoc[i];
     return w;
 }
 // 事件对象按需由 nn::os 旁表建（未触发），游戏等它只会超时 / 取到未触发

@@ -57,6 +57,8 @@ static int boot_env(void) {
     setenv("DM_NVN_SHMAP", [dm stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_MSL_DIR", [res stringByAppendingPathComponent:@"msl"].fileSystemRepresentation, 0);
     setenv("DM_FONT_DIR", [dm stringByAppendingPathComponent:@"font"].fileSystemRepresentation, 0);   // 共享字体替身（standard.ttf / nintendo_ext.ttf）：iOS 上没有 macOS 的字体路径 | Shared-font stand-ins (standard.ttf / nintendo_ext.ttf): iOS lacks the macOS font path
+    NSString *aoc = [res stringByAppendingPathComponent:@"aoc"];   // 追加内容：build_ipa.sh 把玩家 DLC NSP 解出的 RomFS 按序号放在 <App>/aoc/<序号>/ | add-on content: build_ipa.sh puts the RomFS extracted from the player's DLC NSPs at <App>/aoc/<index>/
+    if ([fm fileExistsAtPath:aoc]) setenv("DM_AOC_DIR", aoc.fileSystemRepresentation, 0);
     chdir(doc.fileSystemRepresentation);
     g_argv[0] = strdup("dmhost"); g_argv[1] = strdup(dm.fileSystemRepresentation); g_argc = 2;
     dm_host_preload_start(g_argc, g_argv);   // 读模块表 / 重定位 / 接管提前在后台跑，与 UIKit 启动并行 | Module tables / relocation / takeover run early in the background, in parallel with UIKit startup

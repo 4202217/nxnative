@@ -2,10 +2,12 @@
 # 出一个未签名的整合 IPA：改写后的模块编进可执行文件、iOS 着色器库、游戏文件（RomFS）放在 DmIOS.app/romfs。装机时由签名工具（AltStore / Sideloadly 等）换成自己的证书与包名。
 # 前提：已按 README 跑过改写器（patched 目录）与 iOS 着色器出包（IOSOUT），装了 Xcode 与 xcodegen。
 # 用法：dm/ios/tools/build_ipa.sh [输出.ipa]；环境：GAME=游戏档案（dm/games/<名>，缺省 smbw）、W=工作区（缺省 ~/<名>-work）、PATCHED / ROMFS / MSL_IOS 可分别指定
+#   AOC=追加内容目录（缺省 $W/data/aoc，有就放进 DmIOS.app/aoc/<序号>/；设成空串 = 不放）
 #   App 名、包名、IPA 名、代码模块、RomFS 认定路径、着色器表都取自游戏档案（DM_DISPLAY_NAME / DM_BUNDLE_ID 可改）
 # Build one unsigned all-in-one IPA: the rewritten modules compiled into the executable, iOS shader libraries, and the game files (RomFS) at DmIOS.app/romfs. At install time a signing tool (AltStore / Sideloadly etc.) swaps in your own certificate and bundle ID.
 # Prerequisites: the rewriter (patched directory) and the iOS shader build (IOSOUT) have been run as in the README; Xcode and xcodegen are installed.
 # Usage: dm/ios/tools/build_ipa.sh [output.ipa]; environment: GAME=game profile (dm/games/<id>, default smbw), W=workspace (default ~/<id>-work), PATCHED / ROMFS / MSL_IOS can each be overridden
+#   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none)
 #   The app name, bundle ID, IPA name, code modules, RomFS marker and shader tables all come from the game profile (DM_DISPLAY_NAME / DM_BUNDLE_ID override)
 set -u
 cd "$(dirname "$0")/.." || exit 1
@@ -15,7 +17,7 @@ export GAME=${GAME:-smbw}; GD=$DM/games/$GAME   # gen_build.py 跑的 make 也�
 gp() { python3 "$DM/games/game.py" "$GAME" "$1" || die "game profile $GD: $1"; }   # 取游戏档案的键 | read a key of the game profile
 [ -f "$GD/game.tsv" ] || die "no game profile $GD/game.tsv"
 W=${W:-$HOME/$GAME-work}; PKG=$(gp package)
-PATCHED=${PATCHED:-$W/build/patched_$PKG}; ROMFS=${ROMFS:-$W/data/$PKG/RomFS}; MSL_IOS=${MSL_IOS:-$W/build/ios/dmsh_b}
+PATCHED=${PATCHED:-$W/build/patched_$PKG}; ROMFS=${ROMFS:-$W/data/$PKG/RomFS}; MSL_IOS=${MSL_IOS:-$W/build/ios/dmsh_b}; AOC=${AOC-$W/data/aoc}
 OUT_IPA=${1:-$HOME/Desktop/$(gp ipa)}; O=$W/build/ios/pkg; DD=$O/dd
 MODS=$(gp modules); MARKER=$(gp romfs_marker)
 export LC_ALL=C DM_BUNDLE_ID=${DM_BUNDLE_ID:-$(gp bundle_id)} DM_DISPLAY_NAME=${DM_DISPLAY_NAME:-$(gp app_name)} DM_APP_CATEGORY=$(gp app_category) DM_TEAM_ID=${DM_TEAM_ID:-0000000000}   # 占位身份：未签名，装机工具会替换 | placeholder identity: unsigned, the install tool replaces it
@@ -69,6 +71,9 @@ t "assemble Payload (app + RomFS)"
 rm -rf "$O/Payload" && mkdir -p "$O/Payload" && cp -cR "$APP" "$O/Payload/DmIOS.app" || die "copy app"
 A=$O/Payload/DmIOS.app; rm -rf "$A/_CodeSignature" "$A/embedded.mobileprovision"
 cp -cR "$ROMFS" "$A/romfs" || die "copy RomFS"
+# 追加内容：玩家 DLC NSP 解出的 RomFS，按序号一个子目录（App 启动时设 DM_AOC_DIR，宿主据此报告已拥有并挂载）
+# Add-on content: the RomFS extracted from the player's DLC NSPs, one subdirectory per index (the app sets DM_AOC_DIR at launch; the host reports them as owned and mounts them from it)
+if [ -n "$AOC" ] && [ -d "$AOC" ]; then cp -cR "$AOC" "$A/aoc" || die "copy add-on content"; t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
 
 t "zip (already-compressed game files stored, everything else deflated)"
 rm -f "$O/out.ipa"

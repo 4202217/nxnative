@@ -1,10 +1,12 @@
 // NSP 解包：nx_extract <prod.keys> <基础 NSP> <更新 NSP 或 -> <输出目录> [比对用的基础 RomFS 目录] [--manifest]
 // 输出 <输出目录>/ExeFS 与 <输出目录>/RomFS（有更新包时是合并后的 RomFS）；给了基础 RomFS 目录时，内容与之相同的文件做成 APFS 克隆（不占新空间）。
 // --manifest：RomFS 不写出，只写清单 <输出目录>/romfs_manifest.tsv（路径、大小、头 32 字节），给新游戏粗查用（大作的 RomFS 十几 GB）。
+// 追加内容：nx_extract <prod.keys> --aoc <DLC NSP> <输出目录>，把 DLC 数据 NCA 的 RomFS 写到 <输出目录>（打包脚本按序号放 aoc/<序号>/，宿主经 DM_AOC_DIR 挂载）。
 // 标题密钥取自 NSP 里的通用票据（.tik），只需 prod.keys；密钥值一律不打印。
 // NSP extraction: nx_extract <prod.keys> <base NSP> <update NSP or -> <output dir> [base RomFS dir to compare against] [--manifest]
 // Writes <output dir>/ExeFS and <output dir>/RomFS (the merged RomFS when there is an update); with a base RomFS dir, files whose content matches it become APFS clones (no new space).
 // --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB).
+// Add-on content: nx_extract <prod.keys> --aoc <DLC NSP> <output dir> writes the RomFS of the DLC's data NCA to <output dir> (the packing script puts it at aoc/<index>/, the host mounts it through DM_AOC_DIR).
 // Title keys come from the common tickets (.tik) inside the NSPs, so only prod.keys is needed; key values are never printed.
 using System;
 using System.Collections.Generic;
@@ -27,8 +29,9 @@ static class P {
 
     static int Main(string[] a) {
         bool manifest = Array.IndexOf(a, "--manifest") >= 0; a = Array.FindAll(a, s => s != "--manifest");
-        if (a.Length < 4) { Console.Error.WriteLine("用法 | usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--manifest]"); return 2; }
+        if (a.Length < 4) { Console.Error.WriteLine("用法 | usage: nx_extract <prod.keys> <base.nsp> <update.nsp|-> <out dir> [base RomFS dir] [--manifest]\n       nx_extract <prod.keys> --aoc <dlc.nsp> <out dir>"); return 2; }
         KeySet ks = ExternalKeyReader.ReadKeyFile(a[0]);
+        if (a[1] == "--aoc") return Aoc(ks, a[2], a[3]);
         var basePkg = OpenNsp(ks, a[1]); var updPkg = a[2] == "-" ? null : OpenNsp(ks, a[2]);
         Nca baseProg = Pick(basePkg, NcaContentType.Program) ?? throw new Exception("基础 NSP 里没有程序 NCA | no Program NCA in the base NSP");
         Nca updProg = updPkg == null ? null : Pick(updPkg, NcaContentType.Program) ?? throw new Exception("更新 NSP 里没有程序 NCA | no Program NCA in the update NSP");
@@ -56,6 +59,16 @@ static class P {
         IStorage romfs = updProg != null ? baseProg.OpenStorageWithPatch(updProg, NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
         if (manifest) Manifest(new RomFsFileSystem(romfs), Path.Combine(outDir, "romfs_manifest.tsv"));
         else Copy(new RomFsFileSystem(romfs), Path.Combine(outDir, "RomFS"), cmpDir);
+        return 0;
+    }
+
+    // DLC NSP：一个数据 NCA（内容类型 PublicData / Data）+ 元数据 NCA + 票据；只写数据 NCA 的 RomFS | DLC NSP: one data NCA (content type PublicData / Data) + a meta NCA + the ticket; only the data NCA's RomFS is written
+    static int Aoc(KeySet ks, string nsp, string outDir) {
+        var pkg = OpenNsp(ks, nsp);
+        Nca data = Pick(pkg, NcaContentType.PublicData) ?? Pick(pkg, NcaContentType.Data) ?? throw new Exception("DLC NSP 里没有数据 NCA | no data NCA in the DLC NSP");
+        Console.WriteLine($"追加内容 | add-on content {data.Header.TitleId:x16}");
+        Directory.CreateDirectory(outDir);
+        Copy(new RomFsFileSystem(data.OpenStorage(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid)), outDir, null);
         return 0;
     }
 

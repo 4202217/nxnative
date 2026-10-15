@@ -4,8 +4,8 @@
 # 两种跑法：在 Spyder 里打开本文件按 F5（用下面「设置」里的值，留空的 NSP 文件夹与 prod.keys 运行时会问）；
 #   或在终端里 python3 scripts/build_ipa_from_nsp.py <NSP 文件夹> -k <prod.keys> [选项]（命令行给的值盖过「设置」，-h 看全部选项；
 #   终端不接键盘输入时缺的值不问、直接报错；成功退出码 0，出错 1，中断 130）。Spyder 的「运行配置」里填命令行选项也一样生效。
-# 只用三样东西：本仓库、放一个游戏 NSP 的文件夹（基础版 + 档案 shader_versions 列的更新都要；DLC 跳过，本移植不读追加内容）、prod.keys。
-# 所有中间产物都在 NSP 文件夹里的 <名>_build/：extract/（解出的游戏文件，出包后默认删掉）、tools/、patched_*/、shader/（着色器包与缓存，留着下次出包快）、logs/（每步的完整输出）、tmp/、ipa/。出的 IPA 缺省也放在 NSP 文件夹里。
+# 只用三样东西：本仓库、放一个游戏 NSP 的文件夹（基础版 + 档案 shader_versions 列的更新都要；有 DLC NSP 就一并打进去，解锁游戏里已有的追加内容）、prod.keys。
+# 所有中间产物都在 NSP 文件夹里的 <名>_build/：extract/（解出的游戏文件，出包后默认删掉）、aoc/（DLC 按序号解出的 RomFS）、tools/、patched_*/、shader/（着色器包与缓存，留着下次出包快）、logs/（每步的完整输出）、tmp/、ipa/。出的 IPA 缺省也放在 NSP 文件夹里。
 # 着色器翻译器用仓内的 dm/gfx/tools/dmsh_xlate_bin（与 dmsh_chain.lock 指纹一致的那份；重编出的 dll 指纹不同，dmsh_build 会拒绝）。
 # 运行本文件的 Python 要有 lz4、capstone、fonttools；另需 Xcode、xcodegen、.NET SDK 10、zstd、spirv-cross。马力欧首次约 35 分钟（大头是着色器库），再跑约 10 分钟（着色器库走缓存）。密钥值一律不打印。
 # Unsigned IPA straight from the NSPs: identify the game (title ID → game profile dm/games/<id>/) → extract (nx_extract) → rewrite the code modules (patch_nso.py) → split out the shaders and check them against the profile's tables (shader_split.py)
@@ -13,8 +13,8 @@
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
 #   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
-# Uses only three things: this repository, a folder holding one game's NSPs (the base game plus the updates listed in the profile's shader_versions are required; DLC is skipped, this port does not load add-on content), and prod.keys.
-# Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), tools/, patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes to the NSP folder by default.
+# Uses only three things: this repository, a folder holding one game's NSPs (the base game plus the updates listed in the profile's shader_versions are required; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
+# Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), aoc/ (each DLC's RomFS by index), tools/, patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes to the NSP folder by default.
 # The shader translator is the in-repo dm/gfx/tools/dmsh_xlate_bin (the build whose fingerprints match dmsh_chain.lock; a rebuilt dll has different fingerprints and dmsh_build refuses it).
 # The Python running this file needs lz4, capstone and fonttools; also needed: Xcode, xcodegen, .NET SDK 10, zstd, spirv-cross. For Mario the first run takes about 35 minutes (mostly the shader libraries); later runs take about 10 (the shader libraries come from the cache). Key values are never printed.
 import collections, ctypes, getpass, os, re, shutil, struct, subprocess, sys, threading, time, zlib
@@ -147,7 +147,6 @@ def scan_nsps(nsp_dir):
 def pick_nsps(fam, versions):
     """每个要的版本对应的（基础版, 更新或 None）：v0 = 只基础版，v<N> = 基础版 + 版本号 N 的更新
     For each wanted version, (base game, update or None): v0 = the base game alone, v<N> = the base game + the update with version number N"""
-    for tid, _, p in fam['dlc']: say(f'跳过 DLC（本移植不读追加内容）| skipping DLC (this port does not load add-on content): {p.name}')
     say(f'基础版 | base: {fam["base"].name}')
     out = {}
     for ver in versions:
@@ -282,7 +281,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     if not major: notes.append('没找到 SDK 版本串 | no SDK version string found')
     elif major != {'16'}: notes.append(f'SDK {"/".join(sorted(major))}，不是马力欧的 16：NVN 对象尺寸、API 版本与服务布局按 SDK 不同（宿主已从 D2R 的 SDK 12 改成 16 的尺寸），按 docs/agents/03 逐项核对 | SDK {"/".join(sorted(major))}, not Mario\'s 16: NVN object sizes, API version and service layouts differ by SDK (the host was converted from D2R\'s SDK 12 to SDK 16 sizes); check them one by one per docs/agents/03')
     if any(l.split()[:1] == ['nn::ro'] for l in R): notes.append('导入 nn::ro（运行时装 NRO 模块）：宿主没有 | imports nn::ro (loads NRO modules at run time): not in the host')
-    if fam['dlc']: notes.append('有 DLC：宿主还没有 MountAddOnContent | DLC present: the host has no MountAddOnContent yet')
+    if fam['dlc']: notes.append('有 DLC：出包时解出打进去，宿主按序号报告已拥有并挂载；查 main 导入的 aoc / fs 追加内容接口宿主都接了没有 | DLC present: it is extracted into the IPA and the host reports the indices as owned and mounts them; check that the host hooks every aoc / fs add-on content call main imports')
     R += ['', '## 对移植意味着什么 | What it means for a port', ''] + [f'- {n}' for n in notes or ['—']]
     R += ['', '下一步见 docs/agents（02 粗查、03 起机）。 | Next steps: docs/agents (02 survey, 03 bring-up).']
     (work / 'survey.md').write_text('\n'.join(R) + '\n')
@@ -316,6 +315,21 @@ def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g):
         check_build(tmp, name, g); swap_in(tmp, dst)
     check_build(dst, name, g)
     return dst
+
+
+def extract_aoc(nx, keys, work, app, fam, logs):
+    """文件夹里的 DLC NSP → <名>_build/aoc/<序号>/（各自数据 NCA 的 RomFS；序号 = 标题号 − 基础版 − 0x1000）。宿主按这些序号报告已拥有并挂载（DM_AOC_DIR）。
+    没有 DLC 返回 None。DLC 包很小（Engage 每个 121 KB，内容本体在更新里），每次重解
+    DLC NSPs in the folder → <id>_build/aoc/<index>/ (the RomFS of each one's data NCA; index = title ID − base − 0x1000). The host reports these indices as owned and mounts them (DM_AOC_DIR).
+    Returns None without DLC. DLC packages are small (121 KB each for Engage, the content itself is in the update), so they are extracted again every time"""
+    if not fam['dlc']: return None
+    tmp = work / 'aoc.partial'; rmtree(tmp)
+    for tid, _, p in sorted(fam['dlc']):
+        idx = tid - app - 0x1000
+        say(f'DLC 序号 {idx} | DLC index {idx}: {p.name}')
+        run([nx, keys, '--aoc', p, tmp / str(idx)], logs / f'aoc_{idx}.log')
+    swap_in(tmp, work / 'aoc')
+    return work / 'aoc'
 
 
 def check_build(d, name, g):   # 每个模块的构建号要是档案 build 行登记的 | every module's build ID must be the one registered in the profile's build row
@@ -432,6 +446,7 @@ def main(args=None):
         dirs[ver] = extract(nx, keys, ex, ver, b, u, clone, logs, g)
         if u is None and clone is None and can_clone(ex): clone = dirs[ver] / 'RomFS'
     game = dirs[pkg_ver]
+    aoc = extract_aoc(nx, keys, work, app, fam, logs)
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # 基础版单独解出的目录 | the folder the base game was extracted to alone
     app_name = args.app_name or APP_NAME or nacp_name(base) or g.get('app_name')   # 设置 > 基础版 NSP 里的游戏名 > 档案 | setting > game name in the base NSP > profile
     say(f'App 名 | app name: {app_name}')
@@ -444,7 +459,7 @@ def main(args=None):
 
     if free_gb(out_ipa.parent) < 5: raise BuildError(f'{out_ipa.parent} 所在的卷剩余不足 5 GB | less than 5 GB free on the volume of {out_ipa.parent}')
     say(f'出 IPA | building the IPA → {out_ipa}')
-    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(game / 'RomFS'), MSL_IOS=str(ios), FONT_PY=py, DM_DISPLAY_NAME=app_name)
+    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(game / 'RomFS'), MSL_IOS=str(ios), FONT_PY=py, DM_DISPLAY_NAME=app_name, AOC=str(aoc or ''))
     # App 图标：nx_extract 从控制数据存下的游戏图标（英文版，icon.jpg）；打包版本的优先，其次基础版 | app icon: the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'App 图标 | app icon: {icon}')
