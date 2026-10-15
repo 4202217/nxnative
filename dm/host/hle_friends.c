@@ -50,6 +50,11 @@ HLE_FORCE("_ZN2nn7friends28StartSendingFriendInvitationERKNS_7account3UidEPKNS1_
           Result, h_fr_SendInv, const void *uid, const void *ids, int n, const void *d, const void *p, size_t sz) { (void)uid; (void)ids; (void)n; (void)d; (void)p; (void)sz; return RES_FAIL; }
 HLE_FORCE("_ZN2nn7friends18ShowUserDetailInfoERKNS_7account3UidERKNS1_23NetworkServiceAccountIdERKNS0_15InAppScreenNameESA_", "好友详情小程序（剪）",
           Result, h_fr_ShowDetail, const void *uid, const void *id, const void *a, const void *b) { (void)uid; (void)id; (void)a; (void)b; return RES_FAIL; }
+// 好友列表类小程序（Engage 的好友菜单）：原版经 applet 起小程序，宿主没有小程序代理 | Friend list applets (Engage's friends menu): the original starts an applet, the host has no applet proxy
+HLE_FORCE("_ZN2nn7friends14ShowFriendListERKNS_7account3UidE", "好友列表小程序（剪）", Result, h_fr_ShowList, const void *uid) { (void)uid; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends19ShowBlockedUserListERKNS_7account3UidE", "屏蔽列表小程序（剪）", Result, h_fr_ShowBlocked, const void *uid) { (void)uid; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends29ShowReceivedFriendRequestListERKNS_7account3UidE", "收到的好友申请小程序（剪）", Result, h_fr_ShowRecv, const void *uid) { (void)uid; return RES_FAIL; }
+HLE_FORCE("_ZN2nn7friends33ShowMethodsOfSendingFriendRequestERKNS_7account3UidE", "发好友申请小程序（剪）", Result, h_fr_ShowSend, const void *uid) { (void)uid; return RES_FAIL; }
 // 在线状态
 // Presence
 HLE_FORCE("_ZN2nn7friends12UserPresence10InitializeERKNS_7account3UidE", "在线状态不可用（剪）", Result, h_fr_UpInit, void *self, const void *uid) { (void)self; (void)uid; return RES_FAIL; }

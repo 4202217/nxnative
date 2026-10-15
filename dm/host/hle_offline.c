@@ -104,6 +104,12 @@ HLE_FORCE("_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKDsm", "敏感�
 // ---------- err: error display applet. Only logged, no UI is shown ----------
 HLE_FORCE("_ZN2nn3err9ShowErrorENS0_9ErrorCodeE", "错误显示小程序；宿主只记日志", void, h_err_ShowCode, uint64_t code) { LOG("游戏请求显示错误：%04u-%04u", (unsigned)(code & 0xffffffff), (unsigned)(code >> 32)); }
 HLE_FORCE("_ZN2nn3err9ShowErrorERKNS0_18ErrorResultVariantE", "错误显示小程序；宿主只记日志", void, h_err_ShowVar, const void *v) { (void)v; LOG("游戏请求显示错误（ErrorResultVariant）"); }
+HLE_FORCE("_ZN2nn3err40ShowUnacceptableAddOnContentVersionErrorEv", "追加内容版本不符错误小程序；宿主只记日志", void, h_err_AocVer, void) { LOG("游戏请求显示错误：追加内容版本不符"); }
+HLE_FORCE("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "游戏版本不符错误小程序；宿主只记日志", void, h_err_AppVer, void) { LOG("游戏请求显示错误：游戏版本不符"); }
+
+// ---------- web：网页小程序（联机大厅）。不可用 ----------
+// ---------- web: web page applet (online lobby). Unavailable ----------
+HLE_FORCE("_ZN2nn3web13ShowLobbyPageEPNS0_20LobbyPageReturnValueERKNS0_16ShowLobbyPageArgE", "联机大厅网页小程序（剪）", Result, h_web_Lobby, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowLobbyPage（剪）"); return RES_FAIL; }
 
 // ---------- C 接口（nnsocket* / nnssl*）：同样离线。参数都在寄存器里，宿主不看 ----------
 // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------

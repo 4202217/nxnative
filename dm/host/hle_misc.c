@@ -43,6 +43,30 @@ HLE_FORCE("_ZN2nn3aoc16ListAddOnContentEPiii", "追加内容列表：{1}（术�
 // The event object is created on demand by the nn::os side table (not signaled), the game waiting on it only times out / gets not-signaled
 HLE_FORCE("_ZN2nn3aoc31GetAddOnContentListChangedEventEPNS_2os11SystemEventE", "追加内容变更事件，排除范围；绑内核事件、恒不触发（游戏会 TryWait 轮询，未初始化即中止）", void, h_aoc_GetEv, void *ev) { hle_bind_system_event(ev, 0); }
 HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListEv", "商店小程序，排除范围；剪口：空操作", void, h_ec_ShowShop, void) { LOG("ec::ShowShopAddOnContentList（剪）"); }
+// 其余商店入口（Engage 标题菜单「新增内容」走 ShowShopAddOnContentList(ApplicationId, UserHandle)）：原版经 applet::CreateLibraryApplet 起商店小程序，
+// 宿主没有小程序代理（oe 初始化是空操作），SDK 取空代理即读空崩溃（sdk+0x38660）。都返回 void：当作玩家一进商店就关了，游戏回到原菜单。
+// The other shop entry points (Engage's title menu item "DLC" calls ShowShopAddOnContentList(ApplicationId, UserHandle)): the original starts the shop applet through applet::CreateLibraryApplet,
+// the host has no applet proxy (oe initialization is a no-op), and the SDK reads through the null proxy and crashes (sdk+0x38660). All return void: as if the player closed the shop at once, the game goes back to its menu.
+HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdE", "商店小程序，排除范围；剪口：空操作", void, h_ec_AocList1, void) { LOG("ec::ShowShopAddOnContentList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdERKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_AocList2, void) { LOG("ec::ShowShopAddOnContentList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationENS_13ApplicationIdE", "商店小程序，排除范围；剪口：空操作", void, h_ec_AppInfo1, void) { LOG("ec::ShowShopApplicationInformation（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec30ShowShopApplicationInformationENS_13ApplicationIdERKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_AppInfo2, void) { LOG("ec::ShowShopApplicationInformation（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdE", "商店小程序，排除范围；剪口：空操作", void, h_ec_Sub1, void) { LOG("ec::ShowShopSubscriptionList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_Sub2, void) { LOG("ec::ShowShopSubscriptionList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS0_8CourseIdE", "商店小程序，排除范围；剪口：空操作", void, h_ec_Sub3, void) { LOG("ec::ShowShopSubscriptionList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS0_8CourseIdERKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_Sub4, void) { LOG("ec::ShowShopSubscriptionList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListENS_13ApplicationIdE", "商店小程序，排除范围；剪口：空操作", void, h_ec_ConsList1, void) { LOG("ec::ShowShopConsumableItemList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec26ShowShopConsumableItemListENS_13ApplicationIdERKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_ConsList2, void) { LOG("ec::ShowShopConsumableItemList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailENS_13ApplicationIdERKNS0_12ConsumableIdENS0_5NsUidE", "商店小程序，排除范围；剪口：空操作", void, h_ec_ConsDet1, void) { LOG("ec::ShowShopConsumableItemDetail（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec28ShowShopConsumableItemDetailENS_13ApplicationIdERKNS0_12ConsumableIdENS0_5NsUidERKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_ConsDet2, void) { LOG("ec::ShowShopConsumableItemDetail（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec22ShowShopEnterCodeSceneEv", "商店小程序，排除范围；剪口：空操作", void, h_ec_Code1, void) { LOG("ec::ShowShopEnterCodeScene（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec22ShowShopEnterCodeSceneERKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_Code2, void) { LOG("ec::ShowShopEnterCodeScene（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec22ShowShopProductDetailsENS0_5NsUidE", "商店小程序，排除范围；剪口：空操作", void, h_ec_Prod1, void) { LOG("ec::ShowShopProductDetails（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec22ShowShopProductDetailsENS0_5NsUidERKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_Prod2, void) { LOG("ec::ShowShopProductDetails（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec19ShowShopProductListEPKNS0_5NsUidEiPKc", "商店小程序，排除范围；剪口：空操作", void, h_ec_ProdList1, void) { LOG("ec::ShowShopProductList（剪）：宿主没有商店"); }
+HLE_FORCE("_ZN2nn2ec19ShowShopProductListEPKNS0_5NsUidEiPKcRKNS_7account10UserHandleE", "商店小程序，排除范围；剪口：空操作", void, h_ec_ProdList2, void) { LOG("ec::ShowShopProductList（剪）：宿主没有商店"); }
+// 追加内容丢失的错误画面也是小程序：只记日志 | The "add-on content lost" error screen is an applet too: logged only
+HLE_FORCE("_ZN2nn3aoc25ShowAddOnContentLostErrorEPKii", "追加内容丢失错误小程序；宿主只记日志", void, h_aoc_LostErr, const int *idx, int n) { (void)idx; LOG("aoc::ShowAddOnContentLostError（%d 项）（剪）", n); }
 
 // ---------- err 错误小程序：宿主打印 ----------
 // ---------- err error applet: printed by the host ----------
