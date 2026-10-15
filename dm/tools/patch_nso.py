@@ -175,6 +175,23 @@ CUTS = {
   # The hardware alias region is 64 GB, so the 1 GB does not matter there; the host's alias region is only 5.375 GB (iOS caps a single reservation at 6 GB), and after StandardAllocator's 3.14 GB block (1 GB aligned)
   # Unity's low-level virtual allocator (main+0x9aa0f4 → AllocateAddressRegion) had only about 1.2 GB left; about 357 s into the prologue battle it got no region → returned 0 → null write crash at main+0x9a4664.
   # 62 MB holds about 1.35 million nodes (a few hundred regions are live in measurements). Both movs must change together: +0x346430 sets the node area limit, +0x3464cc registers it as an occupied region.
+  # 火焰纹章 Engage 2.0.0 (v327680) main：按游戏自己的 60 帧路径跑（垂直同步计数恒为 1）。
+  # 游戏的时间类 App.GameTime 按场景选垂直同步计数（Slow = 2，即 30 帧：系统、片头、演示、战斗演出、据点；Normal 只在 GameConfig.IsPerformance 时为 1），
+  # 经 GameTime.SetVsyncCount(int) 交给 Unity（QualitySettings.vSyncCount → NVN 出图间隔）。约 96 处逐帧逻辑（镜头、地图光标、单位演员、菜单滚动与光标、据点镜头、小游戏）
+  # 按 GameTime.VsyncFixedCount（= vSyncCount，每帧推进几个 60 Hz 节拍）走：计数 2 而屏幕 60 帧时这些都快一倍，计数 1 时 60 帧刚好。
+  # 按真实时间走的 VsyncDeltaCount / VsyncDeltaTime（据点人物移动、钓鱼、龙骑等约 120 处）与帧率无关。
+  # 剪在 Unity 的托管包装 QualitySettings.set_vSyncCount（main+0x32f92c0）：两条路径都用 w19 当参数，mov w19,w0 → mov w19,#1，
+  # 所有调用者（GameTime、QualitySettingsStack.PopImpl、XRSystem）都只能设 1；读值（get_vSyncCount）随之为 1，游戏自洽。没有代码调 SetQualityLevel。
+  # Fire Emblem Engage 2.0.0 (v327680) main: run the game's own 60 fps path (vertical sync count always 1).
+  # The game's time class App.GameTime picks a vertical sync count per scene (Slow = 2, i.e. 30 fps: system, movies, demos, combat cutscenes, the hub; Normal is 1 only when GameConfig.IsPerformance)
+  # and hands it to Unity through GameTime.SetVsyncCount(int) (QualitySettings.vSyncCount → NVN present interval). About 96 pieces of per-frame logic (cameras, map cursor, unit actors, menu scrolling and cursors, hub camera, minigames)
+  # step by GameTime.VsyncFixedCount (= vSyncCount, how many 60 Hz ticks each frame advances): with a count of 2 and 60 frames on screen they all run twice as fast, with a count of 1 at 60 fps they are right.
+  # The real-time VsyncDeltaCount / VsyncDeltaTime (hub character movement, fishing, dragon ride and so on, about 120 places) do not depend on the frame rate.
+  # The cut is in Unity's managed wrapper QualitySettings.set_vSyncCount (main+0x32f92c0): both paths use w19 as the argument, mov w19,w0 → mov w19,#1,
+  # so every caller (GameTime, QualitySettingsStack.PopImpl, XRSystem) can only set 1; the read side (get_vSyncCount) follows at 1 and the game stays consistent. No code calls SetQualityLevel.
+  '8c08b9719e085f91847b5e0f935d9488': [
+    (0x32f92d4, 'f303002a', '33008052', 'QualitySettings.set_vSyncCount 包装：参数 mov w19,w0 → mov w19,#1（游戏自己的 60 帧路径）', '仅宿主'),
+  ],
   '56ec24747ec9e7f19b3efb062483a19d': [
     (0x346430, '08fca752', '087ca052', 'AddressRegionManager 构造：节点区上限 mov w8,#0x3fe00000 → mov w8,#0x3e00000', '仅宿主'),
     (0x3464cc, '09fca752', '097ca052', 'AddressRegionManager 构造：节点区登记为已占区域的长度 mov w9,#0x3fe00000 → mov w9,#0x3e00000', '仅宿主'),

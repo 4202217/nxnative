@@ -26,10 +26,12 @@ romfs_marker	Data/data.unity3d
 zip_store	.bundle:.wem:.unity3d:.metallib
 
 # ---- 出图 | Presentation ----
-# 游戏设出图间隔 2（Switch 上 30 帧）。改版站点的 60 帧补丁都另改游戏自己的计时：Cobalt 的帧数插件（针对 2.0.0）说不改的话 60 帧下玩家与 NPC 移动加速（据点），
-# 别的补丁有菜单加速。标题待机到自动放片头的计时按真实时间算，30 / 60 帧下一样（Mac 实测：读取结束后 17.2 / 17.4 秒）。正确的 60 帧要先补按帧计数的那些逻辑
-# The game sets present interval 2 (30 fps on the Switch). The 60 fps patches on mod sites all change the game's own timing as well: Cobalt's frame-rate plugin (for 2.0.0) says that without it the player and NPCs move faster at 60 fps (in the hub),
-# and other patches mention faster menus. The timer from idling at the title to autoplaying the opening movie runs on real time, the same at 30 and 60 fps (measured on the Mac: 17.2 / 17.4 s after loading ends). A correct 60 fps needs the frame-counted logic fixed first
+# 原版设出图间隔 2（Switch 上 30 帧）。2.0.0 main 有一处改写剪口（patch_nso.py，QualitySettings.set_vSyncCount 只能设 1），走游戏自己的 60 帧路径：
+# 按帧计数的逻辑都按 GameTime.VsyncFixedCount（= vSyncCount）步进，计数 1、60 帧时速度与原版 30 帧相同。于是游戏自己设间隔 1，game 模式给 60 帧。
+# Mac 实测（存档列表按住下 0.45 秒）：剪口 60 帧与原版 30 帧都移 6 格；不剪而用 DM_PRESENT_INTERVAL=display 强出 60 帧时移到底（≥9 格），即按帧计数的逻辑加速
+# The original sets present interval 2 (30 fps on the Switch). A rewriter cut on 2.0.0 main (patch_nso.py, QualitySettings.set_vSyncCount can only set 1) takes the game's own 60 fps path:
+# frame-counted logic steps by GameTime.VsyncFixedCount (= vSyncCount), so a count of 1 at 60 fps runs at the speed of the original at 30 fps. The game then sets interval 1 itself and game mode gives 60 fps.
+# Measured on the Mac (holding Down for 0.45 s in the save list): 60 fps with the cut and the original 30 fps both move 6 slots; without the cut, 60 fps forced by DM_PRESENT_INTERVAL=display reaches the end (9 or more), i.e. frame-counted logic speeds up
 present_interval	game
 
 # ---- 内存 | Memory ----
