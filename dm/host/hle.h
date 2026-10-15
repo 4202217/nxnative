@@ -22,6 +22,9 @@ void *objmap_get(const void *guest);
 void objmap_put(const void *guest, void *host);
 void *objmap_del(const void *guest);
 uint64_t now_ns(void);
+// 本线程正在做宿主自己的重活（NVN 提交 / 出图：编 Metal 命令；真机上这是 GPU 的事，不占客体核）。同核抢占的近似（hle_thread.c）不把这段当「在跑」
+// This thread is doing the host's own heavy work (NVN submit / present: encoding Metal commands; on hardware that is the GPU's business and does not occupy a guest core). The same-core preemption approximation (hle_thread.c) does not count it as "running"
+extern __thread _Atomic int dm_host_work;
 uint64_t guest_ns(void);              // 客体时钟（hle_os.c；DM_TICK_HOLD 冻结时不走） | Guest clock (hle_os.c; does not advance while DM_TICK_HOLD is frozen)
 int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);

@@ -38,12 +38,13 @@ void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
-// DM_KEYS 脚本输入（测试用）："秒:键[+键][~按住秒],…"，例 "8:A,12:A,15:Down~0.5,16:A+B"。键名 A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down；
-//   缺省按住 0.15 s。走手柄那一路（dm_pad_set），与键盘 / 触屏按位或，不互相覆盖。时间从宿主启动算起
-// DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B". Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down;
-//   held 0.15 s by default. Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start
+// DM_KEYS 脚本输入（测试用）："秒:键[+键][~按住秒][*次数/间隔秒],…"，例 "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2"（40 s 起每 2 s 按一次 A，共 80 次）。键名 A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down；
+//   缺省按住 0.15 s，最多 1024 步（重复展开后计）。走手柄那一路（dm_pad_set），与键盘 / 触屏按位或，不互相覆盖。时间从宿主启动算起
+// DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down;
+//   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start
 typedef struct { double at, hold; uint64_t btn; } key_step;
-static key_step g_steps[64]; static int g_nsteps;
+#define KEY_STEPS 1024
+static key_step g_steps[KEY_STEPS]; static int g_nsteps;
 static void *keys_main(void *arg) {
     (void)arg; struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int i = 0; i < g_nsteps; i++) {
@@ -56,16 +57,18 @@ static void *keys_main(void *arg) {
 void hid_keys_init(void) {
     const char *e = getenv("DM_KEYS"); if (!e || !*e) return;
     static const char *names[16] = {"A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"};
-    char buf[1024]; snprintf(buf, sizeof buf, "%s", e);
-    for (char *tok = strtok(buf, ","); tok && g_nsteps < 64; tok = strtok(NULL, ",")) {
+    char buf[4096]; snprintf(buf, sizeof buf, "%s", e);
+    for (char *tok = strtok(buf, ","); tok && g_nsteps < KEY_STEPS; tok = strtok(NULL, ",")) {
         char *c = strchr(tok, ':'); if (!c) { LOG("【红】DM_KEYS 步骤缺「秒:」：%s", tok); continue; }
         *c = 0; key_step st = {atof(tok), 0.15, 0};
+        int rep = 1; double every = 0;
+        char *r = strchr(c + 1, '*'); if (r) { *r = 0; rep = atoi(r + 1); char *sl = strchr(r + 1, '/'); every = sl ? atof(sl + 1) : 1; if (rep < 1) rep = 1; }
         char *h = strchr(c + 1, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
         for (char *k = c + 1; k && *k;) { char *plus = strchr(k, '+'); if (plus) *plus = 0;
             int found = 0; for (int b = 0; b < 16; b++) if (!strcasecmp(k, names[b])) { st.btn |= 1ull << b; found = 1; }
             if (!found) LOG("【红】DM_KEYS 不认识的键名：%s", k);
             k = plus ? plus + 1 : NULL; }
-        g_steps[g_nsteps++] = st;
+        for (int i = 0; i < rep && g_nsteps < KEY_STEPS; i++) { g_steps[g_nsteps] = st; g_steps[g_nsteps++].at = st.at + i * every; }
     }
     pthread_t th; if (g_nsteps && !pthread_create(&th, NULL, keys_main, NULL)) { pthread_detach(th); LOG("DM_KEYS：%d 步", g_nsteps); }
 }
@@ -135,6 +138,11 @@ HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiR
           int, h_hid_VibHandles, void *h, int n, const uint32_t *id, uint32_t style) { (void)h; (void)n; (void)id; (void)style; return 0; }
 HLE_FORCE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", "震动；宿主不支持", void, h_hid_InitVib, const void *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", "震动；宿主不支持", void, h_hid_SendVib, const void *h, const void *v) { (void)h; (void)v; }
+// 震动图（VibrationNode::Update）攒下的值经 sdk 内部的 FlushEnqueuedVibrationValues 走 PLT 调它，进 hid 服务代理（sm 中止）。银河战士 生存恐惧
+// 宿主报 0 个设备时也给 VibrationTarget 设句柄，所以会攒值；返回成功，flush 照常清零计数
+// Values queued by the vibration graph (VibrationNode::Update) reach it from the sdk's internal FlushEnqueuedVibrationValues through the PLT, into the hid service proxy (sm abort). Metroid Dread
+// sets handles on its VibrationTargets even when the host reports 0 devices, so values get queued; return success and the flush clears its count as usual
+HLE_FORCE("_ZN2nn3hid6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", "震动（批量，震动图 flush 用）；宿主不支持", Result, h_hid_SendVibs, const void *h, const void *v, int n) { (void)h; (void)v; (void)n; return 0; }
 // 鼠标 / 键盘：未连接
 // Mouse / keyboard: not connected
 HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}

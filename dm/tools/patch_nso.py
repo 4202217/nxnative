@@ -8,7 +8,7 @@
 #   已登记剪口（CUTS，按 NSO 构建号限定）：改写前逐条断言原字节，不符即中止；结果列在 <名>.cuts.tsv
 #   已登记观测门（OBS，按构建号限定）：入口一条指令换成「进宿主观测回调 → 执行原指令 → 跳回」，诊断零运行时改代码；列在 <名>.obs.tsv
 # 键页只在数据段末尾保存“实际键号 × 8”，补丁代码通过键页间接取线程槽：装载器可使用任意键号。
-# 输出：<名>.patched.bin（键页与补丁区接在映像后 PATCH_OFF）、<名>.fixups.tsv（布局与键页下标表头）、<名>.gates.tsv、<名>.sites.tsv、<名>.cuts.tsv、<名>.obs.tsv
+# 输出：<名>.patched.bin（键页与补丁区接在映像后 PATCH_OFF；接在后面会超过 112 MB 时补丁区在首址前，见 FAR）、<名>.fixups.tsv（布局与键页下标表头）、<名>.gates.tsv、<名>.sites.tsv、<名>.cuts.tsv、<名>.obs.tsv
 # Generic NSO rewriter: Switch aarch64 module → an image that can execute natively on Apple systems.
 # Usage: patch_nso.py <NSO file> <output dir> <module name>
 # Rewrites (the Apple kernel modifies x18 and tpidr_el0; Horizon's thread area, svc and timers have no counterpart on Apple):
@@ -19,7 +19,7 @@
 #   Registered cuts (CUTS, restricted by NSO build ID): before rewriting, the original bytes are asserted one by one and any mismatch aborts; results are listed in <name>.cuts.tsv
 #   Registered observation gates (OBS, restricted by build ID): one instruction at the entry is replaced with "enter the host observation callback → execute the original instruction → jump back", so diagnostics modify zero code at runtime; listed in <name>.obs.tsv
 # The key page only stores "actual key number × 8" at the end of the data segment, and patch code fetches thread slots indirectly through the key page: the loader may use any key number.
-# Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
+# Output: <name>.patched.bin (key page and patch area appended after the image at PATCH_OFF; when that would start beyond 112 MB the patch area sits before the base, see FAR), <name>.fixups.tsv (layout and key page index header), <name>.gates.tsv, <name>.sites.tsv, <name>.cuts.tsv, <name>.obs.tsv
 import struct, re, sys, os
 from itertools import combinations
 import lz4.block
@@ -32,16 +32,29 @@ flags = struct.unpack_from('<I', d, 0xc)[0]
 segs = [struct.unpack_from('<III', d, 0x10 + i * 0x10) for i in range(3)]
 bss = struct.unpack_from('<I', d, 0x3c)[0]
 csz = struct.unpack_from('<III', d, 0x60)
-IMG = bytearray(segs[2][1] + segs[2][2] + bss)
+# 补丁区与代码之间每一跳都是 B（±128 MB）。补丁区接在映像（含 bss）后面时若起点超过 112 MB（给补丁区留 16 MB）就够不着代码：银河战士 生存恐惧的 main 有约 1.8 GB bss（引擎的静态堆）；Engage 的 main 起点约 103 MB，照旧接在后面。
+# 这时补丁区放在模块首址之前 FRONT 处（PATCH_OFF 为负），产物文件只存 text + ro + data（FILE_IMAGE_LEN）再接补丁区；bss 与键页由装载器给零页（IMAGE_SIZE 为整个映像）。
+# 键页仍在 bss 之后（补丁区经 ADRP 取它，±4 GB 够得着）。没超的模块产物与以前逐字节相同
+# Every jump between the patch area and the code is a B (±128 MB). A patch area appended after the image (with bss) cannot reach the code when it would start beyond 112 MB (leaving 16 MB for the patch area): Metroid Dread's main has about 1.8 GB of bss (the engine's static heap); Engage's main starts its patch area at about 103 MB and keeps it after the image.
+# The patch area then sits FRONT bytes before the module base (PATCH_OFF is negative), and the output file holds only text + ro + data (FILE_IMAGE_LEN) followed by the patch area; the loader supplies zero pages for bss and the key page (IMAGE_SIZE is the whole image).
+# The key page stays after bss (the patch area reaches it through ADRP, ±4 GB). Modules below the limit produce output byte-identical to before
+NEAR_PATCH_OFF = ((((segs[2][1] + segs[2][2] + bss + 0x3FFF) & ~0x3FFF) + 0x4000 + 0xFFFF) & ~0xFFFF)   # 补丁区接在后面时的起点（同下面 else 分支） | where an appended patch area would start (as in the else branch below)
+FAR, FRONT = NEAR_PATCH_OFF > 0x7000000, 0x2000000
+IMG = bytearray(segs[2][1] + segs[2][2] + (0 if FAR else bss))
 for i, (fo, mo, sz) in enumerate(segs):
     raw = d[fo:fo + csz[i]]
     if flags >> i & 1: raw = lz4.block.decompress(raw, uncompressed_size=sz)
     IMG[mo:mo + sz] = raw
 TEXT_END = segs[0][2]
 RO_OFF, DATA_OFF = segs[1][1], segs[2][1]
-KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
-IMG.extend(bytes(0x4000))
-PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
+if FAR:
+    FILE_IMAGE_LEN = (len(IMG) + 0x3FFF) & ~0x3FFF
+    KEY_PAGE_OFF = (len(IMG) + bss + 0x3FFF) & ~0x3FFF
+    IMAGE_SIZE, PATCH_OFF = KEY_PAGE_OFF + 0x4000, -FRONT
+else:
+    KEY_PAGE_OFF = (len(IMG) + 0x3FFF) & ~0x3FFF
+    IMG.extend(bytes(0x4000))
+    PATCH_OFF = (len(IMG) + 0xFFFF) & ~0xFFFF
 
 # ---- 已登记剪口：{NSO 构建号: [(偏移, 原字节, 新字节, 理由)]} ----
 # 联网剪口（排除范围：战网 / 联机）：取自社区离线修复（LFS Mod Offline Fix for v2228224，与官方 94012 main 只差这 7 个字）。
@@ -201,7 +214,16 @@ CUTS = {
 # 原指令须与位置无关（不得 PC 相对 / 分支 / 涉 x18·tpidr），离线断言；宿主未挂回调时门块进出一次即返回 ----
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
-OBS = {'db0507f36b84200ac05f75d76ed5026f': [
+OBS = {
+  # 银河战士 生存恐惧 2.1.0 main：影片播放器把等待项「挂上 / 摘下」请求投进分发线程的请求环（main+0x222cc8）后不等处理就往下走（摘下后随即释放包装对象、在原处建新对象）。
+  # 真机上分发线程（优先级 30，只许核 0）立即抢占主线程（优先级 44，核 0）处理完；宿主上要在投完一项后等环空（hle_movie.c movie_ring_wait）。门放在 bl 之后那条 add x22, x22, #8 上
+  # Metroid Dread 2.1.0 main: the movie player posts "link / unlink holders" requests into the dispatcher thread's request ring (main+0x222cc8) and goes on without waiting for them (after an unlink it frees the wrapper object and builds a new one in place).
+  # On hardware the dispatcher thread (priority 30, core 0 only) preempts the main thread (priority 44, core 0) at once and finishes first; the host waits for the ring to empty after each post (hle_movie.c movie_ring_wait). The gates sit on the add x22, x22, #8 after the bl
+  '646761f643afebb379edd5e6a5151af2': [
+    (0x2247a4, 19, '910022d6', '挂等待项请求投完（main+0x224728 循环，x19 = 请求环）：等分发线程处理完；原指令 add x22, x22, #8 | link request posted (loop at main+0x224728, x19 = request ring): wait for the dispatcher; orig add x22, x22, #8'),
+    (0x2248e4, 20, '910022d6', '摘等待项请求投完（main+0x224868 循环，x19 = 请求环）：等分发线程处理完再释放对象；原指令 add x22, x22, #8 | unlink request posted (loop at main+0x224868, x19 = request ring): wait for the dispatcher before the object is freed; orig add x22, x22, #8'),
+  ],
+  'db0507f36b84200ac05f75d76ed5026f': [
     (0xb1dc60, 1, 'd10603ff', 'UI 消息总线虚函数实现入口（x1 = 消息 {u64 类型哈希, u64 动作哈希, char* 面板名, …}）：'
      'DM_UIMSG 消息流与 DM_BOOTPROF 启动分段的唯一来源；原指令 sub sp, sp, #0x180'),
     (0x5d3bc0, 2, 'd10503ff', '服务端拍入口（x0 = 游戏对象 G）：DM_TICKS 逐拍 6 格状态哈希（dm/verify/tick_state_format.md，与真值 swtick.py 同一采集点）；'
@@ -772,9 +794,12 @@ if RULE_RUN and PRIVATE_GATES:
 for off, oid, ow, why in obs:
     w = struct.unpack_from('<I', IMG, off)[0]
     assert f'{w:08x}' == ow, f'观测门原指令不符 {off:#x}：{w:08x}'
-    # 只许函数入口：dm_gate 只回写 x0–x8 / x30，宿主 C 代码可能改 x9–x17；入口处这些按 AAPCS64 不承载值（参数只在 x0–x7 / x8）
-    # Function entries only: dm_gate writes back only x0–x8 / x30, and host C code may modify x9–x17; at entry these carry no values under AAPCS64 (arguments are only in x0–x7 / x8)
-    assert off in set(starts) or (oid == 6 and off == 0x43ecc8), f'private obs point not approved {off:#x}'
+    # 只许函数入口或紧跟 bl 的那条：dm_gate 只回写 x0–x8 / x30，宿主 C 代码可能改 x9–x17；入口处这些按 AAPCS64 不承载值（参数只在 x0–x7 / x8），
+    # 刚从调用返回时被调函数本就可以改坏它们（x16 / x17 是跳板寄存器）
+    # Function entries, or the instruction right after a bl, only: dm_gate writes back only x0–x8 / x30, and host C code may modify x9–x17; at entry these carry no values under AAPCS64 (arguments are only in x0–x7 / x8),
+    # and right after a call returns the callee was free to clobber them anyway (x16 / x17 are the veneer registers)
+    after_bl = off >= 4 and struct.unpack_from('<I', IMG, off - 4)[0] >> 26 == 0x25
+    assert off in set(starts) or after_bl or (oid == 6 and off == 0x43ecc8), f'private obs point not approved {off:#x}'
     assert off < TEXT_END and off not in kinds and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'观测门与改写点冲突 {off:#x}'
     put_branch(off, site_obs(off, oid, w)); stat('obs')
 
@@ -963,7 +988,11 @@ if RULE_RUN:
 
 os.makedirs(outdir, exist_ok=True)
 P = lambda ext: os.path.join(outdir, f'{NAME}.{ext}')
-open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
+if FAR:   # 补丁区在首址前：文件 = text + ro + data（补到 16K）+ 补丁区 | patch area before the base: file = text + ro + data (padded to 16K) + patch area
+    assert len(patch) <= FRONT - 0x4000, f'补丁区 {len(patch):#x} 字节放不进首址前的 {FRONT:#x} | patch area of {len(patch):#x} bytes does not fit in the {FRONT:#x} before the base'
+    open(P('patched.bin'), 'wb').write(IMG + bytearray(FILE_IMAGE_LEN - len(IMG)) + patch)
+else:
+    open(P('patched.bin'), 'wb').write(IMG + bytearray(PATCH_OFF - len(IMG)) + patch)
 import hashlib
 with open(os.path.join(outdir, 'build_src.sha256'), 'w') as f:
     f.write(hashlib.sha256(open(os.path.abspath(__file__), 'rb').read()).hexdigest() + '  patch_nso.py\n')
@@ -979,6 +1008,7 @@ elif os.path.exists(P('rules.tsv')):
     os.unlink(P('rules.tsv'))  # 重出native时清本模块旧规则登记，不让旧manifest混入原资源域 | When rebuilding native, clear this module's old rule registration so the old manifest does not leak into the original-resource domain
 with open(P('fixups.tsv'), 'w') as f:
     f.write(f'# PATCH_OFF\t{PATCH_OFF:#x}\n# KEY_PAGE_OFF\t{KEY_PAGE_OFF:#x}\n# KEY_PAGE_SIZE\t0x4000\n# TEXT_END\t{TEXT_END:#x}\n# RO_OFF\t{RO_OFF:#x}\n# DATA_OFF\t{DATA_OFF:#x}\n')
+    if FAR: f.write(f'# IMAGE_SIZE\t{IMAGE_SIZE:#x}\n# FILE_IMAGE_LEN\t{FILE_IMAGE_LEN:#x}\n')   # 补丁区在首址前（PATCH_OFF 为负）：整个映像大小、文件里映像部分的长度 | patch area before the base (negative PATCH_OFF): whole image size, length of the image part of the file
     for k in KEY_INDEX: f.write(f'# KEY_{k}_IDX\t{KEY_INDEX[k]}\n')
     f.write(f'# BUILD_ID\t{BUILD_ID}\n')   # 宿主据此认构建：写死地址的功能只在它们所属的构建上开 | the host identifies the build by it: features with hard-coded addresses only run on the build they belong to
 with open(P('gates.tsv'), 'w') as f:

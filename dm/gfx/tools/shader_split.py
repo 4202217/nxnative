@@ -10,6 +10,8 @@
 #   · Unity（UnityFS 资源包、Data 下的序列化文件，读法见 unityfs.py）：每个 Shader 对象的 Switch 平台子程序，程序代码 = 0x60 头 + 各阶段块。
 #       头是 4 个 i32 ×6 数组，下标按 NVN 阶段（0 顶点 1 像素 2 几何 3 外壳 4 域 5 计算）：[0] 未用（0 或暂存大小）、[1] 块偏移（相对 +0x60，−1 = 无此阶段）、[2] 控制段长、[3] 代码区长；
 #       块 = 控制段 + 代码区。一个程序的顶点 / 像素阶段即一对。游戏本体的序列化文件（data.unity3d、unity default resources）不带类型树，借资源包里同哈希的 Shader 类型树（第二遍）
+#   · MSHD（MercurySteam，银河战士 生存恐惧 system/shd/*.bshdat）：每个阶段 = 控制段（+0x20 = 控制段长；后面有时跟一小段编译选项表）+ 下一个代码区头起的代码区；
+#       控制段 0x880 之后是 NV 汇编文本，代码区之后是 SASS 反汇编文本。478 个文件全是「顶点、像素」成对排列（1、2 或 4 对），按顺序两两配对
 # 代码区：0x30 头 + （图形）0x50 SPH + 指令；头魔数图形 0x12345678、计算 0x12345679。控制段 0x98761234 开头，+0x704 = 代码区长，
 #   +0x700 = c1 常数段在代码区内的起点；计算着色器 +0x748 线程组 xyz（u32 ×3）、+0x754 共享内存字节（D2R 22 个计算着色器与 PC 反射逐条核对）。
 # 阶段：BNSH 取阶段槽；BAHS 取 SPH 第 0 字 bits 10..13（1 顶点 2 外壳 3 域 4 几何 5 像素），计算头的为计算。
@@ -32,6 +34,8 @@
 #   · Unity (UnityFS bundles and the serialized files under Data, read by unityfs.py): the Switch subprograms of each Shader object; the program code = a 0x60 header + one block per stage.
 #       The header is 4 i32 ×6 arrays indexed by NVN stage (0 vertex 1 pixel 2 geometry 3 hull 4 domain 5 compute): [0] unused (0 or a scratch size), [1] block offset (from +0x60, -1 = no such stage), [2] control length, [3] code length;
 #       block = control section + code area. A program's vertex / pixel stages form a pair. The game's own serialized files (data.unity3d, unity default resources) carry no type trees and borrow the bundles' Shader type tree of the same hash (second pass)
+#   · MSHD (MercurySteam, Metroid Dread system/shd/*.bshdat): each stage = a control section (+0x20 = control length; sometimes a small compiler option table follows) + the code area starting at the next code header;
+#       NV assembly text follows the first 0x880 bytes of the control section, and SASS disassembly text follows the code area. All 478 files hold "vertex, pixel" in pairs (1, 2 or 4 pairs), paired two by two in order
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -96,6 +100,23 @@ def bahs_shaders(d, label):
         out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
     return out
 
+def mshd_shaders(d, label):
+    out, c = [], d.find(CTL_MAGIC)
+    while c >= 0:
+        nctl = struct.unpack_from('<I', d, c + 0x20)[0]
+        g = d.find(GFX_MAGIC, c + nctl)
+        if nctl < 0x880 or g < 0 or g - c - nctl > 0x400: red(f'{label} MSHD 控制段 @{c:#x}：长 {nctl:#x}，之后找不到代码区头')
+        ncode = struct.unpack_from('<I', d, c + 0x704)[0]
+        ctl, code = d[c:c + nctl], d[g:g + ncode]
+        st = SPH_STAGE.get((struct.unpack_from('<I', code, 0x30)[0] >> 10) & 0xf)
+        if st != ('vs', 'ps')[len(out) % 2]: red(f'{label} MSHD @{c:#x}：第 {len(out)} 个阶段是 {st}，不是顶点 / 像素交替')
+        why = check(label, st, ctl, code)
+        if why: red(f'{label} MSHD @{c:#x} {st}：{why}')
+        out.append((f'{label}#MSHD#var{len(out) // 2}', st, ctl, code))
+        c = d.find(CTL_MAGIC, g + ncode)
+    if len(out) % 2: red(f'{label} MSHD：{len(out)} 个阶段，不成对')
+    return out
+
 def sarc_members(d):
     hl, bom, size, doff = struct.unpack_from('<HHII', d, 4)
     n = struct.unpack_from('<H', d, hl + 6)[0]
@@ -144,6 +165,7 @@ def scan_blob(d, label, out):
         for nm, m in sarc_members(d): scan_blob(m, f'{label}/{nm}', out)
         return
     if d[:4] == b'BAHS': out.extend(bahs_shaders(d, label)); return
+    if d[:4] == b'MSHD': out.extend(mshd_shaders(d, label)); return
     for m in re.finditer(b'BNSH\0\0\0\0', d):
         size = struct.unpack_from('<I', d, m.start() + 0x1c)[0]
         if m.start() + size <= len(d) and d[m.start() + 0x60:m.start() + 0x64] == b'grsc': out.extend(bnsh_shaders(d, m.start(), label))
@@ -171,7 +193,7 @@ def scan_file(args):
         import unityfs
         try: unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d: return rel, {}, set(), {}
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD': return rel, {}, set(), {}
     else: scan_blob(d, '/' + rel, found)
     uniq = {}
     for where, st, ctl, code in found:
@@ -251,7 +273,8 @@ def main():
     for name, rr in recs.items():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
-        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] for r in rows))) if hit)
+        kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] for r in rows)),
+                                            ('MSHD', any('#MSHD#' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE}（RomFS + main 里的 {kinds}）→ 控制段 + 代码区键（dm/gfx/tools/shader_split.py）\n')
         f.write('# 第 5 列记每个键首次出现的位置；本作没有 PC 版配对\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')

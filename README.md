@@ -27,6 +27,7 @@ This project is built on other people's work:
 |---|---|---|---|
 | Super Mario Bros. Wonder | `010015100B514000` | the base game (1.0.0) and update 1.2.1 | **Playable on the iPhone with sound.** An 11-minute session through several levels ran at 60 fps with no crash. The IPA packs 1.2.1 (`-p v0` packs 1.0.0) and is about 3.9 GB |
 | Fire Emblem Engage | `0100A6301214E000` | the base game and update 2.0.0; DLC NSPs (Expansion Pass) are packed too when present | **In bring-up.** On the Mac it plays the prologue, battles included. The first iPhone run (2026-10-15) went through a new game's opening movie and name entry at 60 fps with no crash. After a trip to the background, one of the game's two audio outputs stopped being fed; this is being investigated. It runs at 60 fps at the right speed: the Switch version runs at 30, and one patch to its code switches it to the 60 fps timing the game already has, so nothing runs too fast. The IPA is about 15 GB |
+| Metroid Dread | `010093801237C000` | the base game and update 2.1.0 | **In bring-up, Mac only so far.** A new game runs on the Mac through the title, the story recap and the opening cutscene into the first area of ZDR, at 60 fps with movies and music. No IPA has been tested yet |
 
 For any other game, the script writes a survey instead of an IPA (see [Port another game](#port-another-game)).
 

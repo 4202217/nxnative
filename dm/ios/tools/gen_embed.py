@@ -2,6 +2,7 @@
 #   __TEXT,__dm<名>x0   原 text：[0, 圆整16K(TEXT_END))（含 ro 首页的一部分，只读）
 #   __DM<名>W,__img     RW 段：[圆整16K(TEXT_END), PATCH_OFF)，ro 余部 + data + bss（重定位只落这里）
 #   __TEXT,__dm<名>x1   补丁区：[PATCH_OFF, 圆整16K(文件尾))
+#   补丁区在首址前的模块（PATCH_OFF 为负，见 patch_nso.py FAR）：W 是 [圆整16K(TEXT_END), FILE_IMAGE_LEN)，x1 是文件里 FILE_IMAGE_LEN 之后的补丁区；bss 与键页不进可执行文件
 # 三块在可执行文件里不相邻；运行时由装载器（loader.c iOS 分支）保留一块连续地址，按原相对位置 vm_remap 回去（代码页共享已签名页，W 写时复制），
 # 所以运行时布局与原映像逐字节相同：原代码与 data 之间的 PC 相对寻址、补丁区的相对跳转、宿主按「基址 + 原偏移」的引用都不用动。
 # 用法：gen_embed.py <产物目录> <输出 .S> <模块名...>；链接参数打印到 stdout（W 段的 -segprot）
@@ -9,6 +10,7 @@
 #   __TEXT,__dm<name>x0   original text: [0, round16K(TEXT_END)) (includes part of the first ro page, read-only)
 #   __DM<name>W,__img     RW segment: [round16K(TEXT_END), PATCH_OFF), rest of ro + data + bss (relocations land only here)
 #   __TEXT,__dm<name>x1   patch area: [PATCH_OFF, round16K(end of file))
+#   Modules with the patch area before the base (negative PATCH_OFF, see patch_nso.py FAR): W is [round16K(TEXT_END), FILE_IMAGE_LEN), x1 is the patch area after FILE_IMAGE_LEN in the file; bss and the key page are not in the executable
 # The three pieces are not adjacent in the executable; at run time the loader (loader.c iOS branch) reserves one contiguous address range and vm_remaps them back at their original relative positions (code pages share the signed pages, W is copy-on-write),
 # so the run-time layout is byte-identical to the original image: PC-relative addressing between original code and data, relative jumps in the patch area, and the host's "base + original offset" references all need no change.
 # Usage: gen_embed.py <build output dir> <output .S> <module name...>; link flags are printed to stdout (-segprot for the W segment)
@@ -24,8 +26,14 @@ for n in names:
     ko, ks = int(hdr['KEY_PAGE_OFF'], 16), int(hdr['KEY_PAGE_SIZE'], 16)
     bin_ = os.path.abspath(f'{out}/{n}.patched.bin'); sz = os.path.getsize(bin_)
     a, end = r16(te), r16(sz)
-    assert po % PG == 0 and a <= ko and ko + ks <= po and ko % PG == 0 and ks == PG
-    for sect, lo, hi in ((f'__TEXT,__dm{n}x0', 0, a), (f'__DM{n}W,__img', a, po), (f'__TEXT,__dm{n}x1', po, end)):
+    if po < 0:   # 补丁区在首址前（patch_nso.py FAR）：W 只到 data 尾，bss 与键页由装载器给零页；文件里补丁区接在 FILE_IMAGE_LEN 处 | patch area before the base (patch_nso.py FAR): W ends at the end of data, the loader supplies zero pages for bss and the key page; in the file the patch area follows at FILE_IMAGE_LEN
+        fl = int(hdr['FILE_IMAGE_LEN'], 16)
+        assert fl % PG == 0 and a <= fl and ko % PG == 0 and ks == PG and ko >= fl
+        parts = ((f'__TEXT,__dm{n}x0', 0, a), (f'__DM{n}W,__img', a, fl), (f'__TEXT,__dm{n}x1', fl, end))
+    else:
+        assert po % PG == 0 and a <= ko and ko + ks <= po and ko % PG == 0 and ks == PG
+        parts = ((f'__TEXT,__dm{n}x0', 0, a), (f'__DM{n}W,__img', a, po), (f'__TEXT,__dm{n}x1', po, end))
+    for sect, lo, hi in parts:
         assert all(len(x) <= 16 for x in sect.split(','))
         fill = min(hi, sz) - lo
         asm += [f'    .section {sect}', '    .p2align 14', f'    .incbin "{bin_}", {lo:#x}, {fill:#x}']

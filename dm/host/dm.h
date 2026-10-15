@@ -31,7 +31,9 @@ typedef struct {
     char name[16];
     uint8_t *base;             // 映像（含补丁区）在宿主地址空间的首址 | Start address of the image (including the patch area) in the host address space
     size_t size;
-    uint64_t text_end, ro_off, data_off, patch_off, key_page_off, key_page_size;   // 来自改写器 fixups 头 | From the rewriter fixups header
+    uint64_t text_end, ro_off, data_off, key_page_off, key_page_size;   // 来自改写器 fixups 头 | From the rewriter fixups header
+    int64_t patch_off;         // 补丁区相对首址；为负 = 补丁区在首址前（映像太大，见 patch_nso.py FAR），这时 size 不含它 | patch area relative to the base; negative = before the base (image too large, see patch_nso.py FAR), and size does not include it
+    uint64_t image_size, file_image_len, patch_len;   // 仅补丁区在首址前时：整个映像（含 bss 与键页）、文件里映像部分的长度、补丁区长 | only with the patch area before the base: whole image (with bss and key page), length of the image part of the file, patch area length
     char build_id[33];         // NSO 构建号前 16 字节（十六进制）；旧产物没有则为空 | First 16 bytes of the NSO build ID (hex); empty for older build outputs
     unsigned key_idx[8];
     const Elf64_Dyn *dyn;
@@ -63,7 +65,7 @@ module_t *module_of(const void *p);
 uint64_t gate_dispatch(uint64_t ret_addr, uint64_t *regs);
 // 观测门（改写器 OBS 表；编号与 patch_nso.py 一致）：只读回调，挂上即在门命中时调用
 // Observation gates (rewriter OBS table; numbering matches patch_nso.py): read-only callbacks, called on a gate hit once attached
-enum { OBS_UIMSG = 1, OBS_TICK = 2, OBS_C2S = 3, OBS_C2S_SYS = 4, OBS_SETLANG = 5, OBS_TARGET_RANK = 7, OBS_UI_PROJECT = 8, OBS_FREEZE_WORLD = 10, OBS_FREEZE_CLIENT = 11, OBS_FREEZE_ANIM = 12, OBS_FREEZE_RENDER = 13, OBS_TEXTBOX = 14, OBS_EVENT_MSG = 15, OBS_LEVEL_WARP = 16, OBS_QUEST_KILL = 17, OBS_NOTICE_INPUT = 18, OBS_MAX = 19 };   // 6 = iOS 绑定读取（dm_touch_game_bridge.c） | 6 = iOS binding read (dm_touch_game_bridge.c)
+enum { OBS_UIMSG = 1, OBS_TICK = 2, OBS_C2S = 3, OBS_C2S_SYS = 4, OBS_SETLANG = 5, OBS_TARGET_RANK = 7, OBS_UI_PROJECT = 8, OBS_FREEZE_WORLD = 10, OBS_FREEZE_CLIENT = 11, OBS_FREEZE_ANIM = 12, OBS_FREEZE_RENDER = 13, OBS_TEXTBOX = 14, OBS_EVENT_MSG = 15, OBS_LEVEL_WARP = 16, OBS_QUEST_KILL = 17, OBS_NOTICE_INPUT = 18, OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20, OBS_MAX = 21 };   // 6 = iOS 绑定读取（dm_touch_game_bridge.c） | 6 = iOS binding read (dm_touch_game_bridge.c)
 void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
 int gate_obs_present(int id);
 void dm_quiet_difficulty_msg(int on);   // 秘境局里拦原版「游戏难度设为 N」提示（观测门 15，diag.c） | In a rift run, block the original game's 「游戏难度设为 N」(Game difficulty set to N) message (observation gate 15, diag.c)

@@ -77,6 +77,7 @@ static int opmode(void) { return dm_opmode(); }
 
 // 截图 / 录像开关：宿主无系统截图服务，空操作
 // Screenshot / video recording switches: the host has no system screenshot service, no-op
+HLE_FORCE("_ZN2nn2oe17FinishStartupLogoEv", "收起系统启动画面（经 am 应用代理）；宿主没有启动画面", void, h_oe_FinishLogo, void) {}   // 银河战士 生存恐惧在 main+0xadfed0 调 | Metroid Dread calls it at main+0xadfed0
 HLE_FORCE("_ZN2nn2oe15EnableRecordingEv", "录像开关；宿主无系统录像", void, h_oe_EnableRec, void) {}
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "录像开关；宿主无系统录像", void, h_oe_DisableRec, void) {}
 HLE_FORCE("_ZN2nn2oe16EnableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_EnableShot, void) {}

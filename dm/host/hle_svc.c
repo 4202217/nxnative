@@ -64,6 +64,13 @@ static void mem_init(void) {
 // which the guest writes to without a null check (CRASH main+0x1b36138, re-verified after merge with inv_tap).
 #define APP_POOL DM_GAME_APP_POOL   // 游戏档案 app_pool（马力欧 0xCD500000） | game profile app_pool (Mario 0xCD500000)
 static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) n += g_mod[i].size; return (n + 0x1fffff) & ~(size_t)0x1fffff; }
+// 巨型 bss（补丁区在首址前的模块，patch_nso.py FAR）：映像里文件部分之外的字节。已用内存原按「堆 + 64 MB」报，64 MB 涵盖普通模块的代码与数据（马力欧两模块共约 74 MB，
+// 它开的堆 = 池 − 64 MB − 1.75 GB 虚拟地址内存 − 1 MB = 0x5be00000，与真机一致）；银河战士 生存恐惧 main 的 bss 约 1.8 GB 是引擎的静态堆，Switch 把它算作已用，
+// 不加上它游戏就按池 − 64 MB 要 3.15 GB 堆
+// Giant bss (modules with the patch area before the base, patch_nso.py FAR): the image bytes beyond the file part. Used memory was reported as "heap + 64 MB", where the 64 MB covers ordinary modules' code and data (Mario's two modules are about 74 MB together,
+// and the heap it opens = pool − 64 MB − 1.75 GB virtual address memory − 1 MB = 0x5be00000, as on hardware); Metroid Dread's main has about 1.8 GB of bss, the engine's static heap, which the Switch counts as used;
+// without it the game asks for pool − 64 MB = 3.15 GB of heap
+static size_t big_bss_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (g_mod[i].patch_off < 0) n += g_mod[i].size - g_mod[i].file_image_len; return n; }
 
 // 内存账（memstat.m）用：客体地址空间整块范围（未初始化时 base = NULL）
 // For memory accounting (memstat.m): the range of the whole guest address space block (base = NULL when not initialized)
@@ -178,9 +185,12 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             // The SDK's C++ exception unwinding (nn::ro::detail::GetExceptionInfo) walks back from the PC over "Code+RX" regions to find the module start, forward over Code then CodeData to find its end, then reads MOD0 at the module start for .eh_frame_hdr.
             // Previously "the 4 KiB page around it, Code+RX" was reported: the backward walk ran on into other memory, found no MOD0 and aborted (Engage's IL2CPP throws a C++ exception for every managed exception).
             // The rewriter's patch area is reported as CodeData+RX: modules sit back to back in the host, and an executable patch area reported as Code+RX would merge the previous module into the backward walk
+            // 补丁区在首址前的模块（patch_off < 0）：补丁区单报 CodeData+RX，数据与 bss 一直到映像尾
+            // Modules with the patch area before the base (patch_off < 0): the patch area is reported alone as CodeData+RX, and data and bss run to the end of the image
             module_t *mm = module_of(a); uint64_t off = (uint64_t)(a - mm->base), mb = (uint64_t)mm->base;
-            uint64_t ro = mm->ro_off ? mm->ro_off : mm->text_end, da = mm->data_off ? mm->data_off : ro, pa = mm->patch_off ? mm->patch_off : mm->size;
-            if (off < ro)      { base = mb;      size = ro;            state = 3/*Code*/;     perm = 5; }
+            uint64_t ro = mm->ro_off ? mm->ro_off : mm->text_end, da = mm->data_off ? mm->data_off : ro, pa = mm->patch_off > 0 ? (uint64_t)mm->patch_off : mm->size;
+            if (a < mm->base)  { base = mb + mm->patch_off; size = mm->patch_len; state = 4/*CodeData*/; perm = 5; }
+            else if (off < ro) { base = mb;      size = ro;            state = 3/*Code*/;     perm = 5; }
             else if (off < da) { base = mb + ro; size = da - ro;       state = 3/*Code*/;     perm = 1; }
             else if (off < pa) { base = mb + da; size = pa - da;       state = 4/*CodeData*/; perm = 3; }
             else               { base = mb + pa; size = mm->size - pa; state = 4/*CodeData*/; perm = 5; }
@@ -252,7 +262,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_AslrAddr:  v = (uint64_t)g_as;    break;   case I_AslrSize:  v = RESERVE;     break;
         case I_StackAddr: v = (uint64_t)g_stack; break;   case I_StackSize: v = g_stack_cap; break;
         case I_TotalMem: case I_TotalNonSys: v = APP_POOL; break;
-        case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + 0x4000000; break;
+        case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + 0x4000000 + big_bss_bytes(); break;
         case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
         case I_DebuggerAttached: v = 0; break;
         case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)

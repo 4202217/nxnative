@@ -272,6 +272,30 @@ static int rom_overlay_path(const mount_t *m, const char *rest, char *out, size_
     if (found) return 1;
     errno = ENOENT; return 0;
 }
+// 挂载名之后的路径按 Horizon 的 PathNormalizer 字面规整：去掉「.」、「..」退一级，退出根即错（同真机 ResultDirectoryUnobtainable，这里报不存在）。
+// 银河战士 生存恐惧的流式音频路径是「rom:/system/snd/../../sounds/streams/…」：以前遇「..」就报不存在，Atk 的流加载任务拿到意外的错误码中止（main+0x1225a8c）
+// The path after the mount name is normalized lexically as Horizon's PathNormalizer does: "." is dropped, ".." goes up one level, and going above the root is an error (ResultDirectoryUnobtainable on hardware, reported here as not found).
+// Metroid Dread's stream sound paths are "rom:/system/snd/../../sounds/streams/...": ".." used to be reported as not found, and Atk's stream load task got an unexpected error code and aborted (main+0x1225a8c)
+static int norm_rest(const char *rest, char *out, size_t n) {
+    size_t len = 0; out[0] = 0;
+    while (*rest) {
+        while (*rest == '/') rest++;
+        if (!*rest) break;
+        const char *end = strchr(rest, '/'); if (!end) end = rest + strlen(rest);
+        size_t k = end - rest;
+        if (k == 2 && rest[0] == '.' && rest[1] == '.') {
+            if (!len) { errno = ENOENT; return 0; }
+            while (len && out[len - 1] != '/') len--;
+            if (len) len--;
+            out[len] = 0;
+        } else if (!(k == 1 && rest[0] == '.')) {
+            if (len + 1 + k + 1 > n) { errno = ENAMETOOLONG; return 0; }
+            out[len++] = '/'; memcpy(out + len, rest, k); len += k; out[len] = 0;
+        }
+        rest = end;
+    }
+    return 1;
+}
 // create 只准最后一段尚不存在；中间目录仍需精确命中。
 // create only allows the last component to not exist yet; intermediate directories still need an exact match.
 static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create) {
@@ -281,7 +305,8 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
     for (int i = 0; i < g_nmnt; i++) {
         if (strlen(g_mnt[i].name) != ln || strncmp(g_mnt[i].name, p, ln)) continue;
         if (ro) *ro = g_mnt[i].ro;
-        const char *rest = c + 1;
+        char normed[1024]; const char *rest = c + 1;
+        if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) return 0; rest = normed; }   // 只有含「.」段的路径才规整，其余照旧逐段走 | only paths with "." components are normalized; the rest walk component by component as before
         if (g_mnt[i].overlay[0] && !create) return rom_overlay_path(&g_mnt[i], rest, out, n);
         strlcpy(out, g_mnt[i].dir, n);
         while (*rest) {
@@ -553,6 +578,8 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv；事务式存档：工作目录整�
     pthread_mutex_unlock(&g_lock);
     return r;
 }
+// SDK 11 的旧名：CommitSaveData(挂载名) 即后来的 Commit（银河战士 生存恐惧） | SDK 11's old name: CommitSaveData(mount name) is the later Commit (Metroid Dread)
+HLE_FORCE("_ZN2nn2fs14CommitSaveDataEPKc", "fsp-srv；同 Commit（SDK 11 旧名）", Result, h_fs_CommitSaveData, const char *name) { return h_fs_Commit(name); }
 HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv；挂载表常驻，卸载为空操作", void, h_fs_Unmount, const char *name) { (void)name; }
 
 // ---------- 文件 ----------
@@ -745,6 +772,10 @@ static int rm_tree(const char *p) {
 }
 HLE_FORCE("_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", "fsp-srv → 递归删除（只在可写挂载内）", Result, h_fs_DeleteDirRec, const char *path) {
     HP(path); RW(); return rm_tree(hp) ? err_res("rmtree", hp) : RES_OK;
+}
+// SDK 11（银河战士 生存恐惧）：删空目录 | SDK 11 (Metroid Dread): delete an empty directory
+HLE_FORCE("_ZN2nn2fs15DeleteDirectoryEPKc", "fsp-srv → rmdir(2)（目录须空）", Result, h_fs_DeleteDir, const char *path) {
+    HP(path); RW(); return rmdir(hp) ? err_res("rmdir", hp) : RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs10RenameFileEPKcS2_", "fsp-srv → rename(2)", Result, h_fs_RenameFile, const char *from, const char *to) {
     HP(from); RW(); char hp2[1024];

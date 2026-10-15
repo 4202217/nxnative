@@ -37,6 +37,7 @@
 | `zip_store` | IPA 里不再压缩的扩展名 |
 | `mem_reserve`、`mem_alias`、`mem_stack`、`app_pool` | 客体地址空间分区与应用内存池（`hle_svc.c`） |
 | `present_interval` | `game`（缺省）：按游戏设的出图间隔出帧，同 Switch（游戏设 2 就是 30 帧，iOS 上显示节拍随之 30 Hz；Engage 在 Switch 上设 2，2.0.0 `main` 的改写剪口让它设 1，见 `0100A6301214E000/game.tsv`）。`display`：不管游戏设多少，每个显示节拍一帧——只适合逻辑不按帧计数的游戏（D2R 的逻辑按自己的 25 Hz 走）。`DM_PRESENT_INTERVAL=game` / `display` 可覆盖，也可写在 `Documents/env.txt` |
+| `core_preempt` | `on` / `off`（缺省）：近似 Horizon 的按核抢占。一次 SVC 叫醒了钉在调用线程本核、优先级更高的线程，调用线程就等这些线程再次阻塞（最多 5 ms，`hle_thread.c`）。银河战士 生存恐惧的影片播放器靠它；马力欧开了读盘变慢（首帧 0.6 → 2.9 s），所以只有需要的游戏才开。`DM_PREEMPT=0` / `1` 可覆盖 |
 | `nvn_tex_base`、`nvn_tex_slots`、`nvn_samp_base`、`nvn_img_base`、`nvn_img_slots`、`nvn_ssbo_bases` | NVN 驱动常量段，按全库着色器实测 |
 | `shader_groups`、`shader_note` | `shader_split.py` 的来源组与映射表表头说明 |
 

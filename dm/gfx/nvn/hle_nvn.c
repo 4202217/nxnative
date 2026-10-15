@@ -878,8 +878,9 @@ static _Atomic uint64_t g_nvn_ns;   // 本帧在提交 / 出图里花的宿主�
 static pthread_mutex_t g_susp_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_susp_cv = PTHREAD_COND_INITIALIZER;
 static int g_susp, g_inflight_api;
-static void gfx_enter(void) { pthread_mutex_lock(&g_susp_mu); while (g_susp) pthread_cond_wait(&g_susp_cv, &g_susp_mu); g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); }
-static void gfx_leave(void) { pthread_mutex_lock(&g_susp_mu); g_inflight_api--; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu); }
+__thread _Atomic int dm_host_work;   // 见 hle.h（定义在这里：图形单测只编本文件，不编 hle_thread.c） | see hle.h (defined here: the graphics unit tests compile this file but not hle_thread.c)
+static void gfx_enter(void) { pthread_mutex_lock(&g_susp_mu); while (g_susp) pthread_cond_wait(&g_susp_cv, &g_susp_mu); g_inflight_api++; pthread_mutex_unlock(&g_susp_mu); dm_host_work++; }
+static void gfx_leave(void) { dm_host_work--; pthread_mutex_lock(&g_susp_mu); g_inflight_api--; pthread_cond_broadcast(&g_susp_cv); pthread_mutex_unlock(&g_susp_mu); }
 void dm_gfx_suspend(int on) {
     pthread_mutex_lock(&g_susp_mu);
     g_susp = on != 0;
@@ -1578,12 +1579,36 @@ NVN(nvnCommandBufferDownsampleTextureView, void, NVNcommandBuffer *c, const NVNt
 // CPU 写贴图（NVN WriteTexels）：贴图存储在池内存里、按 Tegra 块线性排布；整级解出 → 改区域 → 排回。写前解写保护并标脏，回放层下次用到时重传
 // CPU texture write (NVN WriteTexels): texture storage lives in pool memory in Tegra block-linear layout; decode the whole level → patch the region → re-encode.
 // Write protection is lifted and the range marked dirty first, so the replay layer re-uploads it the next time it is used
+// 非 3D 贴图：按块线性地址只写区域内的字节，不解整级。银河战士 生存恐惧的小地图（main+0x160e80）每个纹素调一次 WriteTexels（1×1 区域），
+// 原先每次都解出、改写、排回整级，主线程几分钟后整帧耗在这里（175 s 起帧数停住）。区域越界或格式不支持返回 −1，退回整级做法
+// Non-3D textures: only the bytes inside the region are written, by block-linear address, without decoding the whole level. Metroid Dread's minimap (main+0x160e80) calls WriteTexels once per texel (a 1×1 region);
+// previously every call decoded, patched and re-encoded the whole level, and after a few minutes the main thread spent whole frames there (frames stopped from 175 s). Returns −1 when the region is out of range or the format unsupported, falling back to the whole-level path
+static int write_region_bl(const tex_t *t, unsigned level, unsigned layer, const NVNcopyRegion *r, const uint8_t *src, size_t row, int bw, int bh, int bpb) {
+    uint32_t row_bytes, rows, slices, gbpb; uint64_t base; unsigned th, td;
+    if (nvn_deswizzle_geom(&t->d, level, layer, &row_bytes, &rows, &slices, &base, &th, &td, &gbpb) || (int)gbpb != bpb || r->xoffset < 0 || r->yoffset < 0) return -1;
+    uint32_t x0 = (uint32_t)(r->xoffset / bw) * (uint32_t)bpb, y0 = (uint32_t)(r->yoffset / bh);
+    size_t wb = (size_t)((r->width + bw - 1) / bw) * (size_t)bpb, hb = (size_t)((r->height + bh - 1) / bh);
+    if (x0 + wb > row_bytes || y0 + hb > rows) return -1;
+    for (size_t y = 0; y < hb; y++)
+        for (size_t x = 0; x < wb;) {   // GOB 内 16 字节一段连续 | 16-byte runs are contiguous within a GOB
+            uint32_t bx = x0 + (uint32_t)x; size_t n = 16 - bx % 16; if (n > wb - x) n = wb - x;
+            memcpy(t->mem + base + nvn_bl_offset(bx, y0 + (uint32_t)y, 0, row_bytes, rows, th, td), src + y * row + x, n); x += n;
+        }
+    return 0;
+}
 static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, size_t row, size_t img) {
     if (!t->mem) { LOG("【红】WriteTexels：贴图没有存储"); return; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
     if (!bpb) { ONCE_LOG("【红】WriteTexels：未知格式 %#x", t->d.format); return; }
     unsigned level = v && v->set_levels ? (unsigned)v->base_level : 0, layer0 = v && v->set_layers ? (unsigned)v->min_layer : 0;
     int is3d = t->d.target == NVN_TEXTURE_TARGET_3D, nz = r->depth ? r->depth : 1;
+    if (!is3d) {
+        size_t wb0 = (size_t)((r->width + bw - 1) / bw) * bpb, row0 = row ? row : wb0, img0 = img ? img : row0 * (size_t)((r->height + bh - 1) / bh);
+        dm_guest_write_prepare(t->mem, t->L.size);
+        int ok = 1;
+        for (int z = 0; z < nz && ok; z++) ok = !write_region_bl(t, level, layer0 + (unsigned)(r->zoffset + z), r, src + (size_t)z * img0, row0, bw, bh, bpb);
+        if (ok) { mtl_tex_cpu_written(t); return; }
+    }
     uint32_t lw = t->d.width >> level ? t->d.width >> level : 1, lh = t->d.height >> level ? t->d.height >> level : 1, lz = is3d ? (t->d.depth >> level ? t->d.depth >> level : 1) : 1;
     size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
     size_t wb = (size_t)((r->width + bw - 1) / bw) * bpb, hb = (size_t)(r->height + bh - 1) / bh;
@@ -1591,9 +1616,11 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     if (!img) img = row * hb;
     uint8_t *lin = malloc(lp * lr * lz); if (!lin) die("WriteTexels 分配失败");
     dm_guest_write_prepare(t->mem, t->L.size);
+    // 区域正好是整级（二维）时每个纹素都被覆盖，不必先解出旧内容（影片每帧整张写，1080p 省一次解排布） | when the region is exactly the whole level (2D) every texel is overwritten, so the old content need not be decoded first (movies write whole frames; saves one deswizzle per 1080p frame)
+    int whole = !is3d && !r->xoffset && !r->yoffset && (uint32_t)r->width == lw && (uint32_t)r->height == lh;
     for (int z = 0; z < nz; z++) {
         unsigned layer = is3d ? 0 : layer0 + (unsigned)(r->zoffset + z);
-        if ((is3d && z == 0) || !is3d) if (nvn_deswizzle(&t->d, level, layer, t->mem, lin, lp)) { ONCE_LOG("【红】WriteTexels 解排布失败（格式 %#x 目标 %d）", t->d.format, t->d.target); free(lin); return; }
+        if (((is3d && z == 0) || !is3d) && !whole) if (nvn_deswizzle(&t->d, level, layer, t->mem, lin, lp)) { ONCE_LOG("【红】WriteTexels 解排布失败（格式 %#x 目标 %d）", t->d.format, t->d.target); free(lin); return; }
         uint8_t *dst = lin + (is3d ? (size_t)(r->zoffset + z) * lp * lr : 0) + (size_t)(r->yoffset / bh) * lp + (size_t)(r->xoffset / bw) * bpb;
         for (size_t y = 0; y < hb; y++) memcpy(dst + y * lp, src + (size_t)z * img + y * row, wb);
         if (!is3d || z == nz - 1) nvn_swizzle(&t->d, level, layer, lin, lp, t->mem);
@@ -1602,4 +1629,22 @@ static void write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r
     mtl_tex_cpu_written(t);
 }
 NVN(nvnTextureWriteTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r, const void *src) { write_texels(CTX(t), (const view_t *)v, r, src, 0, 0); }
+// 影片解码器的原生贴图输出（DecoderMode 2，hle_movie.c）：整帧写进客户端贴图第 0 级，同 WriteTexels；返回贴图格式，对象不是贴图返回 −1
+// The movie decoder's native-texture output (DecoderMode 2, hle_movie.c): a whole frame into level 0 of the client texture, as WriteTexels does; returns the texture format, or −1 when the object is not a texture
+int nvn_host_write_texture(const void *nvntex, const void *src, int w, int h, size_t row, int *tw, int *th) {
+    const tex_t *t = nvntex;
+    uint32_t mg = 0; vm_size_t got = 0;   // 客户端给的值未必是指针：先试读 | the value the client gives is not necessarily a pointer: test-read first
+    if (!t || (uintptr_t)t & 7 || vm_read_overwrite(mach_task_self(), (vm_address_t)t, 4, (vm_address_t)&mg, &got) != KERN_SUCCESS || got != 4) return -1;
+    if (t->magic != MAGIC('T', 'E', 'X', 0)) return -1;
+    if (tw) *tw = (int)t->d.width;
+    if (th) *th = (int)t->d.height;
+    if (src) { NVNcopyRegion r = {0, 0, 0, w, h, 1}; write_texels(t, NULL, &r, src, row, 0); }
+    return (int)t->d.format;
+}
+// 宿主在 CPU 上做完的活：同步对象直接算已发信号（栅栏 0 恒已完成） | work the host finished on the CPU: the sync object counts as signalled at once (fence 0 is always complete)
+int nvn_host_signal_sync(void *nvnsync) {
+    sync_t *o = nvnsync;
+    if (!o || o->magic != MAGIC('S', 'Y', 'N', 'C')) return -1;
+    o->fence = 0; o->fenced = 1; return 0;
+}
 NVN(nvnTextureFlushTexels, void, const NVNtexture *t, const NVNtextureView *v, const NVNcopyRegion *r) { (void)t; (void)v; (void)r; }   // 统一内存 + 脏页跟踪：无需刷 | unified memory + dirty page tracking: nothing to flush
