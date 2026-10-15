@@ -54,7 +54,7 @@ To add a game:
 The script runs in Spyder (open it and press F5) or from a terminal. That Python needs lz4, capstone and fonttools. In Spyder it uses the settings at the top of the file:
 - the NSP folder and keys (asked for at run time if empty);
 - the version to pack (default: the profile's `package`);
-- the output IPA (default `~/Desktop/<the profile's ipa>`);
+- the output IPA (default: `<the profile's ipa>` in the NSP folder);
 - `APP_NAME`, the home-screen name. Left empty, it is the game name from the base NSP.
 
 From a terminal, options override those settings (`-h` lists them all):
@@ -65,7 +65,7 @@ python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [-p <version>]
 
 It exits with 0 when done and 1 on an error.
 
-The script picks the profile from the NSPs' title ID and accepts only the builds the profile lists. Every intermediate file goes to `<id>_build/` in the NSP folder. For a game with no profile, it writes a survey instead of an IPA. The survey lists the modules, SDK, engine, containers, rewrite sites, and imports compared with the host hooks.
+The script picks the profile from the NSPs' title ID and accepts only the builds the profile lists. Every intermediate file goes to `<id>_build/` in the NSP folder, the extracted game files to `<id>_build/extract/` (deleted once the IPA is built, unless `--keep-extracted`). For a game with no profile, it writes a survey instead of an IPA. The survey lists the modules, SDK, engine, containers, rewrite sites, and imports compared with the host hooks.
 
 ## Build step by step (Mac)
 

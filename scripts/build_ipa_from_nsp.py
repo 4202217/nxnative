@@ -5,7 +5,7 @@
 #   或在终端里 python3 scripts/build_ipa_from_nsp.py <NSP 文件夹> -k <prod.keys> [选项]（命令行给的值盖过「设置」，-h 看全部选项；
 #   终端不接键盘输入时缺的值不问、直接报错；成功退出码 0，出错 1，中断 130）。Spyder 的「运行配置」里填命令行选项也一样生效。
 # 只用三样东西：本仓库、放一个游戏 NSP 的文件夹（基础版 + 档案 shader_versions 列的更新都要；DLC 跳过，本移植不读追加内容）、prod.keys。
-# 所有中间产物都在 NSP 文件夹里的 <名>_build/：extract/（解出的游戏文件，出包后默认删掉）、tools/、patched_*/、shader/（着色器包与缓存，留着下次出包快）、logs/（每步的完整输出）、tmp/、ipa/。
+# 所有中间产物都在 NSP 文件夹里的 <名>_build/：extract/（解出的游戏文件，出包后默认删掉）、tools/、patched_*/、shader/（着色器包与缓存，留着下次出包快）、logs/（每步的完整输出）、tmp/、ipa/。出的 IPA 缺省也放在 NSP 文件夹里。
 # 着色器翻译器用仓内的 dm/gfx/tools/dmsh_xlate_bin（与 dmsh_chain.lock 指纹一致的那份；重编出的 dll 指纹不同，dmsh_build 会拒绝）。
 # 运行本文件的 Python 要有 lz4、capstone、fonttools；另需 Xcode、xcodegen、.NET SDK 10、zstd、spirv-cross。马力欧首次约 35 分钟（大头是着色器库），再跑约 10 分钟（着色器库走缓存）。密钥值一律不打印。
 # Unsigned IPA straight from the NSPs: identify the game (title ID → game profile dm/games/<id>/) → extract (nx_extract) → rewrite the code modules (patch_nso.py) → split out the shaders and check them against the profile's tables (shader_split.py)
@@ -14,7 +14,7 @@
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
 #   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game plus the updates listed in the profile's shader_versions are required; DLC is skipped, this port does not load add-on content), and prod.keys.
-# Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), tools/, patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/.
+# Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), tools/, patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes to the NSP folder by default.
 # The shader translator is the in-repo dm/gfx/tools/dmsh_xlate_bin (the build whose fingerprints match dmsh_chain.lock; a rebuilt dll has different fingerprints and dmsh_build refuses it).
 # The Python running this file needs lz4, capstone and fonttools; also needed: Xcode, xcodegen, .NET SDK 10, zstd, spirv-cross. For Mario the first run takes about 35 minutes (mostly the shader libraries); later runs take about 10 (the shader libraries come from the cache). Key values are never printed.
 import collections, ctypes, getpass, os, re, shutil, struct, subprocess, sys, threading, time, zlib
@@ -24,7 +24,7 @@ from pathlib import Path
 NSP_DIR = ''                            # 放 NSP 的文件夹（留空 = 运行时问） | folder holding the NSPs (empty = ask at run time)
 PROD_KEYS = ''                          # prod.keys 的路径（留空 = 运行时问） | path of prod.keys (empty = ask at run time)
 PACKAGE = ''                            # 打进 IPA 的版本（留空 = 游戏档案的 package；马力欧 'v327680' 即 1.2.1，或 'v0'） | version packed into the IPA (empty = the profile's package; Mario 'v327680' i.e. 1.2.1, or 'v0')
-OUT_IPA = ''                            # 输出的 IPA（留空 = ~/Desktop/<档案的 ipa>） | output IPA (empty = ~/Desktop/<the profile's ipa>)
+OUT_IPA = ''                            # 输出的 IPA（留空 = NSP 文件夹里的 <档案的 ipa>） | output IPA (empty = <the profile's ipa> in the NSP folder)
 APP_NAME = ''                           # 主屏上的 App 名（留空 = 基础版 NSP 里的游戏名） | app name on the home screen (empty = the game name in the base NSP)
 KEEP_EXTRACTED = False                  # 出包后保留解出的游戏文件（下次省去解包；与游戏文件一样大） | keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files)
 DM_ENV_FILE = ''                        # 可选：诊断包的环境开关文件（每行 KEY=VALUE） | optional: environment switches for a diagnostic build (one KEY=VALUE per line)
@@ -373,7 +373,7 @@ def parse_args(argv):
     ap.add_argument('nsp_dir', nargs='?', help='放一个游戏 NSP 的文件夹（缺省 = 设置 NSP_DIR，再没有就问）| folder holding one game\'s NSPs (default: the NSP_DIR setting, else asked)')
     ap.add_argument('-k', '--keys', help='prod.keys 的路径（缺省 = 设置 PROD_KEYS，再没有就问）| path of prod.keys (default: the PROD_KEYS setting, else asked)')
     ap.add_argument('-p', '--package', help='打进 IPA 的版本，如 v327680 / v0（缺省 = 游戏档案的 package）| version packed into the IPA, e.g. v327680 / v0 (default: the profile\'s package)')
-    ap.add_argument('-o', '--out', help='输出的 IPA（缺省 ~/Desktop/<档案的 ipa>）| output IPA (default ~/Desktop/<the profile\'s ipa>)')
+    ap.add_argument('-o', '--out', help='输出的 IPA（缺省 = NSP 文件夹里的 <档案的 ipa>）| output IPA (default: <the profile\'s ipa> in the NSP folder)')
     ap.add_argument('--app-name', help='主屏上的 App 名（缺省 = 基础版 NSP 里的游戏名）| app name on the home screen (default: the game name in the base NSP)')
     ap.add_argument('--keep-extracted', action='store_true', help='出包后保留解出的游戏文件 | keep the extracted game files after the IPA is built')
     ap.add_argument('--env-file', help='诊断包的环境开关文件（每行 KEY=VALUE）| environment switches for a diagnostic build (one KEY=VALUE per line)')
@@ -404,8 +404,10 @@ def main(args=None):
     pkg_ver = args.package or PACKAGE or g.get('package')
     if pkg_ver not in builds: raise BuildError(f"打进 IPA 的版本（-p / PACKAGE）只能是游戏档案登记的 | the version to pack (-p / PACKAGE) must be one the game profile registers: {', '.join(builds)}")
     versions = need + ([pkg_ver] if pkg_ver not in need else [])
-    out_ipa = Path(os.path.expanduser(args.out or OUT_IPA or f'~/Desktop/{g.get("ipa")}')).resolve()
+    out_ipa = Path(os.path.expanduser(args.out or OUT_IPA)).resolve() if (args.out or OUT_IPA) else nsp_dir / g.get('ipa')   # 缺省放在 NSP 文件夹里，与 NSP 和 <名>_build/ 同处 | by default in the NSP folder, next to the NSPs and <id>_build/
+    say(f'输出 IPA | output IPA: {out_ipa}')
     work = nsp_dir / f'{g.id}_build'
+    say(f'工作目录（解出的游戏文件在 extract/，出包后删掉，--keep-extracted 保留）| work folder (extracted game files in extract/, deleted after the IPA is built unless --keep-extracted): {work}')
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME 选档案；DM_ROOT / WORK 指到 <名>_build：各工具的缺省路径与临时目录都不出它 | DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
     env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'))
