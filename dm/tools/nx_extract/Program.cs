@@ -40,6 +40,9 @@ static class P {
             Console.WriteLine($"显示版本 | display version {System.Text.Encoding.ASCII.GetString(nacp, 0x3060, 0x10).TrimEnd('\0')}");
             Console.WriteLine($"名称 | name {TitleName(nacp)}");
             Directory.CreateDirectory(outDir); File.WriteAllBytes(Path.Combine(outDir, "control.nacp"), nacp);
+            var (icon, lang) = Icon(ctrl);   // App 图标用的游戏图标，存成 <输出目录>/icon.jpg（build_ipa.sh 取它） | the game icon for the app icon, saved as <output dir>/icon.jpg (build_ipa.sh picks it up)
+            if (icon != null) { File.WriteAllBytes(Path.Combine(outDir, "icon.jpg"), icon); Console.WriteLine($"图标 | icon {lang}（{icon.Length} 字节 | bytes）"); }
+            else Console.WriteLine("控制数据里没有图标 | no icon in the control data");
         }
         // 代码区：更新包的 ExeFS 是完整的，叠在基础上打开也一样 | Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
         IFileSystem exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
@@ -75,6 +78,21 @@ static class P {
     }
     static Nca Pick(List<Nca> l, NcaContentType t) { foreach (Nca n in l) if (n.Header.ContentType == t) return n; return null; }
 
+    // 图标：控制数据里每种语言一张 256×256 JPEG（/icon_<语言>.dat）。用英文的（美式英语，其次英式），都没有就按 NACP 的语言顺序取第一张
+    // Icon: the control data holds one 256x256 JPEG per language (/icon_<language>.dat). Use the English one (American, then British); if neither exists, take the first in NACP language order
+    static readonly string[] IconLangs = { "AmericanEnglish", "BritishEnglish", "Japanese", "French", "German", "LatinAmericanSpanish", "Spanish", "Italian",
+                                           "Dutch", "CanadianFrench", "Portuguese", "Russian", "Korean", "TraditionalChinese", "SimplifiedChinese", "BrazilianPortuguese" };
+    static (byte[], string) Icon(Nca ctrl) {
+        IFileSystem fs = ctrl.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
+        foreach (string lang in IconLangs) {
+            using var f = new UniqueRef<IFile>();
+            if (fs.OpenFile(ref f.Ref, $"/icon_{lang}.dat".ToU8Span(), OpenMode.Read).IsFailure()) continue;
+            f.Get.GetSize(out long n).ThrowIfFailure();
+            byte[] v = new byte[n]; f.Get.Read(out _, 0, v, ReadOption.None).ThrowIfFailure();
+            return (v, lang);
+        }
+        return (null, null);
+    }
     static byte[] Nacp(Nca ctrl) {   // 整份 control.nacp（0x4000 字节） | the whole control.nacp (0x4000 bytes)
         IFileSystem fs = ctrl.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
         using var f = new UniqueRef<IFile>();

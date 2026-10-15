@@ -100,7 +100,7 @@ hactool cannot read every update (Mario 1.2.1's patch NCA gives "Invalid BKTR la
 
 ## Build the iOS app (unsigned IPA)
 
-This needs the steps above and xcodegen. `build_ipa.sh` takes the rewritten modules from `$W/build/patched_<package>` and the RomFS from `$W/data/<package>/RomFS`, where `<package>` is the profile's `package` key. For another version, set `PATCHED` and `ROMFS`. The app also bundles `dm/font/standard.ttf` (copied from macOS's Arial Unicode; `STD_FONT=` overrides it) and the generated `nintendo_ext.ttf`. fontTools must be in `python3`, or set `FONT_PY=` to a Python that has it.
+This needs the steps above and xcodegen. `build_ipa.sh` takes the rewritten modules from `$W/build/patched_<package>` and the RomFS from `$W/data/<package>/RomFS`, where `<package>` is the profile's `package` key. For another version, set `PATCHED` and `ROMFS`. The app also bundles `dm/font/standard.ttf` (copied from macOS's Arial Unicode; `STD_FONT=` overrides it) and the generated `nintendo_ext.ttf`. fontTools must be in `python3`, or set `FONT_PY=` to a Python that has it. The app icon is the game's own English icon: `nx_extract` saves it as `icon.jpg` next to `ExeFS/` and `RomFS/`, and `build_ipa.sh` picks it up from beside the RomFS (`DM_ICON=` points at another image). Without it the home-screen icon is blank.
 
 ```
 # iOS shader libraries for the current chain version (writes $W/build/ios/dmsh_b/b-<chain version>/; about 15 min for Mario)
