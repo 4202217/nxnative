@@ -35,6 +35,7 @@ All of them default to `smbw`. To query a profile:
 | `romfs_marker` | A path that must exist in the RomFS |
 | `zip_store` | Extensions the IPA stores without compressing |
 | `mem_reserve`, `mem_alias`, `mem_stack`, `app_pool` | Guest address-space partition and application pool (`hle_svc.c`) |
+| `present_interval` | `game` (the default): frames are paced by the present interval the game sets, as on the Switch (Engage asks for 2, i.e. 30 fps; on iOS the display link then runs at 30 Hz). `display`: one frame per display tick whatever the game asks, which is only right for games whose logic does not count frames (D2R's runs on its own 25 Hz clock). `DM_PRESENT_INTERVAL=game` / `display` overrides it, also from `Documents/env.txt` |
 | `nvn_tex_base`, `nvn_tex_slots`, `nvn_samp_base`, `nvn_img_base`, `nvn_img_slots`, `nvn_ssbo_bases` | NVN driver constant segments, measured over all shaders |
 | `shader_groups`, `shader_note` | `shader_split.py` source groups and the map header note (Engage: `engine` for `data.unity3d` and `Resources/`, `assets` for the Addressables bundles) |
 

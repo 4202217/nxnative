@@ -26,7 +26,7 @@ This project is built on other people's work:
 | Game | Profile | NSPs the folder needs | State |
 |---|---|---|---|
 | Super Mario Bros. Wonder | `smbw` | the base game (1.0.0) and update 1.2.1 | **Playable on the iPhone with sound.** An 11-minute session through several levels ran at 60 fps with no crash. The IPA packs 1.2.1 (`-p v0` packs 1.0.0) and is about 3.9 GB |
-| Fire Emblem Engage | `fe_engage` | the base game and update 2.0.0 (DLC is skipped) | **In bring-up.** On the Mac it plays the prologue, battles included. The first iPhone run (2026-10-15) went through a new game's opening movie and name entry at 60 fps with no crash. After a trip to the background, one of the game's two audio outputs stopped being fed; this is being investigated. The IPA is about 15 GB |
+| Fire Emblem Engage | `fe_engage` | the base game and update 2.0.0 (DLC is skipped) | **In bring-up.** On the Mac it plays the prologue, battles included. The first iPhone run (2026-10-15) went through a new game's opening movie and name entry at 60 fps with no crash. After a trip to the background, one of the game's two audio outputs stopped being fed; this is being investigated. It runs at the game's own 30 fps: the 60 fps mods for Engage also fix player and NPC movement that runs too fast at 60, and that fix is not ported yet (`DM_PRESENT_INTERVAL=display` in `Documents/env.txt` gives 60 fps without it). The IPA is about 15 GB |
 
 For any other game, the script writes a survey instead of an IPA (see [Port another game](#port-another-game)).
 

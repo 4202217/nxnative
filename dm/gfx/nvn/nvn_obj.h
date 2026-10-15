@@ -175,6 +175,7 @@ uint64_t mtl_drawable_ns_take(void);   // 取走并清零：出图里等 nextDra
 void mtl_bw(uint64_t *load, uint64_t *store, uint64_t *full_rw_passes);   // 附件读入 / 写出累计字节、全量读写通道累计数 | Cumulative attachment load / store bytes, cumulative number of full load-store passes
 uint64_t mtl_udc_saved_bytes(void);                                      // DM_NVN_UNWRITTEN_DC 实际省下的写回字节 | Write-back bytes actually saved by DM_NVN_UNWRITTEN_DC
 int mtl_has_window(void);
+int mtl_fps_target(void);                                   // 目标帧数 30 / 60（省电模式、DM_FPS、游戏自己要 30 帧） | target frame rate 30 / 60 (power-saving mode, DM_FPS, the game itself asking for 30)
 int mtl_warm_wait(int timeout_ms);
 int mtl_link_active(void);
 int mtl_link_wait_tick(uint64_t timeout_ns);

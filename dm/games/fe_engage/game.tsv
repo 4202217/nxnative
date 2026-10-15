@@ -25,6 +25,13 @@ modules	main subsdk0 sdk
 romfs_marker	Data/data.unity3d
 zip_store	.bundle:.wem:.unity3d:.metallib
 
+# ---- 出图 | Presentation ----
+# 游戏设出图间隔 2（Switch 上 30 帧）。改版站点的 60 帧补丁都另改游戏自己的计时：Cobalt 的帧数插件（针对 2.0.0）说不改的话 60 帧下玩家与 NPC 移动加速（据点），
+# 别的补丁有菜单加速。标题待机到自动放片头的计时按真实时间算，30 / 60 帧下一样（Mac 实测：读取结束后 17.2 / 17.4 秒）。正确的 60 帧要先补按帧计数的那些逻辑
+# The game sets present interval 2 (30 fps on the Switch). The 60 fps patches on mod sites all change the game's own timing as well: Cobalt's frame-rate plugin (for 2.0.0) says that without it the player and NPCs move faster at 60 fps (in the hub),
+# and other patches mention faster menus. The timer from idling at the title to autoplaying the opening movie runs on real time, the same at 30 and 60 fps (measured on the Mac: 17.2 / 17.4 s after loading ends). A correct 60 fps needs the frame-counted logic fixed first
+present_interval	game
+
 # ---- 内存 | Memory ----
 # NPDM 声明系统资源 16 MB，所以 IsVirtualAddressMemoryEnabled 为真：nninitStartup 把整个空闲内存（应用池 − 64 MB）作虚拟地址内存交给 StandardAllocator，
 # 在别名区里一次分一整块地址区域（按 1 GB 对齐）。Unity 的低层虚拟分配器也自己 AllocateAddressRegion（每块按尺寸对齐，2.25 MB 占 4 MB、16.25 MB 占 20 MB），

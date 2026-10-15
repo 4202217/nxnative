@@ -35,6 +35,7 @@
 | `romfs_marker` | RomFS 里必须有的路径 |
 | `zip_store` | IPA 里不再压缩的扩展名 |
 | `mem_reserve`、`mem_alias`、`mem_stack`、`app_pool` | 客体地址空间分区与应用内存池（`hle_svc.c`） |
+| `present_interval` | `game`（缺省）：按游戏设的出图间隔出帧，同 Switch（Engage 设 2，即 30 帧；iOS 上显示节拍随之 30 Hz）。`display`：不管游戏设多少，每个显示节拍一帧——只适合逻辑不按帧计数的游戏（D2R 的逻辑按自己的 25 Hz 走）。`DM_PRESENT_INTERVAL=game` / `display` 可覆盖，也可写在 `Documents/env.txt` |
 | `nvn_tex_base`、`nvn_tex_slots`、`nvn_samp_base`、`nvn_img_base`、`nvn_img_slots`、`nvn_ssbo_bases` | NVN 驱动常量段，按全库着色器实测 |
 | `shader_groups`、`shader_note` | `shader_split.py` 的来源组与映射表表头说明 |
 
