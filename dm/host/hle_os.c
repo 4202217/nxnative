@@ -123,3 +123,31 @@ HLE("getentropy", int, g_getentropy, void *p, size_t n) {
     for (size_t i = 0; i < n; i += 8) { uint64_t v = dm_entropy64(); memcpy((uint8_t *)p + i, &v, n - i < 8 ? n - i : 8); }
     return 0;
 }
+
+// ---------- nn::mem::StandardAllocator::Allocate(size)：十三机兵防卫圈的大块按 64 KB 对齐 ----------
+// 十三机兵防卫圈 1.10（main 4b632573…）自带的 malloc（main+0x310550）就是 StandardAllocator::Allocate(size)。它的显存池存储用 malloc 拿、只按 4 KB 取整（main+0x3073b8），
+//   池内再按 64 KB 对齐（相对显存地址，main+0x30c118）切出三个环形堆，池大小正好是三者之和（main+0x307adc）。Switch 上池的显存地址按大页对齐；宿主的显存地址就是 CPU 地址，只有 4 KB 对齐，
+//   开头丢掉最多 60 KB，第三个环形堆（16 MB，命令缓冲记录期间主线程的分配用它）切不出来、基址留 0，第一次记录时分配就写空指针（main+0x2fa9a0，序章进第一场战斗时）。
+//   所以本构建 ≥ 64 KB 的分配改按 64 KB 对齐（Allocate(size, 0x10000)），池存储起点即 64 KB 对齐。别的构建原样转调
+// ---------- nn::mem::StandardAllocator::Allocate(size): 13 Sentinels' large blocks aligned to 64 KB ----------
+// 13 Sentinels 1.10's own malloc (main 4b632573…, main+0x310550) is StandardAllocator::Allocate(size). It gets the storage of a GPU memory pool from malloc rounded only to 4 KB (main+0x3073b8),
+//   then cuts three ring heaps out of the pool at 64 KB alignment relative to the GPU address (main+0x30c118), and the pool size is exactly their sum (main+0x307adc). On the Switch a pool's GPU address is aligned to a big page;
+//   the host's GPU address is the CPU address, which is only 4 KB aligned, so up to 60 KB is lost at the start, the third ring heap (16 MB, used by the main thread's allocations while a command buffer is recorded) does not fit and keeps base 0,
+//   and the first allocation while recording writes through a null pointer (main+0x2fa9a0, when the prologue enters its first battle).
+//   So on this build allocations of 64 KB or more are aligned to 64 KB (Allocate(size, 0x10000)), which puts the pool storage on a 64 KB boundary. Other builds forward unchanged
+#define DM_SENTINELS_110_BUILD "4b632573ca5c160eabb70519fb622718"
+static void *(*g_sa_alloc)(void *, size_t), *(*g_sa_alloc_al)(void *, size_t, size_t);
+static int g_sa_big_align;
+static pthread_once_t g_sa_once = PTHREAD_ONCE_INIT;
+static void sa_init(void) {
+    module_t *ms = NULL; for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "sdk")) ms = &g_mod[i];
+    g_sa_alloc = ms ? module_sym(ms, "_ZN2nn3mem17StandardAllocator8AllocateEm") : NULL;
+    g_sa_alloc_al = ms ? module_sym(ms, "_ZN2nn3mem17StandardAllocator8AllocateEmm") : NULL;
+    if (!g_sa_alloc || !g_sa_alloc_al) die("SDK 里找不到 StandardAllocator::Allocate");
+    g_sa_big_align = !strcmp(dm_main_build(), DM_SENTINELS_110_BUILD);
+    if (g_sa_big_align) LOG("StandardAllocator::Allocate：本构建 ≥ 64 KB 的分配按 64 KB 对齐（显存池存储，见 hle_os.c）");
+}
+HLE_FORCE("_ZN2nn3mem17StandardAllocator8AllocateEm", "原样转调 SDK；十三机兵防卫圈 1.10 的 ≥ 64 KB 分配按 64 KB 对齐（显存池起点）", void *, h_mem_SAAllocate, void *self, size_t size) {
+    pthread_once(&g_sa_once, sa_init);
+    return g_sa_big_align && size >= 0x10000 ? g_sa_alloc_al(self, size, 0x10000) : g_sa_alloc(self, size);
+}

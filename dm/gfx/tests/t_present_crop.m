@@ -1,6 +1,10 @@
 // 出图裁切回归：彩色8×8纹理，闭式RGBA期望；真实Metal渲染，不依赖游戏或跨局确定性。
 // Present crop regression: colored 8×8 texture, closed-form RGBA expectations; real Metal rendering, no dependence on the game or on cross-run determinism.
+// nvn_mtl.m 的 nvn_game_fps 是弱定义缺省值，hle_nvn.c 给强定义；两者进同一个编译单元就重定义，把弱的那份改名（本测试不看帧数档）
+// nvn_mtl.m's nvn_game_fps is a weak default and hle_nvn.c gives the strong definition; in one translation unit that is a redefinition, so the weak one is renamed (this test does not look at the frame-rate target)
+#define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
+#undef nvn_game_fps
 #include "../nvn/hle_nvn.c"
 uint64_t g_t0_ns;   // 宿主 main.c 的进程起点（hle_nvn 逐帧 @t_s 用），单测替身 | process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }

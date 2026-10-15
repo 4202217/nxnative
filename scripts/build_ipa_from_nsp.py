@@ -206,7 +206,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
 
     # 代码模块 | Code modules
     R += ['', '## 代码模块 | Code modules', '', '| 模块 module | 构建号 build ID | text / ro / data (MB) |', '|---|---|---|']
-    found, sdkver, comps, unity, mods = {}, set(), set(), set(), []
+    found, sdkver, comps, unity, mods, glslc = {}, set(), set(), set(), [], 0
     for p in sorted((ex / 'ExeFS').iterdir()):
         if p.read_bytes()[:4] != b'NSO0': continue
         img, bid, szs = nso_image(p); mods.append(p)
@@ -214,6 +214,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
         sdkver |= {m.decode() for m in re.findall(rb'(?i)NintendoSDK_nnSdk-([0-9_]+)', img)}   # SDK 12 写作 NintendoSdk_，16 写作 NintendoSDK_ | SDK 12 spells it NintendoSdk_, SDK 16 NintendoSDK_
         comps |= {m.decode() for m in re.findall(rb'SDK MW\+Nintendo\+([\w]+-[0-9_]+)', img)}
         unity |= {m.decode() for m in re.findall(rb'20[12][0-9]\.[0-9]+\.[0-9]+f[0-9]', img)} if p.name == 'main' else set()
+        if p.name == 'main': glslc = img.count(b'\x91\x68\x86\x19')   # GLSLC 编译输出的魔数（shader_split.py glslc_shaders） | magic of GLSLC compiler outputs (shader_split.py glslc_shaders)
         for pat, name in MARKERS:
             if pat in img: found.setdefault(name, []).append(p.name)
     npdm = ex / 'ExeFS/main.npdm'
@@ -258,9 +259,10 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     # 对移植意味着什么 | What it means for a port
     notes = []
     if 'NVN' not in found: notes.append('没找到 NVN：宿主只实现了 NVN | no NVN found: the host implements only NVN')
-    if extra: notes.append(f'除 main / sdk 外还有 {", ".join(extra)}：装载器能装最多 8 个模块，但打包与改写目前只处理 main + sdk | modules besides main / sdk: {", ".join(extra)}; the loader takes up to 8 modules, but packaging and rewriting handle only main + sdk today')
+    if extra: notes.append(f'除 main / sdk 外还有 {", ".join(extra)}：写进档案的 modules（装载顺序 main、subsdk*、sdk），改写、打包与装载都按它走（银河战士 生存恐惧、十三机兵防卫圈的 subsdk0 是 NintendoSDK_movie） | modules besides main / sdk: {", ".join(extra)}; list them in the profile\'s modules (load order main, subsdk*, sdk), which rewriting, packaging and loading all follow (subsdk0 of Metroid Dread and 13 Sentinels is NintendoSDK_movie)')
     if mags['UnityFS'] or 'Unity IL2CPP' in found: notes.append('Unity：着色器是 UnityFS 包与 data.unity3d 里的 Shader 对象，shader_split.py 经 unityfs.py 读出（按 Unity 2020.3 的 Switch 格式写成，别的 Unity 版本先核对） | Unity: the shaders are Shader objects in UnityFS bundles and data.unity3d, which shader_split.py reads through unityfs.py (written for Unity 2020.3\'s Switch format; check other Unity versions first)')
-    if not (mags['BNSH'] or mags['BAHS']) and not mags['UnityFS']: notes.append('顶层没有 BNSH / BAHS：着色器在压缩包或别的容器里，要先找到 | no BNSH / BAHS at the top level: the shaders are inside compressed or other containers and must be located first')
+    if glslc: notes.append(f'main 里有 {glslc} 处 GLSLC 编译输出的魔数（0x19866891）：着色器可能编进了 main（十三机兵防卫圈），档案开 shader_main_glslc 由 shader_split.py 读出 | main has {glslc} GLSLC compiler output magics (0x19866891): the shaders may be compiled into main (13 Sentinels); the profile key shader_main_glslc makes shader_split.py read them')
+    if not (mags['BNSH'] or mags['BAHS']) and not mags['UnityFS']: notes.append('顶层没有 BNSH / BAHS：着色器在压缩包、别的容器或 main 里，要先找到 | no BNSH / BAHS at the top level: the shaders are inside compressed or other containers or in main, and must be located first')
     major = {v.split('_')[0] for v in sdkver}
     if not major: notes.append('没找到 SDK 版本串 | no SDK version string found')
     elif major != {'16'}: notes.append(f'SDK {"/".join(sorted(major))}，不是马力欧的 16：NVN 对象尺寸、API 版本与服务布局按 SDK 不同（宿主已从 D2R 的 SDK 12 改成 16 的尺寸），按 docs/agents/03 逐项核对 | SDK {"/".join(sorted(major))}, not Mario\'s 16: NVN object sizes, API version and service layouts differ by SDK (the host was converted from D2R\'s SDK 12 to SDK 16 sizes); check them one by one per docs/agents/03')

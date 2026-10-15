@@ -84,6 +84,7 @@ static pthread_cond_t g_link_cv = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t g_link_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_link_tick_ns, g_link_tick_n;
 static uint64_t g_link_dropped;
+static double g_link_hold_until; static uint64_t g_link_held;   // 只在显示节拍回调线程里改：上一张按出图间隔要显示到的时刻（0 = 不留），因此没取新帧的节拍数 | Changed only on the display-link callback thread: the time the previous frame must stay on screen until by its present interval (0 = no hold), and the ticks that took no new frame because of it
 static int g_pq_inflight;   // 持 g_pq_mu：已提交给 GPU、完成回调还没来的上屏数 | Under g_pq_mu: number of presents committed to the GPU whose completion callback has not arrived yet
 int g_dm_present_link;   // 出图节拍模式（DM_PRESENT_LINK 的运行时值，同进程交替测量时直接改它）：0 = 自己取 drawable；1 = 显示节拍 60 Hz；2 = 120 Hz 节拍、游戏隔拍出一帧 | Present pacing mode (runtime value of DM_PRESENT_LINK, modified directly during same-process alternating measurement): 0 = acquire the drawable itself; 1 = display link at 60 Hz; 2 = display link at 120 Hz, the game presents a frame every other display-link tick
 static int g_present_latency = 1;
@@ -853,6 +854,11 @@ void mtl_drain(void) { present_drop_for_suspend(); mtl_present_flush(); mtl_init
 #include "../../host/front.h"
 static int g_red_once[80];
 #define RED_ONCE(k, ...) do { if (!g_red_once[k]++) MLOG("【红】" __VA_ARGS__); } while (0)
+// NVN 顶点流 0–15 → Metal 顶点缓冲槽：0–13 放 16–29（30 是常量回退缓冲），14、15 放 14、15。Metal 只有 0–30 共 31 个槽；翻译出的着色器只用 buffer(0)（参数缓冲），
+// 宿主自己的顶点函数不读顶点缓冲。十三机兵防卫圈用到流 15，原先的 16 + 流号越界（Metal 断言 buffer index (31) must be < 31）
+// NVN vertex streams 0–15 → Metal vertex buffer slots: 0–13 go to 16–29 (30 is the constant fallback buffer), 14 and 15 to 14 and 15. Metal has only the 31 slots 0–30; translated shaders use only buffer(0) (the argument buffer),
+// and the host's own vertex functions read no vertex buffers. 13 Sentinels uses stream 15, and the old 16 + stream went out of range (Metal assertion: buffer index (31) must be < 31)
+#define VB_SLOT(st) ((st) < 14 ? 16 + (st) : (st))
 
 // ---------- 贴图 → MTLTexture ----------
 // ---------- Texture → MTLTexture ----------
@@ -2797,10 +2803,10 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
         }
         int st = k->attr[a].stream;
         vf = vfmt_for_ct(vf, rf->v[v].ct, k->attr[a].fmt);
-        vd.attributes[loc].format = vf; vd.attributes[loc].offset = k->attr[a].offset; vd.attributes[loc].bufferIndex = 16 + st;
-        vd.layouts[16 + st].stride = k->stream[st].stride ? k->stream[st].stride : 4;
-        vd.layouts[16 + st].stepFunction = k->stream[st].stride == 0 ? MTLVertexStepFunctionConstant : k->stream[st].divisor ? MTLVertexStepFunctionPerInstance : MTLVertexStepFunctionPerVertex;
-        vd.layouts[16 + st].stepRate = k->stream[st].stride == 0 ? 0 : k->stream[st].divisor ? k->stream[st].divisor : 1;
+        vd.attributes[loc].format = vf; vd.attributes[loc].offset = k->attr[a].offset; vd.attributes[loc].bufferIndex = VB_SLOT(st);
+        vd.layouts[VB_SLOT(st)].stride = k->stream[st].stride ? k->stream[st].stride : 4;
+        vd.layouts[VB_SLOT(st)].stepFunction = k->stream[st].stride == 0 ? MTLVertexStepFunctionConstant : k->stream[st].divisor ? MTLVertexStepFunctionPerInstance : MTLVertexStepFunctionPerVertex;
+        vd.layouts[VB_SLOT(st)].stepRate = k->stream[st].stride == 0 ? 0 : k->stream[st].divisor ? k->stream[st].divisor : 1;
     }
     d.vertexDescriptor = vd;
     return d;
@@ -3241,6 +3247,7 @@ static int encode_args_(id<MTLCommandEncoder> en, NvShader *sh, int nvn_stage, i
     return 1;
 }
 static id<MTLBuffer> g_quad_ib; static uint64_t g_quad_gpu;
+static id<MTLBuffer> g_fan_ib; static uint64_t g_fan_gpu;   // 无索引三角扇：共享索引 (0, i, i+1)，基顶点 = first | non-indexed triangle fans: shared indices (0, i, i+1), base vertex = first
 static id<MTL4RenderCommandEncoder> rp_begin(void);
 // ---------- 通道前瞻：本通道是否用到深度 / 模板 ----------
 // 开通道时从当前绘制的下一条起往后扫，模拟深度模板状态的变化，直到本通道必然结束处（重设目标、拷贝、计算派发——
@@ -4834,7 +4841,7 @@ frz_plain:;
         if (!S.vbuf[s_].address) continue;
         void *mb; uint64_t mo;
         uint64_t gpu;
-        if (mtl_gpu_addr(S.vbuf[s_].address, 1, &mb, &mo, &gpu)) { enc_r_vbuf(en, 16 + s_, gpu); use_rec("buf", S.vbuf[s_].address, S.vbuf[s_].size, 0, NULL); }
+        if (mtl_gpu_addr(S.vbuf[s_].address, 1, &mb, &mo, &gpu)) { enc_r_vbuf(en, VB_SLOT(s_), gpu); use_rec("buf", S.vbuf[s_].address, S.vbuf[s_].size, 0, NULL); }
     }
     static id<MTLBuffer> zero; if (!zero) { zero = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(zero); }
     static uint64_t zero_gpu; if (!zero_gpu) zero_gpu = zero.gpuAddress;
@@ -4848,7 +4855,7 @@ frz_plain:;
     MTLPrimitiveType mp;
     switch (prim) {
         case 0: mp = MTLPrimitiveTypePoint; break; case 1: mp = MTLPrimitiveTypeLine; break; case 3: mp = MTLPrimitiveTypeLineStrip; break;
-        case 4: case 7: mp = MTLPrimitiveTypeTriangle; break; case 5: mp = MTLPrimitiveTypeTriangleStrip; break;
+        case 4: case 6: case 7: mp = MTLPrimitiveTypeTriangle; break; case 5: mp = MTLPrimitiveTypeTriangleStrip; break;   // 6 三角扇、7 四边形：Metal 没有，展开成三角形列表 | 6 triangle fan, 7 quads: Metal has neither, expanded into triangle lists
         default: RED_ONCE(19, "图元类型 %d 未实现", prim); return;
     }
     if (g_vis_counting) {   // 遮挡查询计数：本通道新槽（报告 / 清零后也换新槽） | Occlusion query counting: a new slot for this render pass (also switch to a new slot after a report / reset)
@@ -4926,11 +4933,39 @@ frz_plain:;
             g_quad_ib = [g_dev newBufferWithBytes:ix length:n * 24 options:MTLResourceStorageModeShared]; g_quad_gpu = g_quad_ib.gpuAddress; res_add(g_quad_ib); free(ix);
         }
         if (dw->count >= 4) enc_r_draw_indexed(en, mp, (dw->count / 4) * 6, MTLIndexTypeUInt32, g_quad_gpu, g_quad_ib.length, dw->instances > 0 ? dw->instances : 1, dw->first, dw->base_instance);
+    } else if (dw && prim == 6) {   // 三角扇（十三机兵防卫圈）：(0, i, i+1) 共享索引，first 作基顶点 | triangle fans (13 Sentinels): shared indices (0, i, i+1), first as the base vertex
+        if (!g_fan_ib) {
+            uint32_t n = 65536; uint32_t *ix = malloc(n * 12);
+            for (uint32_t i = 0; i < n; i++) { uint32_t v[3] = {0, i + 1, i + 2}; memcpy(ix + i * 3, v, 12); }
+            g_fan_ib = [g_dev newBufferWithBytes:ix length:n * 12 options:MTLResourceStorageModeShared]; g_fan_gpu = g_fan_ib.gpuAddress; res_add(g_fan_ib); free(ix);
+        }
+        if (dw->count >= 3) enc_r_draw_indexed(en, mp, (dw->count - 2) * 3, MTLIndexTypeUInt32, g_fan_gpu, g_fan_ib.length, dw->instances > 0 ? dw->instances : 1, dw->first, dw->base_instance);
     } else if (dw) {
         if (dw->count && (dw->instances > 1 || dw->base_instance)) enc_r_draw_instanced(en, mp, dw->first, dw->count, dw->instances > 0 ? dw->instances : 1, dw->base_instance);
         else if (dw->count) enc_r_draw(en, mp, dw->first, dw->count);
     } else {
-        if (prim == 7) { RED_ONCE(20, "带索引的四边形未实现"); return; }
+        if (prim == 6 || prim == 7) {   // 带索引的三角扇 / 四边形（十三机兵防卫圈）：回放时从客体内存读索引，展开成 32 位三角形列表放进本帧竞技场（同 8 位索引）
+                                        // indexed triangle fans / quads (13 Sentinels): at replay the indices are read from guest memory and expanded into a 32-bit triangle list in this frame's arena (as for 8-bit indices)
+            int isz = di->itype == 0 ? 1 : di->itype == 1 ? 2 : 4;
+            uint32_t nt = prim == 7 ? (uint32_t)(di->count / 4) * 2 : di->count >= 3 ? (uint32_t)di->count - 2 : 0;
+            if (!nt) return;
+            void *mb; uint64_t mo; const uint8_t *src;
+            if (!mtl_addr(di->ibuf, (uint64_t)di->count * isz, &mb, &mo) || !(src = [(__bridge id<MTLBuffer>)mb contents])) { RED_ONCE(22, "索引缓冲不在内存池里"); return; }
+            if (pend_hits(di->ibuf, (uint64_t)di->count * isz)) RED_ONCE(73, "三角扇 / 四边形索引缓冲本提交里有 GPU 侧写入：按当前内容展开");
+            src += mo;
+            #define IX(i) (isz == 1 ? (uint32_t)src[i] : isz == 2 ? (uint32_t)((const uint16_t *)src)[i] : ((const uint32_t *)src)[i])
+            id<MTLBuffer> ab; size_t off = arena_alloc(((size_t)nt * 12 + 15) & ~(size_t)15, &ab);
+            uint32_t *d = (uint32_t *)((uint8_t *)ab.contents + off);
+            for (uint32_t t = 0; t < nt; t++) {
+                if (prim == 6) { d[3 * t] = IX(0); d[3 * t + 1] = IX(t + 1); d[3 * t + 2] = IX(t + 2); }
+                else { uint32_t q = (t >> 1) * 4, h = t & 1; d[3 * t] = IX(q); d[3 * t + 1] = IX(q + 1 + h); d[3 * t + 2] = IX(q + 2 + h); }
+            }
+            #undef IX
+            use_rec("buf", di->ibuf, (uint64_t)di->count * isz, 0, NULL);
+            enc_r_draw_indexed(en, mp, nt * 3, MTLIndexTypeUInt32, g_cur_arena->gpu + off, (NSUInteger)nt * 12, di->instances ? di->instances : 1, di->base_vertex, di->base_instance);
+            if (g_rt_range_pending) { PD("j rt_level_range pass=%llu vc=%u", g_stat_pass, (unsigned)di->count); g_rt_range_pending = 0; }
+            return;
+        }
         if (di->itype == 0) {   // 8 位索引：Metal 只有 16 / 32 位。回放时从客体内存读出、展开成 16 位放进本帧竞技场（SMBW 的全屏通道与最后拷进窗口那一下都用 8 位索引，不展开就整屏黑）
                                 // 8-bit indices: Metal only has 16 / 32-bit. At replay they are read from guest memory and widened to 16-bit in this frame's arena (SMBW's full-screen passes and the final copy into the window all use 8-bit indices; without this the whole screen is black)
             if (!di->count) return;
@@ -6133,8 +6168,8 @@ static int present_now(const tex_t *t, double period, uint64_t frame, uint64_t t
             for (int i = 1; i < 300; i++) { double v = a[i]; int j = i - 1; while (j >= 0 && a[j] > v) { a[j + 1] = a[j]; j--; } a[j + 1] = v; }
             double b[300]; memcpy(b, e2e, sizeof b);
             for (int i = 1; i < 300; i++) { double v = b[i]; int j = i - 1; while (j >= 0 && b[j] > v) { b[j + 1] = b[j]; j--; } b[j + 1] = v; }
-            MLOG("显示节拍 至 %llu：节拍 300、出图 %llu、空节拍 %llu、合并丢弃旧帧 %llu；提交领先目标上屏 p50 %.3f ms / 最小 %.3f ms；游戏入队到目标上屏 p50 %.3f ms / 最小 %.3f / 最大 %.3f ms",
-                 (unsigned long long)g_link_tick_n, (unsigned long long)g_present_n, (unsigned long long)(g_link_tick_n - g_present_n),
+            MLOG("显示节拍 至 %llu：节拍 300、出图 %llu、空节拍 %llu（其中按出图间隔留拍 %llu）、合并丢弃旧帧 %llu；提交领先目标上屏 p50 %.3f ms / 最小 %.3f ms；游戏入队到目标上屏 p50 %.3f ms / 最小 %.3f / 最大 %.3f ms",
+                 (unsigned long long)g_link_tick_n, (unsigned long long)g_present_n, (unsigned long long)(g_link_tick_n - g_present_n), (unsigned long long)g_link_held,
                  (unsigned long long)g_link_dropped, a[149], a[0], b[149], b[0], b[299]);
         }
     }
@@ -6206,6 +6241,11 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_mutex_unlock(&g_link_mu);
     pthread_mutex_lock(&g_pq_mu);
     if (!g_dm_present_link || g_pq_read == g_pq_in) { pthread_mutex_unlock(&g_pq_mu); return; }
+    // 上一张的出图间隔 ≥ 2（周期 > 25 ms）：显示满它的周期再取下一张，同 Switch 的「隔 N 个垂直同步换帧」。节拍档仍是 60 Hz 时也对（马力欧 1.2.1 单帧设 2，见 hle_nvn.c nvn_game_fps）；
+    //   原先每拍都取最新一张，这一帧连同游戏为它多走的一步时间只显示 16.7 ms，看起来一下快进
+    // The previous frame's present interval was >= 2 (period > 25 ms): keep it on screen for its whole period before taking the next one, as the Switch flips only every N vertical syncs. This also holds while the link runs at 60 Hz (Mario 1.2.1 sets 2 for single frames, see nvn_game_fps in hle_nvn.c);
+    //   before, every tick took the newest frame, so that frame, carrying the extra time step the game advanced for it, was shown for only 16.7 ms and the game looked like it jumped ahead
+    if (g_link_hold_until > 0 && update.targetPresentationTimestamp < g_link_hold_until - 0.002) { g_link_held++; pthread_mutex_unlock(&g_pq_mu); return; }
     uint64_t first = g_pq_read + 1, ticket = g_pq_in;
     pq_item it = g_pq[(g_pq_in - 1) % PQ]; g_link_it_tin = it.t_in;
     g_pq_read = g_pq_in;
@@ -6215,6 +6255,7 @@ __attribute__((weak)) uint64_t dm_focus_in_since(void) { return 0; }
     pthread_mutex_unlock(&g_pq_mu);
     int submitted;
     @autoreleasepool { submitted = present_now(&it.t, it.period, it.frame, ticket, it.crop, update.drawable, update.targetPresentationTimestamp); }
+    g_link_hold_until = submitted && it.period > 0.025 ? update.targetPresentationTimestamp + it.period : 0;
     if (!submitted) {
         pthread_mutex_lock(&g_pq_mu);
         if (ticket > g_pq_done) g_pq_done = ticket;

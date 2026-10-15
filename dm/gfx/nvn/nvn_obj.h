@@ -29,6 +29,7 @@ FITS(dpool_t, NVNtexturePool); FITS(dpool_t, NVNsamplerPool);
 typedef struct {
     NVNdevice *dev; nvn_texdesc d; pool_t *pool; int64_t off;
     uint8_t has_layout, layout[8];
+    const void *pkg_data;                // TextureBuilderSetPackagedTextureData：TextureInitialize 时拷进存储（十三机兵防卫圈） | TextureBuilderSetPackagedTextureData: copied into the storage at TextureInitialize (13 Sentinels)
     uint8_t set_swz; uint16_t swz;       // TextureBuilderSetSwizzle：r | g << 3 | b << 6 | a << 9（NVN 与 Metal 的通道枚举同值：0 零 1 一 2 R 3 G 4 B 5 A） | TextureBuilderSetSwizzle: r | g << 3 | b << 6 | a << 9 (NVN and Metal channel enums have the same values: 0 zero 1 one 2 R 3 G 4 B 5 A)
 } tex_builder_t;                                                                             FITS(tex_builder_t, NVNtextureBuilder);
 // 字段顺序压到 0x80：较新 SDK（SMBW，NVN 55）按 0x80 字节分配 NVNtexture（main 0x978c3c 起分配、0x978cd4 初始化），

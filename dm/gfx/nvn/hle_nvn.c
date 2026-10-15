@@ -259,6 +259,13 @@ NVN(nvnTextureInitialize, NVNboolean, NVNtexture *t, const NVNtextureBuilder *b)
     nvn_tex_layout(&o->d, &o->L);
     o->mem = s->pool && s->pool->mem ? s->pool->mem + s->off : NULL;
     o->serial = nvn_new_serial();
+    // 见 SetPackagedTextureData。线性贴图不按预排布重传：CPU 可见池里的直接建在池缓冲上（tex_linear），读的就是拷进去的内容
+    // See SetPackagedTextureData. Linear textures are not re-uploaded as packaged: in a CPU-visible pool they are created on the pool buffer (tex_linear) and read what was copied in
+    if (s->pkg_data && o->mem) {
+        memcpy(o->mem, s->pkg_data, o->L.size);
+        if (!(o->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET))) mtl_tex_cpu_written(o);
+        else if (o->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) { static int once_; if (!once_++) LOG("[nvn] 【红】线性贴图带预排布数据、池 CPU 不可见：宿主建私有贴图，数据不上传（%ux%u 格式 %#x）", o->d.width, o->d.height, o->d.format); }
+    }
     OLOG("Texture %p %ux%ux%u lv%u fmt=%#x tgt=%d flags=%#x size=%#llx", (void *)t, o->d.width, o->d.height, o->d.depth,
          o->d.levels, o->d.format, o->d.target, o->d.flags, o->L.size);
     return 1;
@@ -921,6 +928,7 @@ static const char *const g_nops[] = {
     "nvnCommandBufferPushDebugGroupDynamic",
     "nvnCommandBufferPopDebugGroup",
     "nvnCommandBufferInsertDebugMarkerDynamic",
+    "nvnCommandBufferInsertDebugMarker",   // 十三机兵防卫圈 | 13 Sentinels
     "nvnCommandBufferWaitEvent",
     "nvnWindowFinalize",
 };
@@ -1199,9 +1207,14 @@ static void sleep_until_ns(uint64_t dl) {   // 单调时钟上的绝对时刻 | 
 static int g_hz = -1, g_display_mode;
 static _Atomic int g_game_itv = 1;   // 按游戏间隔出帧时，游戏此刻设的出图间隔（game 模式下 2 = 30 帧，nvn_game_fps 报给图形层定显示节拍） | when pacing by the game's interval, the interval the game currently sets (in game mode 2 = 30 fps; nvn_game_fps reports it to the graphics layer, which sets the display link from it)
 void nvn_present_config(int hz, int display_mode) { g_hz = hz; g_display_mode = display_mode; }
-// 游戏自己要的帧数：game 模式且出图间隔 ≥ 2 时 30（显示节拍随之 30 Hz，mtl_fps_target），否则 60。间隔 3 以上（20 帧以下）没有对应的节拍档，按 30 走
-// The frame rate the game itself asks for: 30 in game mode with a present interval >= 2 (the display link follows at 30 Hz, mtl_fps_target), otherwise 60. Intervals of 3 or more (20 fps or less) have no matching display-link mode and run at 30
-int nvn_game_fps(void) { return g_hz > 0 && !g_display_mode && atomic_load(&g_game_itv) >= 2 ? 30 : 60; }
+static _Atomic uint64_t g_itv2_since;   // 游戏这一段连续设间隔 ≥ 2 的起点（now_ns；0 = 此刻是 1） | start of the game's current run of intervals >= 2 (now_ns; 0 = it is 1 now)
+// 游戏自己要的帧数：game 模式且出图间隔 ≥ 2 持续满 1 秒时 30（显示节拍随之 30 Hz，mtl_fps_target），否则 60；间隔回到 1 立即 60。间隔 3 以上（20 帧以下）没有对应的节拍档，按 30 走。
+// 要持续 1 秒：马力欧 1.2.1 按上一帧的耗时动态选间隔（main+0xcfd24），一帧慢了下一帧设 2、再设回 1（iPhone 两分钟 123 次）。逐帧跟着切显示节拍档会来回抖；
+//   单帧的间隔 2 由显示节拍那边按这一帧的周期多留一拍（nvn_mtl.m 节拍回调），不靠切档
+// The frame rate the game itself asks for: 30 in game mode when the present interval has been >= 2 for a full second (the display link follows at 30 Hz, mtl_fps_target), otherwise 60; back to 60 at once when the interval returns to 1. Intervals of 3 or more (20 fps or less) have no matching display-link mode and run at 30.
+// The one-second hold: Mario 1.2.1 picks the interval from the previous frame's time (main+0xcfd24), setting 2 for the frame after a slow one and then 1 again (123 times in two minutes on an iPhone). Following that frame by frame would flap the display-link mode;
+//   a single interval-2 frame is instead kept on screen for its own period by the display-link callback (nvn_mtl.m), without changing the mode
+int nvn_game_fps(void) { uint64_t s = atomic_load(&g_itv2_since); return g_hz > 0 && !g_display_mode && s && now_ns() - s >= 1000000000ull ? 30 : 60; }
 static void present_cfg(const win_t *o) {
     if (g_hz >= 0) return;
     // 间隔模式按游戏档案（present_interval，缺省 game）：是否按游戏设的出图间隔出帧，取决于游戏逻辑是否按帧计数，各游戏不同。环境变量可覆盖，也可覆盖固定 60 Hz。
@@ -1223,7 +1236,12 @@ static void present_cfg(const win_t *o) {
 }
 static uint64_t present_period(const win_t *o) {
     present_cfg(o);
-    if (o->interval != atomic_load(&g_game_itv)) atomic_store(&g_game_itv, o->interval > 0 ? o->interval : 1);
+    int was = atomic_load(&g_game_itv), want = o->interval > 0 ? o->interval : 1;
+    if (want != was) {
+        atomic_store(&g_game_itv, want);
+        if (want < 2) atomic_store(&g_itv2_since, 0);
+        else if (was < 2) atomic_store(&g_itv2_since, now_ns() | 1);   // | 1：起点不会是 0 | | 1: the start is never 0
+    }
     int itv = g_display_mode ? 1 : o->interval > 0 ? o->interval : 1, hz = g_hz;
     return hz > 0 ? (uint64_t)itv * 1000000000ull / (uint64_t)hz : 0;
 }
@@ -1236,6 +1254,11 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     { static int gate;
       if (!gate && g_nvn_loadscreen_up && g_nvn_loadscreen_up()) { gate = 1; int ms = mtl_warm_wait(15000); if (ms) LOG("[nvn] 进局读取画面等管线预热 %d ms", ms); } }
     present_cfg(o);
+    {   // 测试开关 DM_TEST_PRESENT_LAG=每 N 次出图,毫秒：在第 N、2N…次出图前多睡这么久，模仿真机偶尔慢一帧（马力欧 1.2.1 随后设出图间隔 2，验显示节拍按间隔留拍）。产品不设
+        // Test switch DM_TEST_PRESENT_LAG=every N presents,milliseconds: sleep that long before the Nth, 2Nth… present, imitating an occasional slow frame on a phone (Mario 1.2.1 then sets present interval 2; checks that the display link holds frames by interval). Not set in the product
+        static int lag_n = -1, lag_ms; if (lag_n < 0) { const char *e = getenv("DM_TEST_PRESENT_LAG"); lag_n = 0; if (e && sscanf(e, "%d,%d", &lag_n, &lag_ms) == 2 && lag_n > 0) LOG("DM_TEST_PRESENT_LAG：每 %d 次出图多睡 %d ms", lag_n, lag_ms); else lag_n = 0; }
+        if (lag_n && o->presents % lag_n == 0) usleep((useconds_t)lag_ms * 1000);
+    }
     gfx_enter();
     uint64_t t0 = now_ns();
     if (idx >= 0 && idx < o->ntex && idx < 4) o->ticket[idx] = mtl_present(CTX(o->tex[idx]), present_period(o) / 1e9, o->crop);   // 只入队，立即返回 | enqueue only, return immediately
@@ -1441,7 +1464,9 @@ NVN(nvnTextureBuilderSetSwizzle, void, NVNtextureBuilder *b, NVNtextureSwizzle r
 NVN(nvnTextureBuilderSetDepthStencilMode, void, NVNtextureBuilder *b, NVNtextureDepthStencilMode m) { (void)b; if (m) ONCE_LOG("TextureBuilderSetDepthStencilMode %d：宿主按深度读", (int)m); }
 NVN(nvnTextureBuilderGetStorageClass, NVNstorageClass, const NVNtextureBuilder *b) { (void)b; return 0; }
 NVN(nvnTextureBuilderGetZCullStorageSize, size_t, const NVNtextureBuilder *b) { (void)b; return 0; }
-NVN(nvnTextureBuilderSetPackagedTextureData, void, NVNtextureBuilder *b, const void *data) { (void)b; (void)data; ONCE_LOG("【红】TextureBuilderSetPackagedTextureData：宿主未实现（数据指针忽略）"); }
+// 预排布贴图数据在 CPU 内存里（不由游戏写进池）：NVN 在 TextureInitialize 时把它拷进贴图存储（可压缩池 CPU 写不进，要驱动代拷）。十三机兵防卫圈的贴图都这样建
+// Packaged texture data in CPU memory (not written into the pool by the game): NVN copies it into the texture storage at TextureInitialize (the CPU cannot write a compressible pool; the driver copies). 13 Sentinels creates all its textures this way
+NVN(nvnTextureBuilderSetPackagedTextureData, void, NVNtextureBuilder *b, const void *data) { TB(b)->pkg_data = data; }
 NVN(nvnTextureGetFormat, NVNformat, const NVNtexture *t) { return (NVNformat)CTX(t)->d.format; }
 NVN(nvnTextureGetTarget, NVNtextureTarget, const NVNtexture *t) { return (NVNtextureTarget)CTX(t)->d.target; }
 NVN(nvnTextureSetDebugLabel, void, NVNtexture *t, const char *s) { (void)t; (void)s; }

@@ -773,6 +773,21 @@ static int rm_tree(const char *p) {
 HLE_FORCE("_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", "fsp-srv → 递归删除（只在可写挂载内）", Result, h_fs_DeleteDirRec, const char *path) {
     HP(path); RW(); return rm_tree(hp) ? err_res("rmtree", hp) : RES_OK;
 }
+// 清空目录、留下目录本身（十三机兵防卫圈） | empty a directory and keep the directory itself (13 Sentinels)
+HLE_FORCE("_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", "fsp-srv → 递归删除目录内容、保留目录（只在可写挂载内）", Result, h_fs_CleanDirRec, const char *path) {
+    HP(path); RW();
+    DIR *d = opendir(hp); if (!d) return err_res("cleandir", hp);
+    struct dirent *e; char c[1024]; int rc = 0;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(c, sizeof c, "%s/%s", hp, e->d_name);
+        rc |= e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
+    }
+    closedir(d);
+    return rc ? err_res("cleandir", hp) : RES_OK;
+}
+// 文件数据缓存（fs 进程里的全局读缓存）：宿主直读页缓存，接下缓冲区不用 | file data cache (a global read cache in the fs process): the host reads through the page cache and leaves the buffer unused
+HLE_FORCE("_ZN2nn2fs25EnableGlobalFileDataCacheEPvm", "fsp-srv 全局读缓存；宿主不用", void, h_fs_EnableGlobalCache, void *buf, size_t sz) { (void)buf; (void)sz; }
 // SDK 11（银河战士 生存恐惧）：删空目录 | SDK 11 (Metroid Dread): delete an empty directory
 HLE_FORCE("_ZN2nn2fs15DeleteDirectoryEPKc", "fsp-srv → rmdir(2)（目录须空）", Result, h_fs_DeleteDir, const char *path) {
     HP(path); RW(); return rmdir(hp) ? err_res("rmdir", hp) : RES_OK;

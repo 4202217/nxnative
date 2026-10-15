@@ -147,6 +147,11 @@ HLE_FORCE("_ZN2nn3hid6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleE
 // Mouse / keyboard: not connected
 HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
 HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
+// 单条（十三机兵防卫圈每帧调；没接管时 sdk 里没初始化的鼠标资源中止）：MouseState 0x28 字节 {采样号 i64, x, y, dx, dy, 滚轮 dx, dy, 按键, 属性}，属性 0 = 未连接
+// Single state (13 Sentinels calls it every frame; without the hook the sdk aborts on its uninitialized mouse resource): MouseState is 0x28 bytes {sampling number i64, x, y, dx, dy, wheel dx, dy, buttons, attributes}; attributes 0 = not connected
+HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", "鼠标状态：未连接（MouseState 0x28 字节清零）", void, h_hid_MouseState, void *s) {
+    memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;
+}
 HLE_FORCE("_ZN2nn3hid18InitializeKeyboardEv", "键盘；宿主不提供", void, h_hid_InitKbd, void) {}
 HLE_FORCE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", "键盘状态：未连接（KeyboardState 0x30 字节清零）", void, h_hid_KbdState, void *s) {
     memset(s, 0, 0x30); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;

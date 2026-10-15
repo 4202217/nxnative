@@ -84,6 +84,16 @@ HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditi
               ai->dst = tm.tm_isdst > 0; ai->offset = (int32_t)tm.tm_gmtoff; }
     return RES_OK;
 }
+// 反向：本地日历 → 绝对秒（十三机兵防卫圈）。夏令时切换时一个本地时刻可对应 0 或 2 个绝对秒，宿主 mktime 只给一个
+// The reverse: local calendar → absolute seconds (13 Sentinels). Around a daylight-saving switch one local time maps to 0 or 2 absolute seconds; the host's mktime gives one
+HLE_FORCE("_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeE",
+          "连 time 服务的时区规则；改用宿主 mktime", Result, h_time_ToPosixTime, int *count, int64_t *out, int n, const CalendarTime *ct) {
+    struct tm tm = {.tm_year = ct->year - 1900, .tm_mon = ct->month - 1, .tm_mday = ct->day, .tm_hour = ct->hour, .tm_min = ct->minute, .tm_sec = ct->second, .tm_isdst = -1};
+    time_t t = mktime(&tm);
+    if (count) *count = n > 0;
+    if (n > 0 && out) out[0] = (int64_t)t;
+    return RES_OK;
+}
 // 本地时刻换算强制接宿主 libc：SDK 自带的 localtime / localtime_r / mktime 没有时区数据、恒按 UTC（宿主实测：编年史「首次发现」由
 // main+0xb04d34 调 localtime 再 strftime 出，差 8 小时）。真机 Switch 的 SDK 按系统时区换算，这里跟宿主系统时区走才一致；
 // 宿主 TZ 平时 = 系统时区，只在 DM_FIXED_TIME 确定性对拍时钉 UTC（main.c）。struct tm 布局两边相同（9 个 int、long 偏移、时区名指针）。

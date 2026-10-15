@@ -51,6 +51,8 @@ import collections, concurrent.futures as cf, hashlib, json, os, re, struct, sub
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
 GAME = _game.load()   # 当前游戏档案（DM_GAME，必给）：来源组规则与表头说明 | the current game profile (DM_GAME, required): source group rules and the table header note
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
+GLSLC = GAME.get('shader_main_glslc', 'off') == 'on'   # main 里的 GLSLC 编译输出（glslc_shaders） | GLSLC compiler outputs in main (glslc_shaders)
+SEPARABLE = GAME.get('shader_separable', 'off') == 'on'   # 单阶段程序、绘制时按阶段拼（separable_pairs） | single-stage programs combined per stage at draw time (separable_pairs)
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
@@ -117,6 +119,25 @@ def mshd_shaders(d, label):
     if len(out) % 2: red(f'{label} MSHD：{len(out)} 个阶段，不成对')
     return out
 
+def glslc_shaders(d, label):
+    """GLSLC 编译输出（十三机兵防卫圈 main 只读段里 838 个，各一个阶段）：魔数 0x19866891 起，+0x44 = 整份长；份内恰有一个控制段，代码区紧跟其后（控制段 +0x20 = 控制段长）。
+    魔数是 4 字节，别的游戏的 main 里也有（火焰纹章 Engage 有 11 份），所以只在档案 shader_main_glslc 开时读，且只收三重核对都过的
+    GLSLC compiler outputs (838 in 13 Sentinels' main read-only segment, one stage each): from the magic 0x19866891, +0x44 = the whole output's length; each output holds exactly one control section with the code area right after it (control +0x20 = control length).
+    The magic is only 4 bytes and other games' mains have it too (Fire Emblem Engage has 11), so this runs only when the profile's shader_main_glslc is on, and keeps only outputs that pass the triple check"""
+    out = []
+    for m in re.finditer(b'\x91\x68\x86\x19', d):
+        h = m.start(); size = struct.unpack_from('<I', d, h + 0x44)[0]
+        c = d.find(CTL_MAGIC, h, h + size) if 0x880 < size <= len(d) - h else -1
+        if c < 0 or d.find(CTL_MAGIC, c + 4, h + size) >= 0: continue
+        nctl, ncode = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
+        if nctl < 0x880 or c + nctl + ncode > h + size: continue
+        ctl, code = d[c:c + nctl], d[c + nctl:c + nctl + ncode]
+        st = 'cs' if code[:4] == CS_MAGIC else SPH_STAGE.get((struct.unpack_from('<I', code, 0x30)[0] >> 10) & 0xf) if code[:4] == GFX_MAGIC else None
+        if not st or check(label, st, ctl, code): continue
+        out.append((f'{label}#GLSLC@{h:#x}', st, ctl, code))
+    if not out: red(f'{label}：档案开了 shader_main_glslc，却没有一份 GLSLC 输出')
+    return out
+
 def sarc_members(d):
     hl, bom, size, doff = struct.unpack_from('<HHII', d, 4)
     n = struct.unpack_from('<H', d, hl + 6)[0]
@@ -177,6 +198,24 @@ def group(label):
         if k in label: return g
     return 'other'
 
+def ps_inputs(code):
+    """像素着色器读的通用属性：SPH 第 6–13 字是 32 个属性各 8 位的输入图（Ryujinx ShaderHeader.ImapTypes），非 0 = 读；翻译出的 MSL 输入就是 user(locn<属性号>)
+    Generic attributes a pixel shader reads: SPH words 6–13 are the input map, 8 bits for each of the 32 attributes (Ryujinx ShaderHeader.ImapTypes), non-zero = read; the translated MSL inputs are exactly user(locn<attribute>)"""
+    return {i for i in range(32) if struct.unpack_from('<I', code, 0x30 + 4 * (6 + (i >> 2)))[0] >> ((i & 3) * 8) & 0xff}
+
+def separable_pairs(keys):
+    """单阶段程序（十三机兵防卫圈：每份 GLSLC 输出建一个只有一个阶段的程序，绘制时 BindProgram 按阶段位把顶点、像素程序拼起来），真配对只在绘制时才有。
+    vs_pad 只用配对像素着色器读的位置的并集：所以每个顶点着色器配上一组「覆盖」——读到的位置合起来等于全部像素着色器读的位置的最少几个像素着色器（贪心，同样多时取键小的），
+    补完的顶点着色器能接任何一个像素着色器。全配对要 376 × 375 行，覆盖只要几行 ×376
+    Single-stage programs (13 Sentinels: each GLSLC output becomes a program with one stage, and BindProgram's stage bits combine vertex and pixel programs per draw) have their real pairs only at draw time.
+    vs_pad uses only the union of the locations the paired pixel shaders read, so every vertex shader is paired with a "cover": the fewest pixel shaders whose read locations together equal those of all pixel shaders (greedy, ties go to the smaller key);
+    padded that way, a vertex shader links with any pixel shader. All pairs would be 376 × 375 rows; the cover needs a few rows × 376"""
+    ins = {k: ps_inputs(v[3]) for k, v in keys.items() if v[1] == 'ps'}
+    left, cover = set().union(*ins.values()) if ins else set(), []
+    while left:
+        k = min(ins, key=lambda k: (-len(ins[k] & left), k)); cover.append(k); left -= ins[k]
+    return {(v, p) for v in keys if keys[v][1] == 'vs' for p in cover}, cover
+
 def var_pairs(found):
     """BNSH 同一变体里的（顶点键, 像素键） | (vertex key, pixel key) within the same BNSH variation"""
     var = collections.defaultdict(dict)
@@ -231,6 +270,7 @@ def main():
             try: common = unityfs.common_strings(img)
             except ValueError: common = None   # 不是 Unity 游戏 | not a Unity game
         found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
+        if GLSLC: found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''))
         results.append(('main', {hashlib.sha256(c[:0x880] + k).hexdigest()[:16]: (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
     keys = {}
     # 第一遍：全部文件；Unity 资源包带类型树，顺手收下 Shader 的树。第二遍：没带类型树的 Unity 序列化文件借这些树再扫
@@ -255,6 +295,9 @@ def main():
                 if keys[key][2] != v[2] or keys[key][3] != v[3]: red(f'键 {key} 相同而控制段或代码区不同（{v[0]} / {keys[key][0]}）')
                 continue
             keys[key] = v; per_src[group(v[0])] += 1
+    if SEPARABLE:
+        sp, cover = separable_pairs(keys); pairs |= sp
+        print(f'单阶段程序：每个顶点着色器配 {len(cover)} 个像素着色器作覆盖（{" ".join(cover)}） | single-stage programs: every vertex shader is paired with a cover of {len(cover)} pixel shader(s)')
     os.makedirs(pkg, exist_ok=True)
     for f in os.listdir(pkg):
         if f.endswith('.bin'): os.unlink(os.path.join(pkg, f))
@@ -274,7 +317,7 @@ def main():
         with open(os.path.join(pkg, name), 'wb') as f: f.write(b''.join(rr))
     with open(mapout, 'w') as f:
         kinds = ' / '.join(k for k, hit in (('BNSH / BAHS', any('#BNSH@' in r[4] or '#BAHS@' in r[4] for r in rows)), ('Unity Shader', any('#var' in r[4] and '#BNSH@' not in r[4] and '#MSHD#' not in r[4] for r in rows)),
-                                            ('MSHD', any('#MSHD#' in r[4] for r in rows))) if hit)
+                                            ('MSHD', any('#MSHD#' in r[4] for r in rows)), ('GLSLC', any('#GLSLC@' in r[4] for r in rows))) if hit)
         f.write(f'# kind: evidence  {NOTE}（RomFS + main 里的 {kinds}）→ 控制段 + 代码区键（dm/gfx/tools/shader_split.py）\n')
         f.write('# 第 5 列记每个键首次出现的位置；本作没有 PC 版配对\n')
         f.write('package\tindex\tstage\tdm_ctl_sha16\tsource\n')
