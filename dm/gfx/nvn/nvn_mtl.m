@@ -2869,6 +2869,8 @@ static void warm_worker(NSArray<NSString *> *paths) {
         for (NSString *path in paths) {
             NSString *txt = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
             if (!txt) { MLOG("【红】预热清单读取失败：%s", path.UTF8String); continue; }
+            { unsigned long nl = 0; for (NSString *l in [txt componentsSeparatedByString:@"\n"]) nl += l.length && ![l hasPrefix:@"#"];
+              MLOG("管线预热清单 %s：%lu 行", path.UTF8String, nl); }   // 诊断：每份清单读到多少行（真机预热 0 个时看是哪份没读到） | Diagnostics: how many lines each manifest gave (when a device warms up 0, shows which one was missing)
             for (NSString *line in [txt componentsSeparatedByString:@"\n"]) {
                 if (!line.length || [line hasPrefix:@"#"] || [seen containsObject:line]) continue;
                 [seen addObject:line];
@@ -2933,7 +2935,8 @@ static void warm_start(void) {
         NSMutableArray<NSString *> *all = [NSMutableArray arrayWithObject:seed];
         NSString *user = pso_user_path();
         if (user && [NSFileManager.defaultManager fileExistsAtPath:user]) [all addObject:user];
-        if (![NSFileManager.defaultManager fileExistsAtPath:seed]) return;
+        else MLOG("管线预热：本机用户清单%s%s", user ? "还没有：" : "没有路径（DM_PSO_USER / DM_SAVE 都没设）", user ? user.UTF8String : "");
+        if (![NSFileManager.defaultManager fileExistsAtPath:seed]) { MLOG("【红】管线预热：种子清单不存在：%s", seed.UTF8String); return; }
         paths = all;
     }
     if (!g_warm_items) g_warm_items = [NSMutableArray array];

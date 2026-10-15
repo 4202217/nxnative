@@ -168,10 +168,11 @@ Metal compiles each combination of shaders and pipeline settings for the GPU the
 - `dm/games/<id>/pso_manifest.tsv` is the seed list bundled with the app, prewarmed before `pso_user.tsv`.
 
 The lines name shaders by content key and hold no compiled code and nothing personal, so a list recorded on one device works on any other. To seed the bundled list:
-1. Append recorded lines below its two header lines, in the recorded order. Duplicates are dropped at load.
-2. Rebuild the IPA.
+1. Record on the Mac with prewarm off, so everything is built on demand: `DM_PSO_MANIFEST=off DM_PSO_RECORD=<file>`, playing the scenes players reach first. Engage's list covers boot, the opening movie, the title, a save load and the prologue battle.
+2. Append the recorded lines below the header comments, in the recorded order. Duplicates are dropped at load.
+3. Rebuild the IPA.
 
-Record on the game version you ship.
+Record on the game version you ship. At launch the log names each list it read and its line count (`管线预热清单 … 行`), or says that `pso_user.tsv` does not exist yet.
 
 ## Game notes
 
