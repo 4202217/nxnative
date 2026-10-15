@@ -10,10 +10,9 @@ title_id	010015100B514000
 program_id	010015100B514000
 
 # ---- App ----
-# 主屏 App 名的后备：NSP 脚本优先用脚本里的 APP_NAME，再用 NSP 里的游戏名；手动跑 build_ipa.sh 和 Mac 窗口标题用这个
-# Fallback for the home-screen app name: the NSP script prefers its APP_NAME setting, then the game name in the NSP; a manual build_ipa.sh run and the Mac window title use this
-app_name	SMBW Mobile
-bundle_id	org.smbwmobile.app
+# 游戏名：只给档案列表与 Mac 窗口标题当标签；iOS App 名取基础版 NSP 里的游戏名，包名按基础版标题号（build_ipa.sh / NSP 脚本）
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	Super Mario Bros. Wonder
 ipa	SMBWMobile.ipa
 app_category	public.app-category.action-games
 

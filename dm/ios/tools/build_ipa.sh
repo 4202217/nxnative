@@ -3,12 +3,14 @@
 # 前提：已按 README 跑过改写器（patched 目录）与 iOS 着色器出包（IOSOUT），装了 Xcode 与 xcodegen。
 # 用法：dm/ios/tools/build_ipa.sh [输出.ipa]；环境：GAME=游戏档案（dm/games/<基础版标题号>，必给）、W=工作区（缺省 ~/<标题号>-work）、PATCHED / ROMFS / MSL_IOS 可分别指定
 #   AOC=追加内容目录（缺省 $W/data/aoc，有就放进 DmIOS.app/aoc/<序号>/；设成空串 = 不放）
-#   App 名、包名、IPA 名、代码模块、RomFS 认定路径、着色器表都取自游戏档案（DM_DISPLAY_NAME / DM_BUNDLE_ID 可改）
+#   App 名取基础版 NSP 控制数据里的游戏名（$W/data/v0/control.nacp，没有就用 RomFS 旁边的），包名 = org.nxnative.<基础版标题号小写>（DM_DISPLAY_NAME / DM_BUNDLE_ID 可改）；
+#   IPA 名、代码模块、RomFS 认定路径、着色器表取自游戏档案
 # Build one unsigned all-in-one IPA: the rewritten modules compiled into the executable, iOS shader libraries, and the game files (RomFS) at DmIOS.app/romfs. At install time a signing tool (AltStore / Sideloadly etc.) swaps in your own certificate and bundle ID.
 # Prerequisites: the rewriter (patched directory) and the iOS shader build (IOSOUT) have been run as in the README; Xcode and xcodegen are installed.
 # Usage: dm/ios/tools/build_ipa.sh [output.ipa]; environment: GAME=game profile (dm/games/<base game title ID>, required), W=workspace (default ~/<title ID>-work), PATCHED / ROMFS / MSL_IOS can each be overridden
 #   AOC=add-on content directory (default $W/data/aoc; when it exists it goes to DmIOS.app/aoc/<index>/; an empty string = none)
-#   The app name, bundle ID, IPA name, code modules, RomFS marker and shader tables all come from the game profile (DM_DISPLAY_NAME / DM_BUNDLE_ID override)
+#   The app name is the game name in the base NSP's control data ($W/data/v0/control.nacp, else the one next to the RomFS), the bundle ID is org.nxnative.<base game title ID in lowercase> (DM_DISPLAY_NAME / DM_BUNDLE_ID override them);
+#   the IPA name, code modules, RomFS marker and shader tables come from the game profile
 set -u
 cd "$(dirname "$0")/.." || exit 1
 IOS=$PWD; DM=$(cd .. && pwd)
@@ -21,12 +23,15 @@ W=${W:-$HOME/$GAME-work}; PKG=$(gp package)
 PATCHED=${PATCHED:-$W/build/patched_$PKG}; ROMFS=${ROMFS:-$W/data/$PKG/RomFS}; MSL_IOS=${MSL_IOS:-$W/build/ios/dmsh_b}; AOC=${AOC-$W/data/aoc}
 OUT_IPA=${1:-$HOME/Desktop/$(gp ipa)}; O=$W/build/ios/pkg; DD=$O/dd
 MODS=$(gp modules); MARKER=$(gp romfs_marker)
-export LC_ALL=C DM_BUNDLE_ID=${DM_BUNDLE_ID:-$(gp bundle_id)} DM_DISPLAY_NAME=${DM_DISPLAY_NAME:-$(gp app_name)} DM_APP_CATEGORY=$(gp app_category) DM_TEAM_ID=${DM_TEAM_ID:-0000000000}   # 占位身份：未签名，装机工具会替换 | placeholder identity: unsigned, the install tool replaces it
+NACP=$W/data/v0/control.nacp; [ -f "$NACP" ] || NACP=$(dirname "$ROMFS")/control.nacp
+[ -n "${DM_DISPLAY_NAME:-}" ] || DM_DISPLAY_NAME=$(python3 "$DM/tools/nacp.py" "$NACP") || die "no game name in $NACP (re-extract with nx_extract, or set DM_DISPLAY_NAME)"
+export LC_ALL=C DM_BUNDLE_ID=${DM_BUNDLE_ID:-org.nxnative.$(echo "$GAME" | tr 'A-Z' 'a-z')} DM_DISPLAY_NAME DM_APP_CATEGORY=$(gp app_category) DM_TEAM_ID=${DM_TEAM_ID:-0000000000}   # 占位身份：未签名，装机工具会替换 | placeholder identity: unsigned, the install tool replaces it
 for f in $MODS; do [ -f "$PATCHED/$f.patched.bin" ] && [ -f "$PATCHED/$f.fixups.tsv" ] || die "no rewritten module $PATCHED/$f (run dm/tools/patch_nso.py first)"; done
 [ -e "$ROMFS/$MARKER" ] || die "no RomFS at $ROMFS (missing $MARKER)"
 V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$GD/dmsh_chain.h")
 [ -n "$V" ] && ls "$MSL_IOS/b-$V" 2> /dev/null | grep -q '_b.metallib$' || die "no iOS shader libraries $MSL_IOS/b-$V (IOSOUT=$MSL_IOS dmsh_build.py ...)"
 
+t "app: $DM_DISPLAY_NAME ($DM_BUNDLE_ID)"
 t "generate Gen/ (host sources, embedded modules, tables, shader libraries)"
 rm -rf Gen && mkdir -p Gen/dm Gen/msl || die "mkdir Gen"
 python3 tools/gen_build.py ../host Gen > Gen/dm.xcconfig || die "gen_build"

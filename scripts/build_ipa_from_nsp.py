@@ -26,6 +26,7 @@ PROD_KEYS = ''                          # prod.keys 的路径（留空 = 运行�
 PACKAGE = ''                            # 打进 IPA 的版本（留空 = 游戏档案的 package；马力欧 'v327680' 即 1.2.1，或 'v0'） | version packed into the IPA (empty = the profile's package; Mario 'v327680' i.e. 1.2.1, or 'v0')
 OUT_IPA = ''                            # 输出的 IPA（留空 = NSP 文件夹里的 <档案的 ipa>） | output IPA (empty = <the profile's ipa> in the NSP folder)
 APP_NAME = ''                           # 主屏上的 App 名（留空 = 基础版 NSP 里的游戏名） | app name on the home screen (empty = the game name in the base NSP)
+BUNDLE_ID = ''                          # App 的包名（留空 = org.nxnative.<基础版标题号小写>） | the app's bundle ID (empty = org.nxnative.<base game title ID in lowercase>)
 KEEP_EXTRACTED = False                  # 出包后保留解出的游戏文件（下次省去解包；与游戏文件一样大） | keep the extracted game files after the IPA is built (saves extraction next time; as big as the game files)
 DM_ENV_FILE = ''                        # 可选：诊断包的环境开关文件（每行 KEY=VALUE） | optional: environment switches for a diagnostic build (one KEY=VALUE per line)
 
@@ -158,23 +159,6 @@ def pick_nsps(fam, versions):
     return out
 
 
-def nacp_name(d):   # 解包目录里 control.nacp 的游戏名（nx_extract 存的；旧的解包没有则空；解不出像样的名字也空） | the game name from control.nacp in an extraction folder (saved by nx_extract; empty for older extractions, or when no sensible name decodes)
-    p = d / 'control.nacp'
-    if not p.exists(): return ''
-    b = p.read_bytes(); t = b[:0x3000]
-    try:   # 新 SDK 把名称区压缩：u16 长度 + raw deflate，解开是 32 种语言 × 0x300（马力欧 1.2.1 就是） | newer SDKs compress the title area: a u16 size + raw deflate, inflating to 32 languages × 0x300 (Mario 1.2.1 does)
-        z = zlib.decompress(b[2:2 + struct.unpack_from('<H', b)[0]], -15)
-        if len(z) == 0x6000: t = z
-    except zlib.error: pass   # 未压缩 | not compressed
-    for i in range(len(t) // 0x300):   # 每种语言 0x300 字节，名称占前 0x200；取第一个非空的（0 = 美式英语） | 0x300 bytes per language, the name in the first 0x200; take the first non-empty one (0 = American English)
-        n = t[i * 0x300:i * 0x300 + 0x200].split(b'\0', 1)[0]
-        if not n: continue
-        try: n = n.decode('utf-8')
-        except UnicodeDecodeError: return ''
-        return n if n.isprintable() else ''
-    return ''
-
-
 def can_clone(d):   # 该卷能否做 APFS 克隆（nx_extract 用它省空间，不支持时整份写出） | whether this volume supports APFS clones (nx_extract uses them to save space; without them it writes full copies)
     a, b = d / '.clone_test', d / '.clone_test2'
     try:
@@ -216,7 +200,7 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
     swap_in(tmp, ex)
     xlog = (logs / 'extract.log').read_text(errors='replace')
     dv = re.search(r'display version (\S+)', xlog)
-    R = [f'# 粗查 | Survey: {nacp_name(ex) or "?"} ({app:016X})', '', f'- 显示版本 | display version: {dv.group(1) if dv else "?"}', f'- 基础版 | base: `{fam["base"].name}` ({fam["base"].stat().st_size / 2**30:.2f} GB)']
+    R = [f'# 粗查 | Survey: {nacp.name(ex / "control.nacp") or "?"} ({app:016X})', '', f'- 显示版本 | display version: {dv.group(1) if dv else "?"}', f'- 基础版 | base: `{fam["base"].name}` ({fam["base"].stat().st_size / 2**30:.2f} GB)']
     R += [f'- 更新 | update: `{p.name}` (v{v}, {p.stat().st_size / 2**30:.2f} GB){"（粗查用的这一个 | used for this survey）" if p == upd else ""}' for v, p in ups]
     R += [f'- DLC: `{p.name}` ({p.stat().st_size / 1024:.0f} KB{"，只有授权、无内容 | licence only, no content" if p.stat().st_size < 1 << 20 else ""})' for _, _, p in fam['dlc']]
 
@@ -394,6 +378,7 @@ def parse_args(argv):
     ap.add_argument('-p', '--package', help='打进 IPA 的版本，如 v327680 / v0（缺省 = 游戏档案的 package）| version packed into the IPA, e.g. v327680 / v0 (default: the profile\'s package)')
     ap.add_argument('-o', '--out', help='输出的 IPA（缺省 = NSP 文件夹里的 <档案的 ipa>）| output IPA (default: <the profile\'s ipa> in the NSP folder)')
     ap.add_argument('--app-name', help='主屏上的 App 名（缺省 = 基础版 NSP 里的游戏名）| app name on the home screen (default: the game name in the base NSP)')
+    ap.add_argument('--bundle-id', help='App 的包名（缺省 = org.nxnative.<基础版标题号小写>）| the app\'s bundle ID (default: org.nxnative.<base game title ID in lowercase>)')
     ap.add_argument('--keep-extracted', action='store_true', help='出包后保留解出的游戏文件 | keep the extracted game files after the IPA is built')
     ap.add_argument('--env-file', help='诊断包的环境开关文件（每行 KEY=VALUE）| environment switches for a diagnostic build (one KEY=VALUE per line)')
     return ap.parse_args(argv)
@@ -404,6 +389,7 @@ def main(args=None):
     here = Path(globals().get('__file__') or sys.argv[0]).resolve()
     repo = find_repo(here)
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # 游戏档案 | game profiles
+    sys.path.insert(0, str(repo / 'dm/tools')); global nacp; import nacp   # NSP 控制数据里的游戏名 | the game name in the NSP's control data
     nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP 文件夹 | NSP folder: ', ' NSP 文件夹', 'the NSP folder'))).resolve()
     keys = Path(os.path.expanduser(args.keys or PROD_KEYS or ask('prod.keys 路径 | path of prod.keys: ', ' prod.keys（-k）', 'prod.keys (-k)'))).resolve()
     if not nsp_dir.is_dir(): raise BuildError(f'不是文件夹 | not a folder: {nsp_dir}')
@@ -448,8 +434,11 @@ def main(args=None):
     game = dirs[pkg_ver]
     aoc = extract_aoc(nx, keys, work, app, fam, logs)
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # 基础版单独解出的目录 | the folder the base game was extracted to alone
-    app_name = args.app_name or APP_NAME or nacp_name(base) or g.get('app_name')   # 设置 > 基础版 NSP 里的游戏名 > 档案 | setting > game name in the base NSP > profile
-    say(f'App 名 | app name: {app_name}')
+    # App 名与包名都取自基础版 NSP：名字是它控制数据里的游戏名，包名按它的标题号；设置 / 命令行可改 | the app name and bundle ID both come from the base NSP: the game name in its control data, and a bundle ID from its title ID; a setting / the command line overrides them
+    app_name = args.app_name or APP_NAME or nacp.name(base / 'control.nacp')
+    if not app_name: raise BuildError(f'基础版解包里读不出游戏名（{base / "control.nacp"}；旧的解包没存它：删掉 extract/ 重跑，或用 --app-name 指定）| no game name in the base extraction ({base / "control.nacp"}; an older extraction did not save it: delete extract/ and run again, or give --app-name)')
+    bundle_id = args.bundle_id or BUNDLE_ID or f'org.nxnative.{app:016x}'
+    say(f'App 名 | app name: {app_name}；包名 | bundle ID: {bundle_id}')
 
     patched = work / f'patched_{pkg_ver}'
     rewrite(py, repo, game / 'ExeFS', patched, env, logs, g)
@@ -459,7 +448,7 @@ def main(args=None):
 
     if free_gb(out_ipa.parent) < 5: raise BuildError(f'{out_ipa.parent} 所在的卷剩余不足 5 GB | less than 5 GB free on the volume of {out_ipa.parent}')
     say(f'出 IPA | building the IPA → {out_ipa}')
-    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(game / 'RomFS'), MSL_IOS=str(ios), FONT_PY=py, DM_DISPLAY_NAME=app_name, AOC=str(aoc or ''))
+    ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(game / 'RomFS'), MSL_IOS=str(ios), FONT_PY=py, DM_DISPLAY_NAME=app_name, DM_BUNDLE_ID=bundle_id, AOC=str(aoc or ''))
     # App 图标：nx_extract 从控制数据存下的游戏图标（英文版，icon.jpg）；打包版本的优先，其次基础版 | app icon: the game icon nx_extract saved from the control data (English, icon.jpg); the packed version's first, then the base game's
     icon = next((d / 'icon.jpg' for d in (game, base) if (d / 'icon.jpg').exists()), None)
     if icon: ipa_env['DM_ICON'] = str(icon); say(f'App 图标 | app icon: {icon}')

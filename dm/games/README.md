@@ -27,7 +27,8 @@ None of them has a default game: without one they stop and list the profiles. To
 | Key | Meaning |
 |---|---|
 | `title_id`, `program_id` | Identity. `program_id` is what `svcGetInfo(ProgramId)` reports. The game's name is not stored: the NSP script reads it from the NSP's control data (NACP) |
-| `app_name`, `bundle_id`, `ipa`, `app_category` | iOS app. `app_name` is only the fallback: the NSP script uses its `APP_NAME` setting, else the game name from the NSP. A manual `build_ipa.sh` run and the Mac window title use `app_name` |
+| `name` | The game's name, only a label for `game.py list`, error messages and the Mac window title. The iOS app's name is the game name in the base NSP's control data and its bundle ID is `org.nxnative.<title ID in lowercase>`; the NSP script's `APP_NAME` / `BUNDLE_ID` and `build_ipa.sh`'s `DM_DISPLAY_NAME` / `DM_BUNDLE_ID` override them |
+| `ipa`, `app_category` | iOS app: the default IPA file name and the App Store category |
 | `build <ver> <display version> <module>=<build ID>…` | One row per known version. The NSP script rejects other builds. The host reports the display version by `main`'s build ID |
 | `package` | Version packed into the IPA by default |
 | `shader_versions` | Versions whose union the shader tables are (base game first). All of them are needed to build |

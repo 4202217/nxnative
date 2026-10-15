@@ -27,7 +27,8 @@
 | 键 | 含义 |
 |---|---|
 | `title_id`、`program_id` | 身份。`program_id` 是 `svcGetInfo(ProgramId)` 报给游戏的值。游戏名不存：NSP 脚本从 NSP 的控制数据（NACP）读 |
-| `app_name`、`bundle_id`、`ipa`、`app_category` | iOS App。`app_name` 只是后备：NSP 脚本用自己的 `APP_NAME` 设置，没设就用 NSP 里的游戏名；手动跑 `build_ipa.sh` 和 Mac 窗口标题用 `app_name` |
+| `name` | 游戏名，只给 `game.py list`、报错信息和 Mac 窗口标题当标签。iOS App 名取基础版 NSP 控制数据里的游戏名，包名是 `org.nxnative.<标题号小写>`；NSP 脚本的 `APP_NAME` / `BUNDLE_ID`、`build_ipa.sh` 的 `DM_DISPLAY_NAME` / `DM_BUNDLE_ID` 可改 |
+| `ipa`、`app_category` | iOS App：缺省 IPA 文件名与 App Store 分类 |
 | `build <版本> <显示版本> <模块>=<构建号>…` | 每个已知版本一行。NSP 脚本只认这些构建；宿主按 `main` 的构建号报显示版本 |
 | `package` | 缺省打进 IPA 的版本 |
 | `shader_versions` | 着色器表是这几个版本的并集（基础版在前）。出包时这些版本都要有 |

@@ -68,7 +68,7 @@ void front_run(void (*guest)(void)) {
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
-        win.title = @DM_GAME_APP_NAME;   // 游戏档案 app_name | game profile app_name
+        win.title = @DM_GAME_NAME;   // 游戏档案的 name（游戏名标签） | the game profile's name (game name label)
         NSView *v = win.contentView;
         v.wantsLayer = YES;
         g_layer = [CAMetalLayer layer];

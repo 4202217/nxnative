@@ -68,7 +68,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --
 python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys --env-file diag_env.txt
 ```
 
-In Spyder, open `scripts/build_ipa_from_nsp.py`, fill in the settings at the top (`NSP_DIR`, `PROD_KEYS`, and optionally `PACKAGE`, `OUT_IPA`, `APP_NAME`), and press F5. Empty paths are asked for at run time.
+In Spyder, open `scripts/build_ipa_from_nsp.py`, fill in the settings at the top (`NSP_DIR`, `PROD_KEYS`, and optionally `PACKAGE`, `OUT_IPA`, `APP_NAME`, `BUNDLE_ID`), and press F5. Empty paths are asked for at run time.
 
 What the script does:
 1. It finds the game profile from the title ID.
@@ -82,7 +82,7 @@ Everything it writes stays in the NSP folder: intermediate files and logs in `<i
 
 ## Install and play
 
-Sign and install the IPA with your own tool (AltStore, Sideloadly, LiveContainer, ...). The tool replaces the placeholder bundle ID, which is the profile's `bundle_id`. The home-screen icon is the game's own.
+Sign and install the IPA with your own tool (AltStore, Sideloadly, LiveContainer, ...). The app takes its name and icon from the base game NSP, and its bundle ID is `org.nxnative.<base game title ID>` (for example `org.nxnative.0100a6301214e000`); `APP_NAME` / `BUNDLE_ID` in the script override them. Your signing tool may replace the bundle ID.
 
 - **Controls:** a translucent touch gamepad over the picture:
   - ZL above L in the top-left corner, ZR above R in the top-right;

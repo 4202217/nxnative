@@ -28,7 +28,7 @@ targets:
     info:
       path: Sources/Info.plist
       properties:
-        CFBundleDisplayName: ${DM_DISPLAY_NAME}   # 游戏档案 app_name（build_ipa.sh 设） | game profile app_name (set by build_ipa.sh)
+        CFBundleDisplayName: ${DM_DISPLAY_NAME}   # 基础版 NSP 里的游戏名（build_ipa.sh 设） | the game name in the base NSP (set by build_ipa.sh)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleShortVersionString: $(MARKETING_VERSION)
         UILaunchStoryboardName: ""
