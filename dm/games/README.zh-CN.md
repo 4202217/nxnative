@@ -16,7 +16,7 @@
 | 着色器工具（`shader_split.py`、`dmsh_chain.py`、`dmsh_build.py`、`dmsh_facts.py`） | `DM_GAME=<名>` | 各表，`nvn_*`、`shader_*` 键 |
 | 宿主（`make -C dm/host`、`dm/gfx/tests`） | `GAME=<名>` | `gen/<名>/game_profile.h`（`game.py header` 由 `game.tsv` 生成） |
 | `dm/ios/tools/build_ipa.sh` | `GAME=<名>` | App 名、包名、IPA 名、代码模块、RomFS 认定路径、各表 |
-| `dm/ios/tools/build_ipa_from_nsp.py` | NSP 的标题号 | 以上全部。没有对应档案时只写粗查报告 |
+| `scripts/build_ipa_from_nsp.py` | NSP 的标题号 | 以上全部。没有对应档案时只写粗查报告 |
 
 缺省都是 `smbw`。查档案：
 - `python3 dm/games/game.py list` 列出全部档案。
@@ -42,7 +42,7 @@
 
 ## 加一个游戏
 
-1. **粗查。** 对这个游戏的 NSP 文件夹跑 `dm/ios/tools/build_ipa_from_nsp.py`。没有档案时它只解出代码模块和 RomFS 清单，写出 `<NSP 文件夹>/<标题号>_survey/survey.md`。报告包括模块与构建号、SDK、引擎与图形接口标记、RomFS 容器、改写点统计、导入与宿主钩子的对比。
+1. **粗查。** 对这个游戏的 NSP 文件夹跑 `scripts/build_ipa_from_nsp.py`。没有档案时它只解出代码模块和 RomFS 清单，写出 `<NSP 文件夹>/<标题号>_survey/survey.md`。报告包括模块与构建号、SDK、引擎与图形接口标记、RomFS 容器、改写点统计、导入与宿主钩子的对比。
 2. **档案。** 把 `smbw/game.tsv` 拷成 `dm/games/<名>/game.tsv`，填身份、`build` 行和 `modules`。内存与 NVN 的值先沿用马力欧的，等起机时实测再改（[docs/agents](../../docs/agents/README.md)）。
 3. **着色器表。** 跑 `DM_GAME=<名> shader_split.py … dm/games/<名>/shader_map.tsv dm/games/<名>/shader_facts.tsv dm/games/<名>/shader_pairs.tsv`。再补空的 `shader_map.tsv.conflicts.tsv`、`bf_want.tsv` 和 `pso_manifest.tsv`（表头照马力欧的抄）。
 4. **翻译链。**

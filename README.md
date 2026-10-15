@@ -40,22 +40,30 @@ How the profile is chosen and used:
 - Code inherited from D2R that relies on D2R's addresses or files runs only on D2R's build.
 
 To add a game:
-1. Run `build_ipa_from_nsp.py` on its NSP folder (see [Build from the NSPs](#build-from-the-nsps)). With no matching profile, it writes a survey to `<title ID>_survey/survey.md`.
+1. Run `scripts/build_ipa_from_nsp.py` on its NSP folder (see [Build from the NSPs](#build-from-the-nsps)). With no matching profile, it writes a survey to `<title ID>_survey/survey.md`.
 2. Add a profile as described in [dm/games/README.md](dm/games/README.md).
 3. Bring the game up following the guides in [docs/agents](docs/agents/README.md).
 
 ## Build from the NSPs
 
-`dm/ios/tools/build_ipa_from_nsp.py` runs the whole chain: extract, rewrite, shaders, IPA. It needs only three things:
+`scripts/build_ipa_from_nsp.py` runs the whole chain: extract, rewrite, shaders, IPA. It needs only three things:
 - this repository;
 - a folder with one game's NSPs: the base game plus the updates in the profile's `shader_versions` (for Mario, v0 and 1.2.1). DLC is skipped;
 - `prod.keys`.
 
-The script runs in Spyder or with `python3`. That Python needs lz4, capstone and fonttools. The settings at the top of the file are:
+The script runs in Spyder (open it and press F5) or from a terminal. That Python needs lz4, capstone and fonttools. In Spyder it uses the settings at the top of the file:
 - the NSP folder and keys (asked for at run time if empty);
 - the version to pack (default: the profile's `package`);
 - the output IPA (default `~/Desktop/<the profile's ipa>`);
 - `APP_NAME`, the home-screen name. Left empty, it is the game name from the base NSP.
+
+From a terminal, options override those settings (`-h` lists them all):
+
+```
+python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [-p <version>] [-o <out.ipa>] [--app-name <name>] [--keep-extracted]
+```
+
+It exits with 0 when done and 1 on an error.
 
 The script picks the profile from the NSPs' title ID and accepts only the builds the profile lists. Every intermediate file goes to `<id>_build/` in the NSP folder. For a game with no profile, it writes a survey instead of an IPA. The survey lists the modules, SDK, engine, containers, rewrite sites, and imports compared with the host hooks.
 

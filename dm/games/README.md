@@ -16,7 +16,7 @@ Everything game-specific belongs here. Code reads the profile; it does not hard-
 | Shader tools (`shader_split.py`, `dmsh_chain.py`, `dmsh_build.py`, `dmsh_facts.py`) | `DM_GAME=<id>` | tables, `nvn_*`, `shader_*` keys |
 | Host (`make -C dm/host`, `dm/gfx/tests`) | `GAME=<id>` | `gen/<id>/game_profile.h`, generated from `game.tsv` by `game.py header` |
 | `dm/ios/tools/build_ipa.sh` | `GAME=<id>` | app name, bundle ID, IPA name, modules, RomFS marker, tables |
-| `dm/ios/tools/build_ipa_from_nsp.py` | the NSPs' title ID | everything above. With no matching profile it only writes a survey |
+| `scripts/build_ipa_from_nsp.py` | the NSPs' title ID | everything above. With no matching profile it only writes a survey |
 
 All of them default to `smbw`. To query a profile:
 - `python3 dm/games/game.py list` lists the profiles.
@@ -42,7 +42,7 @@ The translator (`dmsh_xlate/Program.cs`) still has Mario's texture / sampler bas
 
 ## Adding a game
 
-1. **Survey.** Run `dm/ios/tools/build_ipa_from_nsp.py` on the game's NSP folder. Without a profile it extracts only the code modules and a RomFS list, then writes `<NSP folder>/<title ID>_survey/survey.md`. The survey covers modules and build IDs, SDK, engine and graphics API markers, RomFS containers, the rewrite-site census, and imports compared with the host hooks.
+1. **Survey.** Run `scripts/build_ipa_from_nsp.py` on the game's NSP folder. Without a profile it extracts only the code modules and a RomFS list, then writes `<NSP folder>/<title ID>_survey/survey.md`. The survey covers modules and build IDs, SDK, engine and graphics API markers, RomFS containers, the rewrite-site census, and imports compared with the host hooks.
 2. **Profile.** Copy `smbw/game.tsv` to `dm/games/<id>/game.tsv` and fill in the identity, `build` rows and `modules`. Leave the memory and NVN values as Mario's until the bring-up measures them ([docs/agents](../../docs/agents/README.md)).
 3. **Shader tables.** Run `DM_GAME=<id> shader_split.py … dm/games/<id>/shader_map.tsv dm/games/<id>/shader_facts.tsv dm/games/<id>/shader_pairs.tsv`. Add an empty `shader_map.tsv.conflicts.tsv`, `bf_want.tsv` and `pso_manifest.tsv` (copy Mario's headers).
 4. **Chain.**

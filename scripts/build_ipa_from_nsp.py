@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # 从 NSP 一路出未签名 IPA：认游戏（标题号 → dm/games/<名>/ 游戏档案）→ 解包（nx_extract）→ 改写代码模块（patch_nso.py）→ 拆出着色器并与档案里的表核对（shader_split.py）
 #   → iOS 着色器库（dmsh_build.py）→ build_ipa.sh。没有对应档案的游戏只做粗查（<NSP 文件夹>/<标题号>_survey/survey.md），不出 IPA。
-# 在 Spyder 里打开本文件按 F5 运行（也可 python3 build_ipa_from_nsp.py）；下面「设置」留空的两项运行时会问。
+# 两种跑法：在 Spyder 里打开本文件按 F5（用下面「设置」里的值，留空的 NSP 文件夹与 prod.keys 运行时会问）；
+#   或在终端里 python3 scripts/build_ipa_from_nsp.py <NSP 文件夹> -k <prod.keys> [选项]（命令行给的值盖过「设置」，-h 看全部选项；
+#   终端不接键盘输入时缺的值不问、直接报错；成功退出码 0，出错 1，中断 130）。Spyder 的「运行配置」里填命令行选项也一样生效。
 # 只用三样东西：本仓库、放一个游戏 NSP 的文件夹（基础版 + 档案 shader_versions 列的更新都要；DLC 跳过，本移植不读追加内容）、prod.keys。
 # 所有中间产物都在 NSP 文件夹里的 <名>_build/：extract/（解出的游戏文件，出包后默认删掉）、tools/、patched_*/、shader/（着色器包与缓存，留着下次出包快）、logs/（每步的完整输出）、tmp/、ipa/。
 # 着色器翻译器用仓内的 dm/gfx/tools/dmsh_xlate_bin（与 dmsh_chain.lock 指纹一致的那份；重编出的 dll 指纹不同，dmsh_build 会拒绝）。
 # 运行本文件的 Python 要有 lz4、capstone、fonttools；另需 Xcode、xcodegen、.NET SDK 10、zstd、spirv-cross。马力欧首次约 35 分钟（大头是着色器库），再跑约 10 分钟（着色器库走缓存）。密钥值一律不打印。
 # Unsigned IPA straight from the NSPs: identify the game (title ID → game profile dm/games/<id>/) → extract (nx_extract) → rewrite the code modules (patch_nso.py) → split out the shaders and check them against the profile's tables (shader_split.py)
 #   → iOS shader libraries (dmsh_build.py) → build_ipa.sh. A game with no matching profile is only surveyed (<NSP folder>/<title ID>_survey/survey.md); no IPA.
-# Open this file in Spyder and press F5 (or run python3 build_ipa_from_nsp.py); the two settings below that are left empty are asked for when it runs.
+# Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
+#   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
+#   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game plus the updates listed in the profile's shader_versions are required; DLC is skipped, this port does not load add-on content), and prod.keys.
 # Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), tools/, patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/.
 # The shader translator is the in-repo dm/gfx/tools/dmsh_xlate_bin (the build whose fingerprints match dmsh_chain.lock; a rebuilt dll has different fingerprints and dmsh_build refuses it).
@@ -37,7 +41,14 @@ def say(msg):
     print(f'[{time.strftime("%H:%M:%S")}] {msg}', flush=True)
 
 
-def ask(prompt):
+def in_ipython():   # Spyder（与 Jupyter）在 IPython 里跑本文件：输入框可用，且不能 sys.exit（会把报错堆在控制台上） | Spyder (and Jupyter) run this file inside IPython: input works there, and sys.exit must not be called (it piles an error onto the console)
+    import builtins
+    return hasattr(builtins, '__IPYTHON__')
+
+
+def ask(prompt, zh, en):   # zh / en：缺的是什么，报错用 | zh / en: what is missing, for the error message
+    if not in_ipython() and not (sys.stdin and sys.stdin.isatty()):
+        raise BuildError(f'没给{zh}，又没有键盘输入可问：在命令行上给出（-h 看用法）| {en} not given and there is no keyboard input to ask for it: give it on the command line (-h for usage)')
     s = input(prompt).strip().strip('"').strip("'").replace('\\ ', ' ')   # 拖进来的路径带引号或转义空格 | dragged-in paths come quoted or with escaped spaces
     return os.path.expanduser(s)
 
@@ -346,13 +357,36 @@ def build_shaders(py, repo, sh, xlate, env, logs, g):
     return ios
 
 
-def main():
+def find_repo(here):   # 本文件在仓库的 scripts/ 下；往上找到有 dm/tools/nx_extract/Program.cs 的那一层 | this file lives in the repository's scripts/; walk up to the level that has dm/tools/nx_extract/Program.cs
+    for d in here.parents:
+        if (d / 'dm/tools/nx_extract/Program.cs').exists(): return d
+    raise BuildError(f'从 {here} 往上找不到仓库根目录（没有 dm/tools/nx_extract）| cannot find the repository root above {here} (no dm/tools/nx_extract)')
+
+
+def parse_args(argv):
+    """命令行选项：给了就盖过「设置」；Spyder 里 F5 不带选项，全用「设置」。-h 看说明
+    Command-line options: when given they override "Settings"; F5 in Spyder passes none, so "Settings" is used as is. -h shows the help"""
+    import argparse
+    ap = argparse.ArgumentParser(prog='build_ipa_from_nsp.py',
+        description='从 NSP 出未签名 IPA；没有游戏档案的游戏只写粗查报告 | Build an unsigned IPA from a game\'s NSPs; a game with no profile only gets a survey.',
+        epilog='例 | example: python3 scripts/build_ipa_from_nsp.py ~/nsp/"Super Mario Bros Wonder" -k ~/keys/prod.keys')
+    ap.add_argument('nsp_dir', nargs='?', help='放一个游戏 NSP 的文件夹（缺省 = 设置 NSP_DIR，再没有就问）| folder holding one game\'s NSPs (default: the NSP_DIR setting, else asked)')
+    ap.add_argument('-k', '--keys', help='prod.keys 的路径（缺省 = 设置 PROD_KEYS，再没有就问）| path of prod.keys (default: the PROD_KEYS setting, else asked)')
+    ap.add_argument('-p', '--package', help='打进 IPA 的版本，如 v327680 / v0（缺省 = 游戏档案的 package）| version packed into the IPA, e.g. v327680 / v0 (default: the profile\'s package)')
+    ap.add_argument('-o', '--out', help='输出的 IPA（缺省 ~/Desktop/<档案的 ipa>）| output IPA (default ~/Desktop/<the profile\'s ipa>)')
+    ap.add_argument('--app-name', help='主屏上的 App 名（缺省 = 基础版 NSP 里的游戏名）| app name on the home screen (default: the game name in the base NSP)')
+    ap.add_argument('--keep-extracted', action='store_true', help='出包后保留解出的游戏文件 | keep the extracted game files after the IPA is built')
+    ap.add_argument('--env-file', help='诊断包的环境开关文件（每行 KEY=VALUE）| environment switches for a diagnostic build (one KEY=VALUE per line)')
+    return ap.parse_args(argv)
+
+
+def main(args=None):
+    args = args or parse_args([])
     here = Path(globals().get('__file__') or sys.argv[0]).resolve()
-    repo = here.parents[3]   # dm/ios/tools/本文件 | dm/ios/tools/this file
-    if not (repo / 'dm/tools/nx_extract/Program.cs').exists(): raise BuildError(f'从 {here} 推不出仓库根目录 | cannot find the repository root from {here}')
+    repo = find_repo(here)
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # 游戏档案 | game profiles
-    nsp_dir = Path(os.path.expanduser(NSP_DIR) or ask('NSP 文件夹 | NSP folder: ')).resolve()
-    keys = Path(os.path.expanduser(PROD_KEYS) or ask('prod.keys 路径 | path of prod.keys: ')).resolve()
+    nsp_dir = Path(os.path.expanduser(args.nsp_dir or NSP_DIR or ask('NSP 文件夹 | NSP folder: ', ' NSP 文件夹', 'the NSP folder'))).resolve()
+    keys = Path(os.path.expanduser(args.keys or PROD_KEYS or ask('prod.keys 路径 | path of prod.keys: ', ' prod.keys（-k）', 'prod.keys (-k)'))).resolve()
     if not nsp_dir.is_dir(): raise BuildError(f'不是文件夹 | not a folder: {nsp_dir}')
     if not keys.is_file(): raise BuildError(f'没有这个文件 | no such file: {keys}')
     env = dict(os.environ, PATH=os.pathsep.join(TOOL_PATHS + [os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')]))
@@ -367,10 +401,10 @@ def main():
         return survey(nsp_dir, app, fam, keys, repo, py, env)
     say(f'游戏档案 | game profile: {g.id}')
     builds, need = g.builds(), g.words('shader_versions')
-    pkg_ver = PACKAGE or g.get('package')
-    if pkg_ver not in builds: raise BuildError(f"PACKAGE 只能是游戏档案登记的版本 | PACKAGE must be a version the game profile registers: {', '.join(builds)}")
+    pkg_ver = args.package or PACKAGE or g.get('package')
+    if pkg_ver not in builds: raise BuildError(f"打进 IPA 的版本（-p / PACKAGE）只能是游戏档案登记的 | the version to pack (-p / PACKAGE) must be one the game profile registers: {', '.join(builds)}")
     versions = need + ([pkg_ver] if pkg_ver not in need else [])
-    out_ipa = Path(os.path.expanduser(OUT_IPA or f'~/Desktop/{g.get("ipa")}'))
+    out_ipa = Path(os.path.expanduser(args.out or OUT_IPA or f'~/Desktop/{g.get("ipa")}')).resolve()
     work = nsp_dir / f'{g.id}_build'
     xlate = repo / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate'
     # DM_GAME 选档案；DM_ROOT / WORK 指到 <名>_build：各工具的缺省路径与临时目录都不出它 | DM_GAME picks the profile; DM_ROOT / WORK point at <id>_build: the tools' default paths and temporary directories all stay inside it
@@ -392,7 +426,7 @@ def main():
         if u is None and clone is None and can_clone(ex): clone = dirs[ver] / 'RomFS'
     game = dirs[pkg_ver]
     base = next((dirs[v] for v in versions if picks[v][1] is None), dirs[versions[0]])   # 基础版单独解出的目录 | the folder the base game was extracted to alone
-    app_name = APP_NAME or nacp_name(base) or g.get('app_name')   # 设置 > 基础版 NSP 里的游戏名 > 档案 | setting > game name in the base NSP > profile
+    app_name = args.app_name or APP_NAME or nacp_name(base) or g.get('app_name')   # 设置 > 基础版 NSP 里的游戏名 > 档案 | setting > game name in the base NSP > profile
     say(f'App 名 | app name: {app_name}')
 
     patched = work / f'patched_{pkg_ver}'
@@ -404,19 +438,26 @@ def main():
     if free_gb(out_ipa.parent) < 5: raise BuildError(f'{out_ipa.parent} 所在的卷剩余不足 5 GB | less than 5 GB free on the volume of {out_ipa.parent}')
     say(f'出 IPA | building the IPA → {out_ipa}')
     ipa_env = dict(env, GAME=g.id, W=str(work / 'ipa'), PATCHED=str(patched), ROMFS=str(game / 'RomFS'), MSL_IOS=str(ios), FONT_PY=py, DM_DISPLAY_NAME=app_name)
-    if DM_ENV_FILE: ipa_env['DM_ENV_FILE'] = os.path.expanduser(DM_ENV_FILE)
+    env_file = args.env_file or DM_ENV_FILE
+    if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
     run(['bash', repo / 'dm/ios/tools/build_ipa.sh', out_ipa], logs / 'build_ipa.log', env=ipa_env)
     if not out_ipa.is_file(): raise BuildError(f'没出 IPA | no IPA at {out_ipa}')
     rmtree(work / 'tmp')
-    if not KEEP_EXTRACTED:
+    if not (args.keep_extracted or KEEP_EXTRACTED):
         say(f'删掉解出的游戏文件 | deleting the extracted game files: {ex}'); rmtree(ex)
     say(f'完成 | done: {out_ipa}（{out_ipa.stat().st_size / 2**30:.1f} GB）')
 
 
-if __name__ == '__main__':
+def cli(argv):   # 返回退出码：0 完成，1 出错，130 中断 | returns the exit code: 0 done, 1 error, 130 interrupted
     try:
-        main()
+        main(parse_args(argv))
     except BuildError as e:
-        print(f'【红】{e}', flush=True)
+        print(f'【红】{e}', flush=True); return 1
     except KeyboardInterrupt:
-        print('【红】中断 | interrupted', flush=True)
+        print('【红】中断 | interrupted', flush=True); return 130
+    return 0
+
+
+if __name__ == '__main__':
+    code = cli(sys.argv[1:])
+    if not in_ipython(): sys.exit(code)   # 终端里给出退出码；Spyder 里不退（控制台保持干净） | give an exit code in a terminal; do not exit in Spyder (keeps the console clean)

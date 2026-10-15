@@ -22,7 +22,7 @@ Everything here was learned on two titles: Diablo II: Resurrected (SDK ~12, NVN 
 
 ## Checklist for a new title
 
-1. Run `dm/ios/tools/build_ipa_from_nsp.py` on the title's NSP folder. With no profile for its title ID, it writes `<NSP folder>/<title ID>_survey/survey.md`:
+1. Run `scripts/build_ipa_from_nsp.py` on the title's NSP folder. With no profile for its title ID, it writes `<NSP folder>/<title ID>_survey/survey.md`:
    - modules and build IDs, SDK version and components, engine and graphics API markers;
    - RomFS containers;
    - the rewrite-site census and imports vs. host hooks.
