@@ -18,7 +18,7 @@
 | `dm/ios/tools/build_ipa.sh` | `GAME=<名>` | App 名、包名、IPA 名、代码模块、RomFS 认定路径、各表 |
 | `scripts/build_ipa_from_nsp.py` | NSP 的标题号 | 以上全部。没有对应档案时只写粗查报告 |
 
-缺省都是马力欧（`010015100B514000`）。查档案：
+都没有缺省游戏：不给就停下并列出档案。查档案：
 - `python3 dm/games/game.py list` 列出全部档案。
 - `python3 dm/games/game.py <名> <键>` 打印一个键。
 

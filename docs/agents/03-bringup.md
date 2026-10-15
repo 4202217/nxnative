@@ -4,8 +4,8 @@
 
 ```bash
 DM_RULESET=native python3 dm/tools/patch_nso.py $W/data/v0/ExeFS/main $W/build/patched_v0 main   # and sdk
-make -C dm/host dmhost
-~/<title>-work/run/boot.sh <log name> [seconds] [VAR=value ...]
+make -C dm/host GAME=<title ID> dmhost
+~/<title ID>-work/run/boot.sh <log name> [seconds] [VAR=value ...]
 ```
 
 `boot.sh` runs `dmhost <patched dir>` with `DM_ROMFS`, `DM_SAVE`, `DM_TEMP`, `DM_MSL_DIR` set, under a perl `alarm` (a run that hits the time limit ends with `CRASH sig=14` — that is the alarm, not a crash). Logs go to `run/<name>.log`. Logs may contain non-UTF-8 bytes: use `grep -a` / `LC_ALL=C` when filtering.

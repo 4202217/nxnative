@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # 游戏档案：dm/games/<基础版标题号>/game.tsv（键 <TAB> 值…，# 开头为注释）+ 同目录的着色器表与 dmsh_chain.h。着色器工具、宿主构建、iOS 打包与 NSP 脚本都从这里取每个游戏的常数。
 # 用法：game.py list（列出全部档案）；game.py <名> <键>（打印该键的值，shell 用）；game.py header <名> <输出.h>（生成宿主的 game_profile.h）
-#   Python 里：import game; g = game.load()（取 DM_GAME，缺省马力欧 010015100B514000）；game.by_title(标题号)；g.get / g.words / g.int / g.builds() / g.table(文件名)
+#   Python 里：import game; g = game.load()（取 DM_GAME，没有缺省游戏：不设就报错并列出档案）；game.by_title(标题号)；g.get / g.words / g.int / g.builds() / g.table(文件名)
 # Game profiles: dm/games/<base game title ID>/game.tsv (key <TAB> values..., lines starting with # are comments) + the shader tables and dmsh_chain.h in the same folder. The shader tools, the host build, iOS packaging and the NSP script take each game's constants from here.
 # Usage: game.py list (list all profiles); game.py <id> <key> (print that key's value, for shell); game.py header <id> <out.h> (generate the host's game_profile.h)
-#   From Python: import game; g = game.load() (takes DM_GAME, default Mario 010015100B514000); game.by_title(title ID); g.get / g.words / g.int / g.builds() / g.table(file name)
+#   From Python: import game; g = game.load() (takes DM_GAME; there is no default game: unset is an error that lists the profiles); game.by_title(title ID); g.get / g.words / g.int / g.builds() / g.table(file name)
 import os, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DEFAULT = '010015100B514000'   # 没设 DM_GAME 时用的游戏（马力欧）| the game used when DM_GAME is not set (Mario)
 STAGES = {'vs': 0, 'ps': 1, 'gs': 2, 'hs': 3, 'ds': 4, 'cs': 5}   # NVN 着色器阶段号 | NVN shader stage numbers
 
 
@@ -48,7 +47,10 @@ class Game:
 
 
 def load(name=None):
-    name = name or os.environ.get('DM_GAME') or DEFAULT
+    name = name or os.environ.get('DM_GAME')
+    if not name:   # 没有缺省游戏 | there is no default game
+        have = ', '.join(f'{g.id} ({g.get("app_name", "")})' for g in all_games())
+        raise SystemExit(f'【红】没设 DM_GAME：用基础版标题号选游戏档案：{have} | DM_GAME is not set: pick a game profile by base game title ID: {have}')
     d = Path(name) if os.sep in str(name) else HERE / name
     if not (d / 'game.tsv').exists():   # 档案目录以基础版标题号命名（旧名 smbw / fe_engage 已不用）| profile folders are named after the base game's title ID (the old names smbw / fe_engage are gone)
         have = ', '.join(f'{g.id} ({g.get("app_name", "")})' for g in all_games())

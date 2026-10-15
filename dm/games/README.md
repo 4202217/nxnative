@@ -18,7 +18,7 @@ Everything game-specific belongs here. Code reads the profile; it does not hard-
 | `dm/ios/tools/build_ipa.sh` | `GAME=<id>` | app name, bundle ID, IPA name, modules, RomFS marker, tables |
 | `scripts/build_ipa_from_nsp.py` | the NSPs' title ID | everything above. With no matching profile it only writes a survey |
 
-All of them default to Mario (`010015100B514000`). To query a profile:
+None of them has a default game: without one they stop and list the profiles. To query a profile:
 - `python3 dm/games/game.py list` lists the profiles.
 - `python3 dm/games/game.py <id> <key>` prints one key.
 
