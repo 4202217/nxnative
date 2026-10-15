@@ -144,7 +144,59 @@ static int guest_name(const char *parent, const char *physical, char *out, size_
     if (errno != ENOATTR) return 0;
     strlcpy(out, physical, n); return 1;
 }
-static int path_component(char *parent, size_t n, const char *name, int create) {
+// 只读挂载（RomFS、退成只读的存档）目录的名字索引：客体名 → 物理名，按客体名排序。挂载表常驻、只读挂载整个进程里不变，所以每个目录首次查找时建一次就一直有效。
+// 下面逐项比对的原路每查一段都要对整个父目录逐项 getxattr：Engage 的语音库目录有 3.8 万项，开机遍历整个 RomFS（9680 个目录）在 Mac 上要约 17 秒黑屏、手机上更久，
+// 局内 Wwise 每开一个音频文件也要几十毫秒，期间还拿着全局路径锁。调用方都在 PATH_LOCK 下（同 host_path_ex），索引不另加锁。
+// Name index of the directories of read-only mounts (RomFS, a save that fell back to read-only): guest name → physical name, sorted by guest name. The mount table is resident and a read-only mount does not change for the whole process,
+// so each directory's index is built once at its first lookup and stays valid. The entry-by-entry comparison below calls getxattr on every entry of the parent directory for each path component:
+// Engage's voice bank directories have 38,000 entries, and walking the whole RomFS at boot (9,680 directories) took about 17 s of black screen on the Mac and longer on the phone;
+// in play every audio file Wwise opened also took tens of milliseconds, all while holding the global path lock. Callers all hold PATH_LOCK (like host_path_ex), so the index takes no lock of its own.
+typedef struct { const char *guest, *phys; } name_ent;
+typedef struct dir_index { struct dir_index *next; uint64_t hash; char *path; size_t n; name_ent *e; char *pool; } dir_index;
+#define DIR_INDEX_SLOTS 8192
+static dir_index *g_dir_index[DIR_INDEX_SLOTS];
+static uint64_t fnv1a(const char *s) { uint64_t h = 1469598103934665603ull; while (*s) { h ^= (uint8_t)*s++; h *= 1099511628211ull; } return h; }
+static int name_ent_cmp(const void *a, const void *b) { return strcmp(((const name_ent *)a)->guest, ((const name_ent *)b)->guest); }
+// 建不起来（打不开目录、某项读 xattr 出错）返回 NULL，调用方走原路
+// Returns NULL when it cannot be built (the directory cannot be opened, reading an entry's xattr fails); the caller then takes the original path
+static const dir_index *dir_index_get(const char *dir) {
+    uint64_t h = fnv1a(dir); dir_index **slot = &g_dir_index[h % DIR_INDEX_SLOTS];
+    for (dir_index *x = *slot; x; x = x->next) if (x->hash == h && !strcmp(x->path, dir)) return x;
+    DIR *d = opendir(dir); if (!d) return NULL;
+    // 先把名字攒进一块池（物理名只在与客体名不同时另存），偏移记在 off[]，池定长后再换成指针
+    // First gather the names into one pool (a physical name is stored separately only when it differs from the guest name), with offsets in off[]; they become pointers once the pool stops growing
+    size_t n = 0, cap = 64, plen = 0, pcap = 4096; size_t (*off)[2] = malloc(cap * sizeof *off); char *pool = malloc(pcap);
+    if (!off || !pool) die("目录索引分配失败");
+    struct dirent *e; char guest[0x301]; int ok = 1;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (!guest_name(dir, e->d_name, guest, sizeof guest)) { ok = 0; break; }
+        size_t gl = strlen(guest) + 1, same = !strcmp(guest, e->d_name), pl = same ? 0 : strlen(e->d_name) + 1;
+        if (n == cap && !(off = realloc(off, (cap *= 2) * sizeof *off))) die("目录索引分配失败");
+        while (plen + gl + pl > pcap) if (!(pool = realloc(pool, pcap *= 2))) die("目录索引分配失败");
+        off[n][0] = plen; memcpy(pool + plen, guest, gl); plen += gl;
+        off[n][1] = same ? off[n][0] : plen; if (!same) { memcpy(pool + plen, e->d_name, pl); plen += pl; }
+        n++;
+    }
+    closedir(d);
+    if (!ok) { free(off); free(pool); return NULL; }
+    dir_index *x = calloc(1, sizeof *x); if (!x || !(x->path = strdup(dir)) || !(x->e = malloc((n ? n : 1) * sizeof *x->e))) die("目录索引分配失败");
+    for (size_t i = 0; i < n; i++) { x->e[i].guest = pool + off[i][0]; x->e[i].phys = pool + off[i][1]; }
+    free(off); qsort(x->e, n, sizeof *x->e, name_ent_cmp);
+    x->hash = h; x->n = n; x->pool = pool; x->next = *slot; *slot = x;
+    return x;
+}
+static int path_component(char *parent, size_t n, const char *name, int create, int ro) {
+    if (ro && !create) {
+        const dir_index *x = dir_index_get(parent);
+        if (x) {
+            name_ent key = {name, NULL}; const name_ent *hit = bsearch(&key, x->e, x->n, sizeof *x->e, name_ent_cmp);
+            if (!hit) { errno = ENOENT; return 0; }
+            size_t len = strlen(parent), k = strlen(hit->phys);
+            if (len + k + 2 > n) { errno = ENAMETOOLONG; return 0; }
+            parent[len] = '/'; memcpy(parent + len + 1, hit->phys, k + 1); return 1;
+        }
+    }
     DIR *d = opendir(parent); if (!d) return 0;
     struct dirent *e; char physical[0x301] = "", guest[0x301];
     while ((e = readdir(d))) {
@@ -179,7 +231,7 @@ static int root_path(const char *root, const char *rest, char *out, size_t n) {
         if (k >= sizeof part) { errno = ENAMETOOLONG; return 0; }
         memcpy(part, rest, k); part[k] = 0;
         if (!strcmp(part, "..")) { errno = ENOENT; return 0; }
-        if (strcmp(part, ".") && !path_component(out, n, part, 0)) return 0;
+        if (strcmp(part, ".") && !path_component(out, n, part, 0, 1)) return 0;   // 覆盖层根都是 RomFS，只读 | overlay roots are all RomFS, read-only
         rest = end;
     }
     return 1;
@@ -236,7 +288,7 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
             memcpy(part, rest, k); part[k] = 0;
             if (!strcmp(part, "..")) { errno = ENOENT; return 0; }
             const char *next = end; while (*next == '/') next++;
-            if (strcmp(part, ".") && !path_component(out, n, part, create && !*next)) return 0;
+            if (strcmp(part, ".") && !path_component(out, n, part, create && !*next, g_mnt[i].ro)) return 0;
             rest = end;
         }
         return 1;
