@@ -6,6 +6,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <AVFAudio/AVFAudio.h>
+#include <errno.h>
 #include "front.h"
 #include "hle.h"
 #include "dm.h"
@@ -102,6 +103,25 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     if (!r) return 0;
     snprintf(out, out_cap, "%s", text.UTF8String ? text.UTF8String : "");
     return 1;
+}
+
+// 存档写失败（多半是手机存储满了）：主线程弹提示，不挡游戏（取自 d2r-mobile 的做法）。hle_fs.c 在存档事务被拒、或挂载时只能改成只读时调；
+// 原先 iOS 前端没接，只有日志里一行，玩家不知道进度没存上
+// Save write failed (most likely the phone's storage is full): show a notice on the main thread without blocking the game (as d2r-mobile does). hle_fs.c calls this when a save transaction is refused or a mount has to fall back to read-only;
+// the iOS front end used not to implement it, so there was only a log line and the player never learned that progress was not being saved
+void front_save_failed(int err) {
+    LOG("前端：存档写失败 errno=%d，提示玩家", err);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *vc = nil;
+        for (UIScene *s in UIApplication.sharedApplication.connectedScenes) if ([s isKindOfClass:UIWindowScene.class]) for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow) vc = w.rootViewController;
+        while (vc.presentedViewController) vc = vc.presentedViewController;
+        if (!vc) { LOG("【红】前端：存档失败提示没有窗口 errno=%d", err); return; }
+        NSString *m = err == ENOSPC ? @"存储空间不足，进度没有存上。请清理空间后再存档。\nStorage is full, so progress was not saved. Free up space and save again."
+                                    : [NSString stringWithFormat:@"存档写入失败（errno %d），进度没有存上。\nSaving failed (errno %d); progress was not saved.", err, err];
+        UIAlertController *a = [UIAlertController alertControllerWithTitle:@"存档失败 / Save failed" message:m preferredStyle:UIAlertControllerStyleAlert];
+        [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [vc presentViewController:a animated:YES completion:nil];
+    });
 }
 
 // 音频会话：RemoteIO 每次回调要的帧数跟着 I/O 缓冲时长走，iOS 缺省约 21 ms（48 kHz 下 1024 帧）。游戏在途只有 4 块 × 5 ms = 20 ms，

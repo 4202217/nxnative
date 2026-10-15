@@ -7,6 +7,10 @@
 #define TLR_SIZE 0x200
 #define THREAD_OBJ_SIZE 0x400
 extern void dm_gate(void);            // entry.S：门公共入口 | entry.S: common gate entry
+static pthread_key_t g_keyown;   // 本线程申请到的 TLS 块 / 线程本地区的原始指针（见 guest_thread_init 末尾） | raw pointers of the TLS block / thread-local region this thread allocated (see the end of guest_thread_init)
+static pthread_once_t g_keyown_once = PTHREAD_ONCE_INIT;
+static void own_free(void *p) { void **own = p; free(own[0]); free(own[1]); free(own); }
+static void own_key_init(void) { if (pthread_key_create(&g_keyown, own_free)) die("创建线程本地块的释放键失败"); }
 #include "front.h"
 #include "dm_uiscreen.h"
 void guest_thread_init(void) {
@@ -29,8 +33,19 @@ void guest_thread_init(void) {
         if (g_keyaspectui) { memcpy(&bits, &ui, 4); pthread_setspecific(g_keyaspectui, (void *)(uintptr_t)bits); }
     }
     pthread_setspecific(g_key18, 0);
-    pthread_setspecific(g_keytls, calloc(1, TLS_SIZE));
-    uint8_t *tlr = calloc(1, TLR_SIZE);
-    *(void **)(tlr + 0x1f8) = calloc(1, THREAD_OBJ_SIZE);   // 当前线程对象 | current thread object
-    pthread_setspecific(g_keytlr, tlr);
+    // TLS 块与线程本地区随线程退出释放（取自 d2r-mobile 2eb575877）。客体会改写 TLS / 线程本地区这两把键的槽（它自己设线程指针），所以不能按键里的当前值去 free：
+    // 申请到的原始指针另记在本文件自己的键 g_keyown 上，由它的析构放（键析构在 pthread_exit 时调用，同 crash.c 的信号备用栈；析构里只有 free，客体线程的小栈上也安全）。
+    // 原先不放：游戏起一条短命线程就漏 8192 + 0x200 + 0x400 = 9728 字节。线程本地区与当前线程对象并成一块（TLR[0x1f8] 那一格 SDK 也可能改写）
+    // The TLS block and the thread-local region are freed when the thread exits (from d2r-mobile 2eb575877). The guest overwrites the slots of the TLS / thread-local-region keys (it sets its own thread pointer), so they cannot be freed by the current value in the key:
+    // the raw pointers that were allocated are recorded separately on this file's own key g_keyown and freed by its destructor (key destructors run at pthread_exit, like crash.c's signal alternate stack; the destructor only calls free, which is safe on a guest thread's small stack too).
+    // They used not to be freed: every short-lived thread the game started leaked 8192 + 0x200 + 0x400 = 9728 bytes. The thread-local region and the current thread object are one block (the SDK may also overwrite the TLR[0x1f8] slot)
+    pthread_once(&g_keyown_once, own_key_init);
+    void **own = calloc(2, sizeof *own); uint8_t *tlr = calloc(1, TLR_SIZE + THREAD_OBJ_SIZE);
+    if (!own || !tlr) die("客体线程本地块分配失败");
+    own[0] = calloc(1, TLS_SIZE); own[1] = tlr;
+    if (!own[0]) die("客体线程 TLS 块分配失败");
+    *(void **)(tlr + 0x1f8) = tlr + TLR_SIZE;               // 当前线程对象 | current thread object
+    pthread_setspecific(g_keytls, own[0]); pthread_setspecific(g_keytlr, tlr);
+    void **prev = pthread_getspecific(g_keyown); if (prev) own_free(prev);   // 同一线程再初始化：先放上一份（同 crash_thread_init 只配一次的道理，这里按新的为准） | re-initialised on the same thread: free the previous set first (the new one is what the slots now point to)
+    pthread_setspecific(g_keyown, own);
 }

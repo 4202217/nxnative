@@ -19,7 +19,7 @@ make -C dm/host dmhost
 | `UNIMPL <name>` | A forced NVN / SDK stub was called |
 | `[nvn] 帧 N：… \| name=count …` | Per-frame NVN call counts (calls made on the frame thread; command buffers recorded elsewhere replay later) |
 | `[长帧]` | A long frame, with submit / GPU / pipeline / upload breakdown |
-| `内存 至帧 N：常驻 … 显卡已分配 …` | Memory report (RSS, Metal allocated size). Printed when memory moves; steady growth here is a leak. A watchdog exits at 24 GB |
+| `内存 至帧 N：常驻 … 显卡已分配 …` | Memory report (RSS, Metal allocated size). Printed when memory moves; steady growth here is a leak. A watchdog exits at 24 GB. Also: memory pools and how many are resident (pools join the residency set on first GPU use), finalized pool buffers still alive, the storage-sharing texture table, and on iOS `离系统内存上限还有` (`os_proc_available_memory`, how far the app is from being killed for memory) |
 | `CRASH sig=… pc=… lr=…` + registers + `bt:` + `栈扫描` + thread dump | Crash report: see [05](05-debugging.md) |
 | `线程 0x10xx 「name」… 等:<state> addr=…` | Thread dump: what each guest thread waits on (`地址` = address arbiter, `锁` = mutex with holder, `条件变量`, `同步对象`, `运行/未在等` = running) |
 

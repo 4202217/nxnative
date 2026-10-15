@@ -77,11 +77,15 @@ Patterns that worked: print every call of one function with its arguments; stop 
 
 ## Memory growth
 
-1. The host's memory report line (`内存 至帧 …`) every few hundred frames; `footprint -p <pid>` from outside.
+1. The host's memory report line (`内存 至帧 …`) every few hundred frames; `footprint -p <pid>` from outside. On a phone, a crash with no log usually means `离系统内存上限还有` reached 0.
 2. `vmmap -summary <pid>` twice a few seconds apart: which region grows. "owned unmapped (graphics)" = private Metal resources.
 3. `DM_NVN_ALLOCPROF=1`: growth per replayed op type and per function (`tex_mtl` / pass begin / pipelines / argument buffers), command allocator sizes, and a log of new textures with serial, size, format and storage. A stream of new serials with the same sizes = objects re-created every frame.
 
 Instruments' Metal Resource Events didn't record this process from the command line (`xctrace record --launch`, with `--env` for the variables); the in-host probes were faster.
+
+## Save failures
+
+`DM_TEST_FS_FAILAT=<point>[:<count>][,…]` makes steps of the save transaction fail with ENOSPC (`mountclone`, `reclone`, `guestname`, `renameback`; `dm/host/tests/t_fs.c` section 6). The game must keep running: a mount that cannot clone its work directory falls back to the committed saves read-only, and the iOS front end shows a notice.
 
 ## Render-pass investigation
 
