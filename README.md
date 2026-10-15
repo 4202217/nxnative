@@ -121,10 +121,10 @@ Sign and install the IPA with your own tool (AltStore, Sideloadly, ...). The too
 - `front_ios.m`: the `front.h` functions and a centred 16:9 Metal view.
 - `DmGamepad.m`: a translucent touch gamepad, drawn over the picture and kept close to the edges:
   - ZL above L in the top-left corner, ZR above R in the top-right;
-  - − and + in the bottom corners, with the D-pad and A/B/X/Y (Nintendo positions) just above them;
-  - left and right sticks (fixed rings) just inside those.
+  - − and + side by side at the top centre;
+  - the left stick (a fixed ring) in the bottom-left corner and A/B/X/Y (Nintendo positions) in the bottom-right, the same size and mirrored.
 
-  The gamepad is hidden while a physical controller is connected. Physical buttons map by position.
+  There is no on-screen D-pad or right stick. The gamepad is hidden while a physical controller is connected; physical controllers keep every button and map by position.
 
 The host log goes to the app's Documents (`log.txt`, with the previous run in `log.prev.txt`), visible in the Files app. Game files are also accepted at `Documents/romfs`. Environment switches can also go in `Documents/env.txt`, in the same format as `DM_ENV_FILE`. It takes precedence over the bundled file, so a sideloaded app can be switched without rebuilding.
 
