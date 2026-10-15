@@ -20,6 +20,7 @@ void hle_signal_system_event(void *g) {
     if (atomic_load_explicit(&g_last_pull, memory_order_seq_cst)) atomic_store(&g_after_last, 1);
 }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
+module_t *module_of(const void *p) { (void)p; return NULL; }   // 日志里的调用点：单测里没有客体模块 | call sites in the log: no guest modules in the unit test
 
 typedef struct {
     void *out;

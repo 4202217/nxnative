@@ -30,6 +30,10 @@ typedef struct {
     pthread_t null_th; _Atomic int null_run;
     dispatch_semaphore_t notify_sem;
     pthread_t notify_th; _Atomic int notify_run, notify_pending, notify_armed;
+    int id;                            // 打开序号（日志里的 #N；同时开着几个输出时分得清，例如 Engage 的 Wwise 与 Unity 自带的 FMOD） | open sequence number (#N in the log; tells simultaneous outputs apart, e.g. Engage's Wwise and Unity's built-in FMOD)
+    int nlog;                          // Start / Stop / Close 已记的行数（每个输出最多记 32 行） | Start / Stop / Close lines logged so far (at most 32 per output)
+    _Atomic uint64_t under_n, under_b; // 欠载：回调要数据时待播队列已空的次数 / 补零字节 | underruns: times the pending queue was empty when the callback needed data / zero-filled bytes
+    uint64_t st_calls, st_qsum, st_u0, st_ub0; uint32_t st_fmin, st_fmax;   // 声卡回调统计（只在回调线程里读写） | sound card callback statistics (read and written only on the callback thread)
 } aout;
 
 // 打开中的输出登记表：前端生命周期（切后台）一次性暂停 / 恢复
@@ -39,6 +43,17 @@ static aout *g_aos[AOMAX];
 static pthread_mutex_t g_aos_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_suspended;
 static aout *ao(const void *g) { aout *a = objmap_get(g); if (!a) die("AudioOut %p 不是宿主建的", g); return a; }
+// 调用点写成「模块+偏移」；宿主自己调（进程内音频渲染器）时写「宿主」 | the call site as "module+offset"; "宿主" (host) when the host itself calls (in-process audio renderer)
+static const char *site(void *lr, char *buf, size_t n) {
+    module_t *m = lr ? module_of(lr) : NULL;
+    if (m) snprintf(buf, n, "%s+%#llx", m->name, (unsigned long long)((uint8_t *)lr - m->base)); else snprintf(buf, n, "宿主");
+    return buf;
+}
+// Start / Stop / Close 每个输出最多记 32 行：中间件只在初始化、挂起、恢复时调，多了说明在反复开关 | Start / Stop / Close: at most 32 lines per output; middleware calls them only at init, suspend and resume, more means it keeps toggling
+static void au_note(aout *a, const char *what, void *lr) {
+    char b[64];
+    if (a->nlog < 32) { a->nlog++; LOG("audio #%d %s（调用点 %s）%s", a->id, what, site(lr, b, sizeof b), a->nlog == 32 ? "；此后不再记" : ""); }
+}
 
 static void notify_release(aout *a) {
     atomic_store_explicit(&a->notify_pending, 1, memory_order_release);
@@ -61,8 +76,6 @@ static void *event_notify(void *p) {
     return NULL;
 }
 
-// 欠载：回调要数据时待播队列已空的次数 / 补零字节（au_render 每 2000 次回调记一行） | underruns: times the pending queue was empty when the callback needed data / zero-filled bytes (au_render logs one line every 2000 callbacks)
-static _Atomic uint64_t g_au_under_n, g_au_under_b;
 // 从待播队列取 n 字节交给出声端；整块播完就挪到已释放并通知普通线程。
 // Take n bytes from the pending queue and hand them to the output side; once a whole block has played, move it to released and notify the ordinary thread.
 static void pull(aout *a, uint8_t *dst, uint64_t n) {
@@ -71,7 +84,7 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
     while (n) {
         uint32_t qt = atomic_load_explicit(&a->q_tail, memory_order_acquire);
         if (qh == qt || atomic_load_explicit(&a->state, memory_order_acquire) != STATE_STARTED) {
-            if (qh == qt && atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED) { atomic_fetch_add(&g_au_under_n, 1); atomic_fetch_add(&g_au_under_b, n); }
+            if (qh == qt && atomic_load_explicit(&a->state, memory_order_acquire) == STATE_STARTED) { atomic_fetch_add(&a->under_n, 1); atomic_fetch_add(&a->under_b, n); }
             memset(dst, 0, n); break; }
         gbuf *b = a->q[qh & (QMAX - 1)];
         uint64_t k = b->size - a->pos; if (k > n) k = n;
@@ -96,14 +109,19 @@ uint64_t dm_audio_render_calls(void) { return atomic_load_explicit(&g_render_cal
 static OSStatus au_render(void *ctx, AudioUnitRenderActionFlags *f, const AudioTimeStamp *ts, UInt32 bus, UInt32 frames, AudioBufferList *bl) {
     (void)f; (void)ts; (void)bus; (void)frames;
     aout *a = ctx;
-    uint64_t nc = atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed) + 1;
-    {   // 每 2000 次回调记一行：每次要多少帧、回调开始时待播多少块、欠载次数（换新设备时看这行；docs/agents/03-bringup.md「iOS 上爆音」） | every 2000 callbacks log one line: frames requested per call, pending blocks at callback start, underruns (check this line on a new device; docs/agents/03-bringup.md "Crackling on iOS only")
-        static uint32_t fmin = ~0u, fmax; static uint64_t qsum, u0, ub0; uint32_t qd = atomic_load(&a->q_tail) - atomic_load(&a->q_head);
-        if (frames < fmin) fmin = frames; if (frames > fmax) fmax = frames; qsum += qd;
-        if (nc % 2000 == 0) { uint64_t un = atomic_load(&g_au_under_n), ubb = atomic_load(&g_au_under_b);
-            LOG("audio 声卡回调 %llu 次：每次 %u–%u 帧，回调时待播均 %.1f 块；这 2000 次里欠载 %llu 次、补零 %.1f ms", (unsigned long long)nc, fmin, fmax, qsum / 2000.0,
-                (unsigned long long)(un - u0), (ubb - ub0) / (2.0 * a->ch) / (RATE / 1000.0)); fmin = ~0u; fmax = 0; qsum = 0; u0 = un; ub0 = ubb; } }
+    atomic_fetch_add_explicit(&g_render_calls, 1, memory_order_relaxed);
+    {   // 每个输出每 2000 次回调记一行：每次要多少帧、回调开始时待播多少块、欠载次数（换新设备时看这行；docs/agents/03-bringup.md「iOS 上爆音」）。
+        // 按输出分开记：同时开着两个输出时合在一起的数会误导（一个喂满、一个没人喂，合起来像「每隔一次欠载」）
+        // Every 2000 callbacks of each output, log one line: frames requested per call, pending blocks at callback start, underruns (check this line on a new device; docs/agents/03-bringup.md "Crackling on iOS only").
+        // Kept per output: with two outputs open, combined numbers mislead (one fully fed and one fed by nobody look like "every other callback underruns")
+        uint32_t qd = atomic_load(&a->q_tail) - atomic_load(&a->q_head);
+        if (!a->st_calls || frames < a->st_fmin) a->st_fmin = frames; if (frames > a->st_fmax) a->st_fmax = frames; a->st_qsum += qd;
+        if (++a->st_calls % 2000 == 0) { uint64_t un = atomic_load(&a->under_n), ubb = atomic_load(&a->under_b);
+            LOG("audio #%d 声卡回调 %llu 次：每次 %u–%u 帧，回调时待播均 %.1f 块；这 2000 次里欠载 %llu 次、补零 %.1f ms", a->id, (unsigned long long)a->st_calls, a->st_fmin, a->st_fmax, a->st_qsum / 2000.0,
+                (unsigned long long)(un - a->st_u0), (ubb - a->st_ub0) / (2.0 * a->ch) / (RATE / 1000.0)); a->st_fmin = ~0u; a->st_fmax = 0; a->st_qsum = 0; a->st_u0 = un; a->st_ub0 = ubb; } }
     pull(a, bl->mBuffers[0].mData, bl->mBuffers[0].mDataByteSize);
+    { static int mute = -1; if (mute < 0) { const char *e = getenv("DM_AUDIO_MUTE"); mute = e && atoi(e); }   // 诊断：走真出声的整条路（AudioUnit 回调节奏、切后台接手），但输出静音（Mac 上测生命周期不吵人） | diagnostic: the whole real-output path (AudioUnit callback pacing, background take-over) but with the output silenced (lifecycle tests on the Mac without noise)
+      if (mute) memset(bl->mBuffers[0].mData, 0, bl->mBuffers[0].mDataByteSize); }
     return noErr;
 }
 static void au_open(aout *a) {
@@ -130,13 +148,16 @@ static void au_open(aout *a) {
         AudioUnitSetProperty(a->au, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &cb, sizeof cb) ||
         AudioUnitInitialize(a->au)) die("AudioUnit 设置失败");
 }
-// 静音接收端：每 5 ms 按 48 kHz 实时消耗
-// Silent sink: consumes in real time at 48 kHz every 5 ms
+// 静音接收端：每 5 ms 按 48 kHz 实时消耗。落后超过 100 ms（iOS 在后台把整个进程挂起过、Mac 上 SIGSTOP）就从现在重新起算，不补播漏掉的时间——
+// 补的话会一口气连取几百次（几秒的量），把游戏的缓冲全释放、再记几百次欠载；真机挂起时也不播这段
+// Silent sink: consumes in real time at 48 kHz every 5 ms. When more than 100 ms behind (iOS suspended the whole process in the background, SIGSTOP on the Mac), restart the count from now and do not make up the missed time --
+// making it up would pull hundreds of times in one go (seconds' worth), releasing all of the game's buffers and logging hundreds of underruns; a suspended console does not play that stretch either
 static void *null_sink(void *p) {
     aout *a = p; uint8_t scratch[RATE / 200 * 2 * 8];
     uint64_t bytes = (uint64_t)RATE / 200 * 2 * a->ch, t = now_ns();
     while (atomic_load_explicit(&a->null_run, memory_order_acquire)) {
-        t += 5000000; uint64_t now = now_ns(); if (t > now) usleep((useconds_t)((t - now) / 1000));
+        t += 5000000; uint64_t now = now_ns();
+        if (t > now) usleep((useconds_t)((t - now) / 1000)); else if (now - t > 100000000) t = now;
         pull(a, scratch, bytes);
     }
     return NULL;
@@ -151,8 +172,8 @@ HLE_FORCE("_ZN2nn5audio13ListAudioOutsEPNS0_12AudioOutInfoEi", "音频输出设�
     if (n < 1) return 0;
     memset(info, 0, 256); strcpy(info, "DeviceOut"); return 1;
 }
-HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKNS0_17AudioOutParameterE", "连 audout 服务；宿主 AudioUnit / 静音接收端",
-          Result, h_au_Open, void *g, void *ev, const char *name, const uint8_t *param) {
+static Result au_open_at(void *g, void *ev, const char *name, const uint8_t *param, void *lr) {
+    static _Atomic int nopen;
     int ch = *(const uint16_t *)(param + 4); int rate = *(const int32_t *)param;
     if (!ch) ch = 2;
     if (rate && rate != RATE) die("AudioOut 采样率 %d 不支持（只做 48 kHz）", rate);
@@ -163,7 +184,7 @@ HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKN
     atomic_init(&a->rel_head, 0); atomic_init(&a->rel_tail, 0);
     atomic_init(&a->null_run, 0); atomic_init(&a->notify_run, 1);
     atomic_init(&a->notify_pending, 0); atomic_init(&a->notify_armed, 0);
-    a->notify_sem = dispatch_semaphore_create(0);
+    a->notify_sem = dispatch_semaphore_create(0); a->id = atomic_fetch_add(&nopen, 1);
     pthread_create(&a->notify_th, NULL, event_notify, a);
     if (ev) hle_bind_system_event(ev, 1);   // 缓冲释放事件：客体线程上绑内核事件（自动清除），之后由音频线程触发 | Buffer release event: bind a kernel event on the guest thread (auto-clear), afterwards signaled by the audio thread
     objmap_put(g, a);
@@ -172,34 +193,42 @@ HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKN
     if (slot < 0) die("AudioOut 同时打开超过 %d 个", AOMAX);
     g_aos[slot] = a;
     pthread_mutex_unlock(&g_aos_lock);
-    LOG("audio::OpenAudioOut %s 声道 %d %s", name ? name : "(默认)", ch, real_audio() ? "真出声" : "静音接收端");
+    char sb[64];
+    LOG("audio #%d OpenAudioOut %s 声道 %d %s%s（调用点 %s）", a->id, name ? name : "(默认)", ch, real_audio() ? "真出声" : "静音接收端", ev ? "" : "，无释放事件（游戏轮询）", site(lr, sb, sizeof sb));
     if (real_audio()) au_open(a);
     return RES_OK;
 }
+HLE_FORCE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKNS0_17AudioOutParameterE", "连 audout 服务；宿主 AudioUnit / 静音接收端",
+          Result, h_au_Open, void *g, void *ev, const char *name, const uint8_t *param) { return au_open_at(g, ev, name, param, __builtin_return_address(0)); }
 // 缺省设备的两个重载（Engage，SDK 12）：同 OpenAudioOut，设备名取缺省；不带事件的重载不绑释放事件（游戏轮询 GetReleasedAudioOutBuffer）
 // The two default-device overloads (Engage, SDK 12): as OpenAudioOut with the default device name; the overload without an event binds no release event (the game polls GetReleasedAudioOutBuffer)
 HLE_FORCE("_ZN2nn5audio19OpenDefaultAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventERKNS0_17AudioOutParameterE", "连 audout 服务（缺省设备）；同 OpenAudioOut",
-          Result, h_au_OpenDef, void *g, void *ev, const uint8_t *param) { return h_au_Open(g, ev, NULL, param); }
+          Result, h_au_OpenDef, void *g, void *ev, const uint8_t *param) { return au_open_at(g, ev, NULL, param, __builtin_return_address(0)); }
 HLE_FORCE("_ZN2nn5audio19OpenDefaultAudioOutEPNS0_8AudioOutERKNS0_17AudioOutParameterE", "连 audout 服务（缺省设备、无事件）；同 OpenAudioOut",
-          Result, h_au_OpenDef0, void *g, const uint8_t *param) { return h_au_Open(g, NULL, NULL, param); }
-HLE_FORCE("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", "开始播放", Result, h_au_Start, void *g) {
+          Result, h_au_OpenDef0, void *g, const uint8_t *param) { return au_open_at(g, NULL, NULL, param, __builtin_return_address(0)); }
+static Result au_start_at(void *g, void *lr) {
     aout *a = ao(g);
     pthread_mutex_lock(&a->m); int was = atomic_load_explicit(&a->state, memory_order_relaxed); atomic_store_explicit(&a->state, STATE_STARTED, memory_order_release); pthread_mutex_unlock(&a->m);
+    au_note(a, was == STATE_STARTED ? "Start（已在播）" : g_suspended ? "Start（App 在后台：先由静音接收端接手）" : "Start", lr);
     if (was == STATE_STARTED) return RES_OK;
     if (a->au && !g_suspended) { if (AudioOutputUnitStart(a->au)) die("AudioUnit 启动失败"); }
     else { atomic_store_explicit(&a->null_run, 1, memory_order_release); pthread_create(&a->null_th, NULL, null_sink, a); }
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn5audio12StopAudioOutEPNS0_8AudioOutE", "停止播放", void, h_au_Stop, void *g) {
+HLE_FORCE("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", "开始播放", Result, h_au_Start, void *g) { return au_start_at(g, __builtin_return_address(0)); }
+static void au_stop_at(void *g, void *lr) {   // lr 为 NULL：Close 里顺带停，不另记一行 | lr NULL: the stop inside Close, not logged separately
     aout *a = ao(g);
     pthread_mutex_lock(&a->m); int was = atomic_load_explicit(&a->state, memory_order_relaxed); atomic_store_explicit(&a->state, STATE_STOPPED, memory_order_release); pthread_mutex_unlock(&a->m);
+    if (lr) au_note(a, was == STATE_STARTED ? "Stop" : "Stop（本来就停着）", lr);
     if (was != STATE_STARTED) return;
     pthread_mutex_lock(&g_aos_lock); int susp = g_suspended; pthread_mutex_unlock(&g_aos_lock);
     if (a->au && !susp) AudioOutputUnitStop(a->au);
     else { atomic_store_explicit(&a->null_run, 0, memory_order_release); pthread_join(a->null_th, NULL); }   // 静音接收端（含暂停期间接手的） | Silent sink (including one that took over during suspension)
 }
+HLE_FORCE("_ZN2nn5audio12StopAudioOutEPNS0_8AudioOutE", "停止播放", void, h_au_Stop, void *g) { au_stop_at(g, __builtin_return_address(0)); }
 HLE_FORCE("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", "关闭音频输出", void, h_au_Close, void *g) {
-    h_au_Stop(g);
+    au_note(ao(g), "Close", __builtin_return_address(0));
+    au_stop_at(g, NULL);
     aout *a = objmap_del(g);
     atomic_store_explicit(&a->notify_run, 0, memory_order_release);
     dispatch_semaphore_signal(a->notify_sem);
@@ -251,10 +280,10 @@ HLE_FORCE("_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE", "取已播�
 // Host-internal PCM output (used by the in-process audio renderer, see hle_audren.c): the same AudioOut machinery (real output / silent sink / background take-over), keyed by a host-allocated dummy object
 void *dm_pcmout_open(int ch) {
     void *key = calloc(1, 64); uint8_t param[8] = {0}; *(uint16_t *)(param + 4) = (uint16_t)ch;
-    if (h_au_Open(key, NULL, "AudioRenderer", param)) die("宿主 PCM 输出打不开");
+    if (au_open_at(key, NULL, "AudioRenderer", param, NULL)) die("宿主 PCM 输出打不开");
     return key;
 }
-void dm_pcmout_start(void *k) { h_au_Start(k); }
+void dm_pcmout_start(void *k) { au_start_at(k, NULL); }
 int dm_pcmout_append(void *k, void *b) { return (int)h_au_Append(k, b); }
 void *dm_pcmout_released(void *k) { return h_au_Released(k); }
 

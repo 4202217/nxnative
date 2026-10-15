@@ -12,6 +12,7 @@ void *objmap_del(const void *k) { for (int i = 0; i < 8; i++) if (om[i].k == k) 
 static _Atomic int g_sig;
 void hle_signal_system_event(void *g) { (void)g; atomic_fetch_add_explicit(&g_sig, 1, memory_order_seq_cst); }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }   // 真实现要客体线程 + SDK 内核事件；单测只数触发次数 | the real implementation needs a guest thread + SDK kernel event; the unit test only counts triggers
+module_t *module_of(const void *p) { (void)p; return NULL; }   // 日志里的调用点：单测里没有客体模块 | call sites in the log: no guest modules in the unit test
 int main(void) {
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);

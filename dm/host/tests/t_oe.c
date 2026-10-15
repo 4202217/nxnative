@@ -20,6 +20,9 @@ int mtl_fps_target(void) { return 60; }   // 目标帧率（nvn_mtl.m）：单�
 pthread_key_t g_keyres[2];                                   // 分辨率参数位（loader.c）的桩：没建键，取走 31 时不写线程槽 | stub for the resolution parameter slot (loader.c): no key created, so taking 31 does not write the thread slot
 uint64_t dm_game_res(int docked) { (void)docked; return 0; }  // 出图分辨率（dm_uiscreen.c）的桩 | stub for the render resolution (dm_uiscreen.c)
 void dm_uiscreen_res_reread(void) {}
+void dm_audio_suspend(int on) { (void)on; }   // DM_OE_SCRIPT 的 bg 项（hle_audio.c / hle_os.c / hle_nvn.c）的桩 | stubs for the bg item of DM_OE_SCRIPT (hle_audio.c / hle_os.c / hle_nvn.c)
+void guest_clock_freeze_for(int reason, int on) { (void)reason; (void)on; }
+void dm_gfx_suspend(int on) { (void)on; }
 static int checks, fails;
 #define CHECK(c, s) do { checks++; int ok = !!(c); fails += !ok; printf("%s %s\n", ok ? "✓" : "✗", s); } while (0)
 static void reset(void) { g_mqh = g_mqn = 0; g_focus = 1; g_opmode = 1; g_ntf_opmode = g_ntf_perfmode = 0; }

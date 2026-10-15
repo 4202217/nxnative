@@ -68,9 +68,9 @@ $(B)/t_thread_leak: t_thread_leak.c ../thread.c ../dm.h | $(B)
 $(B)/t_fs: t_fs.c t_fs_stub.c ../hle_fs.c ../hle.h ../dm.h ../dm_i18n.c | $(B)
 	clang -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_fs.c t_fs_stub.c ../dm_i18n.c
 $(B)/t_audio: t_audio.c ../hle_audio.c ../hle.h ../dm.h | $(B)
-	clang -O1 -Wno-unused-function -I.. -o $@ t_audio.c -framework AudioToolbox
+	clang -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio.c -framework AudioToolbox
 $(B)/t_audio_spsc: t_audio_spsc.c ../hle_audio.c ../hle.h ../dm.h | $(B)
-	clang -O1 -Wno-unused-function -I.. -o $@ t_audio_spsc.c -framework AudioToolbox
+	clang -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_audio_spsc.c -framework AudioToolbox
 $(B)/t_audio_spsc_tsan: t_audio_spsc.c ../hle_audio.c ../hle.h ../dm.h | $(B)
 	clang -O1 -g -O1 -fsanitize=thread -Wno-unused-function -I.. -o $@ t_audio_spsc.c -framework AudioToolbox
 $(B)/t_swkbd: t_swkbd.c ../hle_swkbd.c ../hle.h ../dm.h | $(B)
@@ -100,7 +100,7 @@ $(B)/t_hid_script: t_hid_script.c t_touch_tick_stub.c ../hle_hid.c ../dm_cursor.
 	clang -O1 -Wno-unused-function -I.. -I../../ios/Sources -o $@ t_hid_script.c t_touch_tick_stub.c ../dm_cursor.c ../dm_hud.c ../touch_mac.c ../../ios/Sources/dm_touch_controls.c -lm
 
 $(B)/t_oe: t_oe.c ../hle_oe.c ../hle.h ../dm.h | $(B)
-	clang -O1 -Wno-unused-function -I.. -o $@ t_oe.c
+	clang -O1 -Wno-unused-function -I.. $(GINC) -o $@ t_oe.c
 
 $(B)/t_hid_receipt: t_hid_receipt.c t_touch_tick_stub.c ../hle_hid.c ../dm_cursor.c ../dm_hud.c ../dm_hud.h ../touch_mac.c ../../ios/Sources/dm_touch_controls.c ../hle.h ../dm.h ../dm_input.h ../front.h | $(B)
 	clang -O1 -Wno-unused-function -I.. -I../../ios/Sources -o $@ t_hid_receipt.c t_touch_tick_stub.c ../dm_cursor.c ../dm_hud.c ../touch_mac.c ../../ios/Sources/dm_touch_controls.c -lm

@@ -90,13 +90,21 @@ HLE_FORCE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", "设
     LOG("oe::SetPerformanceConfiguration mode=%d cfg=%#x（忽略）", mode, cfg);
 }
 
-// 脚本化状态变化（无窗口验证生命周期 / 过热降级）：DM_OE_SCRIPT="focus=3@10,focus=1@20,opmode=0@30"（第 N 秒）
+// 脚本化状态变化（无窗口验证生命周期 / 过热降级）：DM_OE_SCRIPT="focus=3@10,focus=1@20,opmode=0@30"（第 N 秒）；bg=1 / bg=0 走整套切后台 / 回前台（见 script_bg）
 // 时刻从游戏第一次取通知算起；「@ingame+N」= 读取画面第 K 次撤下（K = 前面 @ingame 项数 + 1，首个即进局）后 N 秒（按事件，不受负载影响）。与前端调用并存。
-// Scripted state changes (verify lifecycle / overheat downgrade without a window): DM_OE_SCRIPT="focus=3@10,focus=1@20,opmode=0@30" (second N)
+// Scripted state changes (verify lifecycle / overheat downgrade without a window): DM_OE_SCRIPT="focus=3@10,focus=1@20,opmode=0@30" (second N); bg=1 / bg=0 run the whole background round trip (see script_bg)
 // Time counts from the game's first notification fetch; "@ingame+N" = N seconds after the loading screen is taken down for the K-th time (K = number of preceding @ingame items + 1, the first one is run entry) (event-based, not affected by load). Coexists with front end calls.
 #include <unistd.h>
 static _Atomic int g_ls_unloads;   // 读取画面撤下次数（diag.c 的 UIMSG 处理调 dm_note_loadscreen_unload） | number of times the loading screen was taken down (the UIMSG handler in diag.c calls dm_note_loadscreen_unload)
 void dm_note_loadscreen_unload(void) { atomic_fetch_add(&g_ls_unloads, 1); }
+// bg=1 / bg=0：整套「切后台 / 回前台」，与 front_ios.m 场景生命周期同序（失活 → 进后台；回前台 → 激活），只少了 iOS 回前台时重设音频会话。
+// Mac 上复现「切后台再回来之后」的问题用（音频接手与恢复、客体时钟冻结、图形挂起）；要连进程挂起一起模仿，在两项之间对 dmhost 发 SIGSTOP / SIGCONT
+// bg=1 / bg=0: the whole "to background / back to foreground" sequence, in the same order as the scene lifecycle in front_ios.m (resign active -> enter background; enter foreground -> become active), minus the audio session reset iOS does on returning.
+// Used to reproduce "after going to the background and back" problems on the Mac (audio take-over and resume, guest clock freeze, graphics suspend); to imitate the process being suspended as well, send dmhost SIGSTOP / SIGCONT between the two items
+static void script_bg(int on) {
+    if (on) { dm_focus_set(2); dm_focus_set(3); dm_audio_suspend(1); guest_clock_freeze_for(1, 1); dm_gfx_suspend(1); }
+    else { dm_gfx_suspend(0); guest_clock_freeze_for(1, 0); dm_audio_suspend(0); dm_focus_set(2); dm_focus_set(1); }
+}
 static void *oe_script(void *arg) {
     char *buf = arg; uint64_t t0 = now_ns();
     for (char *save, *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
@@ -112,7 +120,8 @@ static void *oe_script(void *arg) {
         }
         if (!strcmp(key, "focus")) dm_focus_set(v);
         else if (!strcmp(key, "opmode")) dm_set_opmode(v);
-        else die("DM_OE_SCRIPT 未知键「%s」（focus / opmode）", key);
+        else if (!strcmp(key, "bg")) script_bg(v);
+        else die("DM_OE_SCRIPT 未知键「%s」（focus / opmode / bg）", key);
     }
     return NULL;
 }
