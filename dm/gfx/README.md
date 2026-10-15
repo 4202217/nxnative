@@ -79,7 +79,7 @@ Binding conventions followed during translation (file header of `tools/maxwell_r
 | `nvn/nvn_hmap.h`, `nvn/nvn_cover.h`, `nvn/nvn_pace.h`, `nvn/nvn_pso_skey.h` | Hash table, geometric proof of full-coverage draws, presentation pacer, pipeline manifest key |
 | `nvn/nvn_builtin.h` | Hand-written MSL for the 4 compute shaders embedded in the main program |
 | `nvn/include/nvn.h` | NVN interface declarations (third party; for the license see the file header) |
-| `nvn/names.txt`, `nvn/nvn_slots.tsv` | The NVN API name list and D2R's slot evidence. The per-game tables described above and `dmsh_chain.h` live in the game profile `dm/games/<id>/` (tools pick it with `DM_GAME`, make with `GAME`, default `smbw`) |
+| `nvn/names.txt`, `nvn/nvn_slots.tsv` | The NVN API name list and D2R's slot evidence. The per-game tables described above and `dmsh_chain.h` live in the game profile `dm/games/<id>/` (named after the base game's title ID; tools pick it with `DM_GAME`, make with `GAME`, default Mario `010015100B514000`) |
 | `tex/` | Texture format mapping, deswizzling, BC decompression, see [tex/README.md](tex/README.md) |
 | `metal/` | A standalone minimal Metal offscreen example, not compiled into the host, see [metal/README.md](metal/README.md) |
 | `tools/` | Offline tools, see below |

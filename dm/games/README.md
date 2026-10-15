@@ -1,6 +1,6 @@
 # Game profiles
 
-Each game the port knows has a folder `dm/games/<id>/`. Mario's is `smbw`. The folder holds:
+Each game the port knows has a folder `dm/games/<id>/`, named after the base game's title ID: Mario's is `010015100B514000`, Engage's `0100A6301214E000`. The folder holds:
 
 - **`game.tsv`**: the game's constants, one `key<TAB>value` row each, with comments on their own lines.
 - **The shader tables** that `shader_split.py` writes: `shader_map.tsv` (+ `.conflicts.tsv`), `shader_facts.tsv`, `shader_pairs.tsv`.
@@ -18,7 +18,7 @@ Everything game-specific belongs here. Code reads the profile; it does not hard-
 | `dm/ios/tools/build_ipa.sh` | `GAME=<id>` | app name, bundle ID, IPA name, modules, RomFS marker, tables |
 | `scripts/build_ipa_from_nsp.py` | the NSPs' title ID | everything above. With no matching profile it only writes a survey |
 
-All of them default to `smbw`. To query a profile:
+All of them default to Mario (`010015100B514000`). To query a profile:
 - `python3 dm/games/game.py list` lists the profiles.
 - `python3 dm/games/game.py <id> <key>` prints one key.
 
@@ -35,7 +35,7 @@ All of them default to `smbw`. To query a profile:
 | `romfs_marker` | A path that must exist in the RomFS |
 | `zip_store` | Extensions the IPA stores without compressing |
 | `mem_reserve`, `mem_alias`, `mem_stack`, `app_pool` | Guest address-space partition and application pool (`hle_svc.c`) |
-| `present_interval` | `game` (the default): frames are paced by the present interval the game sets, as on the Switch (a game asking for 2 gets 30 fps, and on iOS the display link then runs at 30 Hz; Engage asks for 2 on the Switch, and a rewriter cut on its 2.0.0 `main` makes it ask for 1, see `fe_engage/game.tsv`). `display`: one frame per display tick whatever the game asks, which is only right for games whose logic does not count frames (D2R's runs on its own 25 Hz clock). `DM_PRESENT_INTERVAL=game` / `display` overrides it, also from `Documents/env.txt` |
+| `present_interval` | `game` (the default): frames are paced by the present interval the game sets, as on the Switch (a game asking for 2 gets 30 fps, and on iOS the display link then runs at 30 Hz; Engage asks for 2 on the Switch, and a rewriter cut on its 2.0.0 `main` makes it ask for 1, see `0100A6301214E000/game.tsv`). `display`: one frame per display tick whatever the game asks, which is only right for games whose logic does not count frames (D2R's runs on its own 25 Hz clock). `DM_PRESENT_INTERVAL=game` / `display` overrides it, also from `Documents/env.txt` |
 | `nvn_tex_base`, `nvn_tex_slots`, `nvn_samp_base`, `nvn_img_base`, `nvn_img_slots`, `nvn_ssbo_bases` | NVN driver constant segments, measured over all shaders |
 | `shader_groups`, `shader_note` | `shader_split.py` source groups and the map header note (Engage: `engine` for `data.unity3d` and `Resources/`, `assets` for the Addressables bundles) |
 
@@ -44,7 +44,7 @@ The translator (`dmsh_xlate/Program.cs`) still has Mario's texture / sampler bas
 ## Adding a game
 
 1. **Survey.** Run `scripts/build_ipa_from_nsp.py` on the game's NSP folder. Without a profile it extracts only the code modules and a RomFS list, then writes `<NSP folder>/<title ID>_survey/survey.md`. The survey covers modules and build IDs, SDK, engine and graphics API markers, RomFS containers, the rewrite-site census, and imports compared with the host hooks.
-2. **Profile.** Copy `smbw/game.tsv` to `dm/games/<id>/game.tsv` and fill in the identity, `build` rows and `modules`. Leave the memory and NVN values as Mario's until the bring-up measures them ([docs/agents](../../docs/agents/README.md)).
+2. **Profile.** Copy `010015100B514000/game.tsv` to `dm/games/<title ID>/game.tsv` (the base game's title ID, as the folder name) and fill in the identity, `build` rows and `modules`. Leave the memory and NVN values as Mario's until the bring-up measures them ([docs/agents](../../docs/agents/README.md)).
 3. **Shader tables.** Run `DM_GAME=<id> shader_split.py … dm/games/<id>/shader_map.tsv dm/games/<id>/shader_facts.tsv dm/games/<id>/shader_pairs.tsv`. Add an empty `shader_map.tsv.conflicts.tsv`, `bf_want.tsv` and `pso_manifest.tsv` (copy Mario's headers).
 4. **Chain.**
    1. `DM_GAME=<id> dmsh_chain.py --header`

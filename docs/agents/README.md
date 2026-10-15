@@ -29,7 +29,7 @@ Everything here was learned on two titles: Diablo II: Resurrected (SDK ~12, NVN 
 
    It extracts only the code modules plus a RomFS list.
 2. Extract base (and update, if in scope) — [01](01-extract.md). Finish the survey — [02](02-survey.md). Write down: SDK version, NVN API version, module list, imports the host lacks, SVCs, instruction census, NVN loader pattern, shader containers.
-3. Add a game profile `dm/games/<id>/game.tsv` (start from `smbw/game.tsv`: identity, `build` rows, `modules`; keep the memory / NVN values until they are measured) and build the host for it with `make -C dm/host GAME=<id>`.
+3. Add a game profile `dm/games/<title ID>/game.tsv`, named after the base game's title ID (start from `010015100B514000/game.tsv`: identity, `build` rows, `modules`; keep the memory / NVN values until they are measured) and build the host for it with `make -C dm/host GAME=<id>`.
 4. Run the rewriter (`DM_RULESET=native`) and check its counts against `insn_census.py`.
 5. Boot on the Mac and iterate on the failure catalogue in [03](03-bringup.md) until the game reaches its frame loop.
 6. Extract and translate the shaders, find the binding layout by census, and get the first frame — [04](04-graphics.md).

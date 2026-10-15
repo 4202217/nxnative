@@ -79,7 +79,7 @@ Switch 原版着色器包
 | `nvn/nvn_hmap.h`、`nvn/nvn_cover.h`、`nvn/nvn_pace.h`、`nvn/nvn_pso_skey.h` | 哈希表、全覆盖绘制的几何证明、出图节拍器、管线清单键 |
 | `nvn/nvn_builtin.h` | 主程序内嵌的 4 个计算着色器的手写 MSL |
 | `nvn/include/nvn.h` | NVN 接口声明（第三方，许可证见文件头） |
-| `nvn/names.txt`、`nvn/nvn_slots.tsv` | NVN 接口名表与 D2R 的槽位证据。上文讲的各张游戏表与 `dmsh_chain.h` 在游戏档案 `dm/games/<名>/`（工具用 `DM_GAME` 选，make 用 `GAME`，缺省 `smbw`） |
+| `nvn/names.txt`、`nvn/nvn_slots.tsv` | NVN 接口名表与 D2R 的槽位证据。上文讲的各张游戏表与 `dmsh_chain.h` 在游戏档案 `dm/games/<名>/`（以基础版标题号命名；工具用 `DM_GAME` 选，make 用 `GAME`，缺省马力欧 `010015100B514000`） |
 | `tex/` | 贴图格式映射、解排布、BC 解压，见 [tex/README.zh-CN.md](tex/README.zh-CN.md) |
 | `metal/` | 独立的最小 Metal 离屏示例，不编进宿主，见 [metal/README.zh-CN.md](metal/README.zh-CN.md) |
 | `tools/` | 离线工具，见下 |

@@ -45,7 +45,7 @@
 # Pair table: (vertex key, pixel key) of every BNSH variation (every Unity program); dmsh_build uses it to give vertex shaders the outputs their pixel shaders read but they do not write (see dmsh_build.py vs_pad)
 import collections, concurrent.futures as cf, hashlib, json, os, re, struct, subprocess, sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../games')); import game as _game
-GAME = _game.load()   # 当前游戏档案（DM_GAME，缺省 smbw）：来源组规则与表头说明 | the current game profile (DM_GAME, default smbw): source group rules and the table header note
+GAME = _game.load()   # 当前游戏档案（DM_GAME，缺省马力欧 010015100B514000）：来源组规则与表头说明 | the current game profile (DM_GAME, default Mario 010015100B514000): source group rules and the table header note
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')

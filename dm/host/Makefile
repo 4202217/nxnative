@@ -1,7 +1,7 @@
 DM_ROOT ?= $(HOME)/dm-work
-# 游戏档案（dm/games/<名>/）：宿主按它编（make GAME=名，缺省 smbw）。game_profile.h 由 game.tsv 生成在 gen/<名>/，dmsh_chain.h 在档案目录
-# Game profile (dm/games/<id>/): the host is built for it (make GAME=id, default smbw). game_profile.h is generated from game.tsv into gen/<id>/, dmsh_chain.h lives in the profile folder
-GAME ?= smbw
+# 游戏档案（dm/games/<名>/）：宿主按它编（make GAME=基础版标题号，缺省马力欧 010015100B514000）。game_profile.h 由 game.tsv 生成在 gen/<名>/，dmsh_chain.h 在档案目录
+# Game profile (dm/games/<id>/): the host is built for it (make GAME=base game title ID, default Mario 010015100B514000). game_profile.h is generated from game.tsv into gen/<id>/, dmsh_chain.h lives in the profile folder
+GAME ?= 010015100B514000
 GAME_DIR = ../games/$(GAME)
 GAME_H = gen/$(GAME)/game_profile.h
 CFLAGS=-O1 -g -Wall -Wno-unused-function

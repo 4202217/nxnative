@@ -25,8 +25,8 @@ This project is built on other people's work:
 
 | Game | Profile | NSPs the folder needs | State |
 |---|---|---|---|
-| Super Mario Bros. Wonder | `smbw` | the base game (1.0.0) and update 1.2.1 | **Playable on the iPhone with sound.** An 11-minute session through several levels ran at 60 fps with no crash. The IPA packs 1.2.1 (`-p v0` packs 1.0.0) and is about 3.9 GB |
-| Fire Emblem Engage | `fe_engage` | the base game and update 2.0.0; DLC NSPs (Expansion Pass) are packed too when present | **In bring-up.** On the Mac it plays the prologue, battles included. The first iPhone run (2026-10-15) went through a new game's opening movie and name entry at 60 fps with no crash. After a trip to the background, one of the game's two audio outputs stopped being fed; this is being investigated. It runs at 60 fps at the right speed: the Switch version runs at 30, and one patch to its code switches it to the 60 fps timing the game already has, so nothing runs too fast. The IPA is about 15 GB |
+| Super Mario Bros. Wonder | `010015100B514000` | the base game (1.0.0) and update 1.2.1 | **Playable on the iPhone with sound.** An 11-minute session through several levels ran at 60 fps with no crash. The IPA packs 1.2.1 (`-p v0` packs 1.0.0) and is about 3.9 GB |
+| Fire Emblem Engage | `0100A6301214E000` | the base game and update 2.0.0; DLC NSPs (Expansion Pass) are packed too when present | **In bring-up.** On the Mac it plays the prologue, battles included. The first iPhone run (2026-10-15) went through a new game's opening movie and name entry at 60 fps with no crash. After a trip to the background, one of the game's two audio outputs stopped being fed; this is being investigated. It runs at 60 fps at the right speed: the Switch version runs at 30, and one patch to its code switches it to the 60 fps timing the game already has, so nothing runs too fast. The IPA is about 15 GB |
 
 For any other game, the script writes a survey instead of an IPA (see [Port another game](#port-another-game)).
 
@@ -115,7 +115,7 @@ Each game has a profile in `dm/games/<id>/`:
 - the shader tables: `shader_map.tsv`, `shader_facts.tsv`, `shader_pairs.tsv`, `c1_full.tsv`, `pso_manifest.tsv`;
 - `dmsh_chain.h` holds the chain version.
 
-The shader tools pick a profile with `DM_GAME=<id>`; `make -C dm/host` and `build_ipa.sh` pick it with `GAME=<id>`. All default to `smbw`. `python3 dm/games/game.py list` lists the profiles. Host code that relies on one build's fixed addresses checks that build's ID.
+The shader tools pick a profile with `DM_GAME=<id>`; `make -C dm/host` and `build_ipa.sh` pick it with `GAME=<id>`. Profiles are named after the base game's title ID, and all default to Mario (`010015100B514000`). `python3 dm/games/game.py list` lists the profiles. Host code that relies on one build's fixed addresses checks that build's ID.
 
 To add a game:
 1. Run `scripts/build_ipa_from_nsp.py` on its NSP folder. With no matching profile, it writes a survey to `<title ID>_survey/survey.md`. The survey covers the modules, SDK, engine, containers, rewrite sites, and the imports compared with the host's hooks.
@@ -130,7 +130,7 @@ You need the same tools as the script. The shader translator is the prebuilt `dm
 - `VER`, a version folder named after the NSP version.
 
 ```
-G=smbw; W=~/$G-work; VER=v327680
+G=010015100B514000; W=~/$G-work; VER=v327680
 # 1. extract: the base game alone (update -), or an update layered over it (the last argument lets unchanged files become clones)
 dotnet build dm/tools/nx_extract -c Release -o $W/build/nx_extract
 $W/build/nx_extract/nx_extract <prod.keys> <base NSP> - $W/data/v0
@@ -175,13 +175,13 @@ Record on the game version you ship.
 
 ## Game notes
 
-**Super Mario Bros. Wonder (`smbw`)**
+**Super Mario Bros. Wonder (`010015100B514000`)**
 - **Versions:** v0 (1.0.0) and 1.2.1 (v327680). With the update layered over v0, unchanged files become APFS clones, so the merged RomFS adds only about 114 MB to the 3.5 GB base.
 - **Shaders:** 12,811 in v0 and 16,268 across both versions; the tables hold both.
 - **1.2.1:** it is a new `main` build (SDK 16.2.12), whose resource-heap cut (+16 KB slack) was carried over with `dm/tools/nso_fnmap.py`. It also makes new SDK calls, which the host answers: `nn::nfp` finds no amiibo, `pl::IsRunningOnOunce` is false, the shop call is a no-op, and `account::PopOpenUsers` returns none.
 - **Mac input:** `DM_KEYS="12:A,14:A,20:A,26:A,32:A"` reaches the opening course.
 
-**Fire Emblem Engage (`fe_engage`)**
+**Fire Emblem Engage (`0100A6301214E000`)**
 - **Engine:** Unity 2020.3 IL2CPP, SDK 12.3.7. The shaders are read out of Unity bundles (`unityfs.py`).
 - **Memory:** a 5 GB guest block, the total proven on a phone, with a 2.5 GB application pool. A per-build cut shrinks the SDK's address-region node area to 62 MB.
 - **Audio:** Wwise drives AudioOut directly.

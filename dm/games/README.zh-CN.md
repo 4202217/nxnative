@@ -1,6 +1,6 @@
 # 游戏档案
 
-本移植认得的每个游戏都有一个目录 `dm/games/<名>/`。马力欧的是 `smbw`。目录里有：
+本移植认得的每个游戏都有一个目录 `dm/games/<名>/`，以基础版的标题号命名：马力欧是 `010015100B514000`，Engage 是 `0100A6301214E000`。目录里有：
 
 - **`game.tsv`**：这个游戏的常数，每行 `键<TAB>值`，注释独占一行。
 - **着色器表**（`shader_split.py` 写出）：`shader_map.tsv`（含 `.conflicts.tsv`）、`shader_facts.tsv`、`shader_pairs.tsv`。
@@ -18,7 +18,7 @@
 | `dm/ios/tools/build_ipa.sh` | `GAME=<名>` | App 名、包名、IPA 名、代码模块、RomFS 认定路径、各表 |
 | `scripts/build_ipa_from_nsp.py` | NSP 的标题号 | 以上全部。没有对应档案时只写粗查报告 |
 
-缺省都是 `smbw`。查档案：
+缺省都是马力欧（`010015100B514000`）。查档案：
 - `python3 dm/games/game.py list` 列出全部档案。
 - `python3 dm/games/game.py <名> <键>` 打印一个键。
 
@@ -35,7 +35,7 @@
 | `romfs_marker` | RomFS 里必须有的路径 |
 | `zip_store` | IPA 里不再压缩的扩展名 |
 | `mem_reserve`、`mem_alias`、`mem_stack`、`app_pool` | 客体地址空间分区与应用内存池（`hle_svc.c`） |
-| `present_interval` | `game`（缺省）：按游戏设的出图间隔出帧，同 Switch（游戏设 2 就是 30 帧，iOS 上显示节拍随之 30 Hz；Engage 在 Switch 上设 2，2.0.0 `main` 的改写剪口让它设 1，见 `fe_engage/game.tsv`）。`display`：不管游戏设多少，每个显示节拍一帧——只适合逻辑不按帧计数的游戏（D2R 的逻辑按自己的 25 Hz 走）。`DM_PRESENT_INTERVAL=game` / `display` 可覆盖，也可写在 `Documents/env.txt` |
+| `present_interval` | `game`（缺省）：按游戏设的出图间隔出帧，同 Switch（游戏设 2 就是 30 帧，iOS 上显示节拍随之 30 Hz；Engage 在 Switch 上设 2，2.0.0 `main` 的改写剪口让它设 1，见 `0100A6301214E000/game.tsv`）。`display`：不管游戏设多少，每个显示节拍一帧——只适合逻辑不按帧计数的游戏（D2R 的逻辑按自己的 25 Hz 走）。`DM_PRESENT_INTERVAL=game` / `display` 可覆盖，也可写在 `Documents/env.txt` |
 | `nvn_tex_base`、`nvn_tex_slots`、`nvn_samp_base`、`nvn_img_base`、`nvn_img_slots`、`nvn_ssbo_bases` | NVN 驱动常量段，按全库着色器实测 |
 | `shader_groups`、`shader_note` | `shader_split.py` 的来源组与映射表表头说明 |
 
@@ -44,7 +44,7 @@
 ## 加一个游戏
 
 1. **粗查。** 对这个游戏的 NSP 文件夹跑 `scripts/build_ipa_from_nsp.py`。没有档案时它只解出代码模块和 RomFS 清单，写出 `<NSP 文件夹>/<标题号>_survey/survey.md`。报告包括模块与构建号、SDK、引擎与图形接口标记、RomFS 容器、改写点统计、导入与宿主钩子的对比。
-2. **档案。** 把 `smbw/game.tsv` 拷成 `dm/games/<名>/game.tsv`，填身份、`build` 行和 `modules`。内存与 NVN 的值先沿用马力欧的，等起机时实测再改（[docs/agents](../../docs/agents/README.md)）。
+2. **档案。** 把 `010015100B514000/game.tsv` 拷成 `dm/games/<标题号>/game.tsv`（目录名用基础版的标题号），填身份、`build` 行和 `modules`。内存与 NVN 的值先沿用马力欧的，等起机时实测再改（[docs/agents](../../docs/agents/README.md)）。
 3. **着色器表。** 跑 `DM_GAME=<名> shader_split.py … dm/games/<名>/shader_map.tsv dm/games/<名>/shader_facts.tsv dm/games/<名>/shader_pairs.tsv`。再补空的 `shader_map.tsv.conflicts.tsv`、`bf_want.tsv` 和 `pso_manifest.tsv`（表头照马力欧的抄）。
 4. **翻译链。**
    1. `DM_GAME=<名> dmsh_chain.py --header`
