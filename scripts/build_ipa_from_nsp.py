@@ -334,13 +334,18 @@ def rewrite(py, repo, exe_dir, out, env, logs, g):
     swap_in(tmp, out)
 
 
+def data_rows(b):   # 表的数据行（去掉 # 注释行：表头随 shader_split.py 的版本变，与游戏文件无关） | a table's data rows (without # comment lines: the header changes with the shader_split.py version, not with the game files)
+    return [l for l in b.splitlines() if not l.startswith(b'#')]
+
+
 def split_shaders(py, repo, roms, mains, pkg, env, logs, g):
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
     say('拆出着色器 | splitting out the shaders')
     names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv')
     run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names], logs / 'shader_split.log', env=env)
-    # 表与档案里的逐字节相同 = 游戏文件与建表用的是同一份；不同就别往下出包（档案里的表不改） | Tables byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone)
-    diff = [n for n in names if (tmp / 'tables' / n).read_bytes() != g.table(n).read_bytes()]
+    # 数据行与档案里的逐字节相同 = 游戏文件与建表用的是同一份；不同就别往下出包（档案里的表不改）。只比数据行：Engage 档案的表头是旧版 shader_split 写的
+    # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split
+    diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
     if diff: raise BuildError(f'拆出的着色器表与游戏档案 {g.id} 的不同 | the split shader tables differ from game profile {g.id}\'s: {", ".join(diff)}（游戏文件不是档案登记的版本？| game files not the versions the profile registers?）')
     swap_in(tmp / 'pkg', pkg); rmtree(tmp)
 
