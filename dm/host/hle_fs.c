@@ -138,6 +138,11 @@ static Result mount(const char *name, const char *dir, int ro) { return mount_ex
 // clonefile preserves xattr, so save Commit/remount needs no separate mapping table; enumeration must not leak physical aliases.
 #define FS_GUEST_NAME "org.d2rmobile.guest-name"
 static int guest_name(const char *parent, const char *physical, char *out, size_t n) {
+    // 只有大小写冲突时另取的物理名（.dm-case-N）才带 xattr（set_guest_name 只在物理名 ≠ 客体名时写）；别的物理名就是客体名，不必逐项 getxattr——
+    // 列目录时每项一次系统调用，Engage 开机遍历 RomFS 的 21.6 万项要几秒
+    // Only the physical names chosen on a case collision (.dm-case-N) carry the xattr (set_guest_name writes it only when the physical name differs from the guest name); any other physical name is the guest name,
+    // so no per-entry getxattr is needed -- that was one system call per entry when listing, seconds for the 216,000 entries Engage walks in RomFS at boot
+    if (strncmp(physical, ".dm-case-", 9)) { strlcpy(out, physical, n); return 1; }
     char p[1280]; snprintf(p, sizeof p, "%s/%s", parent, physical);
     ssize_t k = getxattr(p, FS_GUEST_NAME, out, n - 1, 0, XATTR_NOFOLLOW);
     if (k >= 0) { out[k] = 0; return 1; }
@@ -588,6 +593,13 @@ void dm_data_note_fd(int fd, const char *hostpath) {   // 打开资源档案后�
     if (fd < 0 || fd >= 4096) return;
     g_hm[fd] = hm_load(hostpath);
 }
+// 同 dm_data_logical_size，但按目录 fd 相对打开：列目录时不必每项再从根解析一遍长路径 | Same as dm_data_logical_size, but opened relative to the directory fd: listing does not resolve the long path from the root again for every entry
+static int64_t data_logical_size_at(int dfd, const char *name, int64_t phys_size) {
+    char hn[0x320]; if (snprintf(hn, sizeof hn, "%s.holes", name) >= (int)sizeof hn) return phys_size;
+    int fd = openat(dfd, hn, O_RDONLY); if (fd < 0) return phys_size;
+    FILE *f = fdopen(fd, "r"); if (!f) { close(fd); return phys_size; }
+    long long size = -1; int ok = fscanf(f, "size %lld", &size) == 1; fclose(f); return ok && size >= 0 ? size : phys_size;
+}
 int64_t dm_data_logical_size(const char *hostpath, int64_t phys_size) {   // 列目录 / 取大小用：有区段表报原始大小 | For directory listing / size queries: report the original size when there is an extent table
     char hp2[1100]; if (snprintf(hp2, sizeof hp2, "%s.holes", hostpath) >= (int)sizeof hp2) return phys_size;
     FILE *f = fopen(hp2, "r"); if (!f) return phys_size; long long size = -1; int ok = fscanf(f, "size %lld", &size) == 1; fclose(f); return ok && size >= 0 ? size : phys_size;
@@ -802,16 +814,18 @@ HLE_FORCE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandl
     if (!hh) { *count = 0; return RES_FAIL; }
     PATH_LOCK(); dirh_t *h = (dirh_t *)hh; int64_t n = 0; struct dirent *e;
     if (h->snap) { while (n < max && h->psnap < h->nsnap) { DirectoryEntry *src = &h->snap[h->psnap++]; if (!(h->mode & (src->type == ENT_DIR ? DIRMODE_DIR : DIRMODE_FILE))) continue; ents[n++] = *src; } *count = n; return RES_OK; }
+    int dfd = dirfd(h->d);
     while (n < max && (e = readdir(h->d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         { size_t dl = strlen(e->d_name); if (dl > 6 && !strcmp(e->d_name + dl - 6, ".holes")) continue; }   // 区段表不给游戏看 | The extent table is not shown to the game
-        char c[1280]; snprintf(c, sizeof c, "%s/%s", h->path, e->d_name);
-        struct stat st; if (stat(c, &st)) continue;
-        int isdir = S_ISDIR(st.st_mode);
+        // 目录的类型直接取 d_type，不 stat；文件要大小，按目录 fd 相对 fstatat（跟随链接，同原来的 stat） | a directory's type comes from d_type without stat; files need a size, taken with fstatat relative to the directory fd (following links, like the old stat)
+        struct stat st; int isdir;
+        if (e->d_type == DT_DIR) isdir = 1;
+        else { if (fstatat(dfd, e->d_name, &st, 0)) continue; isdir = S_ISDIR(st.st_mode); }
         if (!(h->mode & (isdir ? DIRMODE_DIR : DIRMODE_FILE))) continue;
         DirectoryEntry *o = &ents[n++]; memset(o, 0, sizeof *o);
-        if (!guest_name(h->path, e->d_name, o->name, sizeof o->name)) { *count = n - 1; return err_res("directory name", c); }
-        o->type = isdir ? ENT_DIR : ENT_FILE; o->size = isdir ? 0 : dm_data_logical_size(c, st.st_size);
+        if (!guest_name(h->path, e->d_name, o->name, sizeof o->name)) { char c[1280]; snprintf(c, sizeof c, "%s/%s", h->path, e->d_name); *count = n - 1; return err_res("directory name", c); }
+        o->type = isdir ? ENT_DIR : ENT_FILE; o->size = isdir ? 0 : data_logical_size_at(dfd, e->d_name, st.st_size);
     }
     *count = n; return RES_OK;
 }
