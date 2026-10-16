@@ -24,12 +24,12 @@ All of these are tested on an iPhone and playable:
 
 | Game | NSPs to put in the folder | IPA | Notes |
 |---|---|---|---|
-| Super Mario Bros. Wonder | base game + update 1.2.1 | ~4 GB | 60 fps, as on the Switch. `-p v0` packs 1.0.0 instead |
-| Fire Emblem Engage | base game + update 2.0.0 (+ Expansion Pass DLC) | ~15 GB | **Upgraded to 60 fps** (30 on the Switch), game speed unchanged. The DLC is packed in when its NSP is in the folder |
-| Metroid Dread | base game + update 2.1.0 | ~5 GB | 60 fps gameplay and 30 fps cutscenes, as on the Switch |
+| Super Mario Bros. Wonder | base game + update 1.2.1 | ~4 GB | |
+| Fire Emblem Engage | base game + update 2.0.0 (+ Expansion Pass DLC) | ~15 GB | Upgraded to 60 fps (30 fps on Switch) |
+| Metroid Dread | base game + update 2.1.0 | ~5 GB | |
 | 13 Sentinels: Aegis Rim | base game + update 1.10 | ~5 GB | |
-| Super Mario 3D World + Bowser's Fury | base game + update 1.2.2 | ~3 GB | Both games in one app. Starts with the 3D touch layout (right stick, D-pad) |
-| The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | **Upgraded to 60 fps** (30 on the Switch), game speed unchanged; it drops back to 30 by itself in heavy scenes. Starts with the 3D touch layout. The DLC is packed in when its NSP is in the folder |
+| Super Mario 3D World + Bowser's Fury | base game + update 1.2.2 | ~3 GB | |
+| The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | Upgraded to 60 fps (30 fps on Switch) |
 
 Needs iOS / iPadOS 26 or later. Other games aren't supported yet: for them the script writes a survey instead of an IPA.
 
