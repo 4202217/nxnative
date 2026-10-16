@@ -1,4 +1,3 @@
-# 新规则产物独立登记核验；不执行游戏、不信任改写器自己的摘要。
 # Independent registration check of the new rule's build output; does not execute the game and does not trust the rewriter's own digest.
 import sys,struct,hashlib
 from pathlib import Path

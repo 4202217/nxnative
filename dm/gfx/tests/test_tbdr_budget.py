@@ -1,4 +1,4 @@
-"""预算表导出回归：小日志闭式期望，不需要游戏或 GPU；临时文件只放 run/gfx。 | Budget table export regression: small logs with closed-form expectations, no game or GPU needed; temp files go only under run/gfx."""
+"""Budget table export regression: small logs with closed-form expectations, no game or GPU needed; temp files go only under run/gfx."""
 import csv
 import os
 from pathlib import Path
@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # 工作区根目录（游戏文件、产物、运行现场都在它下面） | Workspace root (game files, build outputs and run artifacts are all under it)
+DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 
 TOOL = Path(os.environ.get('TBDR_BUDGET_TOOL', Path(__file__).resolve().parents[1] / 'tools/tbdr_budget.py'))
 
@@ -24,7 +24,6 @@ class BudgetExport(unittest.TestCase):
                 return list(csv.DictReader(f, delimiter='\t'))
 
     def test_all_passes_not_only_console_top25(self):
-        # 30 个独立 4×4 RGBA8 clear：每个写回 4×4×4=64 字节。
         # 30 independent 4×4 RGBA8 clears: each stores 4×4×4=64 bytes.
         rows = self.export(''.join(f'[pass] F700 P {p} c0 ser={p} fmt=70 4x4 ms1 lv0 sl0 clear\n' for p in range(1, 31)))
         self.assertEqual(len(rows), 30)
@@ -58,8 +57,6 @@ class BudgetExport(unittest.TestCase):
         self.assertEqual(rows[0]['texture_est_bytes'], '64')
 
     def test_texture_views_do_not_leak_between_passes(self):
-        # 两通道均 8×4 输出；同 ser=99 的实际绑定视图分别 8×4、4×4。
-        # RGBA8：独立期望 128 / 64 字节，不能让后通道尺寸覆盖前通道。
         # Both passes output 8×4; the actual bound views of the same ser=99 are 8×4 and 4×4 respectively.
         # RGBA8: independent expectations of 128 / 64 bytes; the later pass's size must not overwrite the earlier pass's.
         rows = self.export('''[pass] F700 P 1 c0 ser=1 fmt=70 8x4 ms1 lv0 sl0 clear

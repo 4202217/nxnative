@@ -1,6 +1,3 @@
-# TBDR 读入可省的候选：DM_NVN_PASSDUMP 的 P（附件）与 D（通道首次绘制特征）行。颜色附件读入为候选的条件：
-# 首绘是单实例三角形 / 四边形 / 条带、顶点 3–6、剪裁与视口覆盖整个目标、该附件不混合且写掩码满、深度测试关或 ALWAYS、模板关。
-# 覆盖是否真为全屏取决于顶点着色器，候选须再用哨兵色实验（读入改成清成哨兵色，比最终画面）证实。
 # Candidates for skippable TBDR loads: the P (attachment) and D (first-draw features of a pass) rows of DM_NVN_PASSDUMP. Conditions for a color attachment load to be a candidate:
 # the first draw is a single-instance triangle / quad / strip with 3–6 vertices, scissor and viewport cover the whole target, the attachment is not blended and has a full write mask, depth test off or ALWAYS, stencil off.
 # Whether coverage is truly fullscreen depends on the vertex shader; candidates must still be confirmed by a sentinel color experiment (change the load into a clear to the sentinel color and compare the final image).

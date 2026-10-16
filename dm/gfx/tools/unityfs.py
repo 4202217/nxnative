@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
-# Unity 资源包读取（够取着色器用）：UnityFS 包 → 序列化文件 → 按类型树解出对象 → Shader 的各平台子程序。
 # Unity asset bundle reader (enough for shaders): UnityFS bundle → serialized files → objects decoded by their type trees → each platform's subprograms of a Shader.
-#   · UnityFS（'UnityFS\0'，格式 6..8）：大端头 + 块信息（LZMA / LZ4 / LZ4HC 或不压）+ 数据块；块信息里列出文件节点（偏移、长度、路径）。
-#   · 序列化文件（格式 17..22）：元数据（类型表连类型树、对象表）+ 对象数据。类型树字符串的高位置 1 时指 Unity 内置的公共字符串表，
-#     这张表不随资源走，取自游戏自己的 main（'AABB\0AnimationClip\0…'，见 common_strings）。
-#   · Shader（类 48）：platforms[i] 平台的 compressedBlob 由 offsets[i][s] / compressedLengths[i][s] / decompressedLengths[i][s] 分段 LZ4 压缩；
-#     解开的段内：u32 子程序数，每项 12 字节 {偏移, 长度, 段号}（2019.3 起）；子程序 = 版本、程序类型、统计、关键字、程序代码字节……
 #   · UnityFS ('UnityFS\0', format 6..8): big-endian header + block info (LZMA / LZ4 / LZ4HC or stored) + data blocks; the block info lists the file nodes (offset, size, path).
 #   · Serialized file (format 17..22): metadata (type table with type trees, object table) + object data. A type tree string offset with the high bit set refers to Unity's built-in common string table,
 #     which is not shipped with the assets; it is taken from the game's own main ('AABB\0AnimationClip\0…', see common_strings).
 #   · Shader (class 48): the compressedBlob of platform platforms[i] is LZ4-compressed in segments offsets[i][s] / compressedLengths[i][s] / decompressedLengths[i][s];
 #     inside a decompressed segment: u32 subprogram count, then 12-byte entries {offset, length, segment} (2019.3 and later); a subprogram = version, program type, stats, keywords, program code bytes, ...
-# 只依赖 lz4（与 shader_split 解 NSO 同一个包）| Only depends on lz4 (the same package shader_split uses for NSOs)
+# Only depends on lz4 (the same package shader_split uses for NSOs)
 import lzma, struct
 
 CLASS_SHADER = 48
@@ -22,7 +16,7 @@ def _lz4(raw, size):
 
 def _decomp(raw, size, kind):
     if kind == 0: return raw
-    if kind == 1:   # Unity 的 LZMA：5 字节属性 + 裸流 | Unity's LZMA: 5 property bytes + raw stream
+    if kind == 1:   # Unity's LZMA: 5 property bytes + raw stream
         props = raw[0]; dict_size = struct.unpack_from('<I', raw, 1)[0]
         lc, lp, pb = props % 9, (props // 9) % 5, props // 45
         f = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{'id': lzma.FILTER_LZMA1, 'dict_size': dict_size, 'lc': lc, 'lp': lp, 'pb': pb}])
@@ -34,7 +28,7 @@ def _cstr(d, p):
     e = d.index(b'\0', p); return d[p:e].decode('utf-8', 'replace'), e + 1
 
 def bundle_files(d):
-    """UnityFS 包 → [(路径, 字节)] | UnityFS bundle → [(path, bytes)]"""
+    """UnityFS bundle → [(path, bytes)]"""
     if d[:8] != b'UnityFS\0': raise ValueError('不是 UnityFS')
     fmt = struct.unpack_from('>I', d, 8)[0]
     _, p = _cstr(d, 12); _, p = _cstr(d, p)
@@ -59,7 +53,7 @@ def bundle_files(d):
     return [(name, bytes(out[off:off + sz])) for off, sz, name in nodes]
 
 def common_strings(image):
-    """游戏 main 里 Unity 的公共字符串表 → {偏移: 字符串} | Unity's common string table in the game's main → {offset: string}"""
+    """Unity's common string table in the game's main → {offset: string}"""
     a = image.find(b'AABB\0AnimationClip\0AnimationCurve\0')
     if a < 0: raise ValueError('main 里找不到 Unity 公共字符串表（AABB\\0AnimationClip…）')
     tab, p = {}, a
@@ -108,12 +102,10 @@ def _read(r, n):
     return v
 
 class NoTree(ValueError):
-    """序列化文件没带类型树，且没有同类同哈希的树可借 | the serialized file has no type tree and no tree of the same class and hash to borrow"""
+    """the serialized file has no type tree and no tree of the same class and hash to borrow"""
 
 def serialized_objects(d, common, want=None, trees=None):
-    """序列化文件 → 迭代 (类号, 路径 ID, 对象字典)；want = 只解这些类号。
-    trees = {(类号, 类型哈希): 类型树}：带类型树的文件把树记进去，不带的（游戏本体 data.unity3d 等）按同类同哈希借用——同一 Unity 版本的类布局一致，哈希相同即布局相同
-    serialized file → yields (class ID, path ID, object dict); want = only decode these class IDs.
+    """serialized file → yields (class ID, path ID, object dict); want = only decode these class IDs.
     trees = {(class ID, type hash): type tree}: files with type trees record theirs, files without (the game's own data.unity3d and so on) borrow one of the same class and hash -- the same hash means the same layout"""
     msz, fsz, ver, doff = struct.unpack_from('>IIII', d, 0)
     if not 19 <= ver <= 22: raise ValueError(f'序列化文件格式 {ver} 未支持')
@@ -124,7 +116,7 @@ def serialized_objects(d, common, want=None, trees=None):
     tlist = []
     for _ in range(r.u('i')):
         cid = r.u('i'); r.u('B'); r.u('h')
-        if cid == 114: r.p += 16   # 脚本 ID | script ID
+        if cid == 114: r.p += 16   # script ID
         h = d[r.p:r.p + 16]; r.p += 16
         root = None
         if tt:
@@ -140,7 +132,7 @@ def serialized_objects(d, common, want=None, trees=None):
                 if stack: stack[-1].kids.append(nd)
                 else: root = nd
                 stack.append(nd)
-            if ver >= 21: n = r.u('i'); r.p += 4 * n   # 类型依赖 | type dependencies
+            if ver >= 21: n = r.u('i'); r.p += 4 * n   # type dependencies
             if trees is not None and (want is None or cid in want): trees.setdefault((cid, h), root)
         elif trees is not None: root = trees.get((cid, h))
         tlist.append((cid, h, root))
@@ -156,7 +148,7 @@ def serialized_objects(d, common, want=None, trees=None):
         yield cid, pid, _read(o, root)
 
 def is_serialized(d):
-    """像不像序列化文件（大端头：格式 19..22，22 起长度在 +0x14 之后）| does it look like a serialized file (big-endian header: format 19..22; from 22 the sizes follow +0x14)"""
+    """does it look like a serialized file (big-endian header: format 19..22; from 22 the sizes follow +0x14)"""
     if len(d) < 48: return False
     ver = struct.unpack_from('>I', d, 8)[0]
     if not 19 <= ver <= 22 or d[16] not in (0, 1): return False
@@ -165,11 +157,11 @@ def is_serialized(d):
     return fsz == len(d) and 0 < msz < fsz and doff <= fsz
 
 def shader_programs(sh):
-    """Shader 对象 → 迭代 (平台号, 子程序序号, 子程序字节) | Shader object → yields (platform, subprogram index, subprogram bytes)"""
+    """Shader object → yields (platform, subprogram index, subprogram bytes)"""
     blob = sh['compressedBlob']
     for i, plat in enumerate(sh['platforms']):
         offs, clen, dlen = sh['offsets'][i], sh['compressedLengths'][i], sh['decompressedLengths'][i]
-        if not isinstance(offs, list): offs, clen, dlen = [offs], [clen], [dlen]   # 2019.3 之前每平台一段 | before 2019.3: one segment per platform
+        if not isinstance(offs, list): offs, clen, dlen = [offs], [clen], [dlen]   # before 2019.3: one segment per platform
         segs = [_lz4(blob[o:o + c], u) for o, c, u in zip(offs, clen, dlen)]
         if not segs: continue
         s0 = segs[0]; n = struct.unpack_from('<I', s0, 0)[0]
@@ -178,7 +170,7 @@ def shader_programs(sh):
             yield plat, k, segs[seg][off:off + ln]
 
 def subprogram(b):
-    """子程序头 → (版本, 程序类型, 关键字, 局部关键字, 程序代码, 代码后偏移) | subprogram header → (version, program type, keywords, local keywords, program code, offset after the code)"""
+    """subprogram header → (version, program type, keywords, local keywords, program code, offset after the code)"""
     r = Reader(b, True)
     ver, ptype = r.u('i'), r.u('i'); r.p += 12
     if ver >= 201608170: r.p += 4

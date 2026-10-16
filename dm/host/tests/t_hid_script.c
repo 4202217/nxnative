@@ -1,5 +1,3 @@
-// HID脚本单测：假时钟逐帧推进，真实解析DM_KEYS、真实GetNpad路径；不睡眠、不按时长跳步骤。
-// Begin是动作开始/重复触发，End标记动作结束：两个Begin只需同一动作的一次End。
 // HID script unit test: a fake clock advances frame by frame, with real DM_KEYS parsing and the real GetNpad path; no sleeping, no skipping steps by duration.
 // Begin is action start/repeat trigger and End marks action end: two Begins need only one End of the same action.
 #ifndef HLE_HID_SOURCE
@@ -20,8 +18,8 @@ uint64_t dm_guest_frame(void) { return guest_frame; }
 uint64_t dm_server_tick(void) { return server_available ? server_tick : UINT64_MAX; }
 int touch_fill(void *out, uint64_t max) { (void)out; (void)max; return 0; }
 static int test_loadscreen_up, hold_requests;
-int dm_loadscreen_up(void) { return test_loadscreen_up; }                 // 真判定在 diag.c；单测手动置位 | the real check is in diag.c; the unit test sets it by hand
-void dm_hold_for_loadscreen(void) { hold_requests++; }                     // 真实现冻结客体时钟；单测只数请求次数 | the real implementation freezes the guest clock; the unit test only counts requests
+int dm_loadscreen_up(void) { return test_loadscreen_up; }                 // the real check is in diag.c; the unit test sets it by hand
+void dm_hold_for_loadscreen(void) { hold_requests++; }                     // the real implementation freezes the guest clock; the unit test only counts requests
 int dm_opmode(void) { return 1; }
 void dm_touch_set(const dm_touch *t, int n) { (void)t; (void)n; }
 static void (*ui_cb)(const char *, const char *, const char *);
@@ -58,7 +56,7 @@ int main(int argc, char **argv) {
     ui("ControllerActionEnd"); CHECK(read_state().buttons == DM_BTN_B, "End后才发B，不吞键");
 
     setup("A@+0.6"); CHECK(read_state().buttons == DM_BTN_A, "按住时长测试先按下A");
-    clock_ns += 60000000000ull; guest_frame += 15 - 1; server_tick += 15 - 1;   // +0.6 秒 = 0.6×25 = 15 拍 | +0.6 seconds = 0.6*25 = 15 ticks
+    clock_ns += 60000000000ull; guest_frame += 15 - 1; server_tick += 15 - 1;   // +0.6 seconds = 0.6*25 = 15 ticks
     CHECK(read_state().buttons == DM_BTN_A, "墙钟跳跃但客体帧未到点时A仍按住");
     guest_frame++; server_tick++; CHECK(neutral(read_state()), "服务端拍到点后A才松开");
 
@@ -129,14 +127,12 @@ int main(int argc, char **argv) {
         fclose(f); s = read_state();
         CHECK(nb == 73 && ne == 1 && s.ly == 32767, "iOS原始步3轨迹73 Begin/1 End回放后进入LSU（假时钟按消息时间推进）");
     }
-    // 冻结拍（DM_TICK_HOLD）期间拍号不前进：前置在局内拍时钟下见到，随后宿主报「无拍」，%1 须改按出图帧 60 帧走完（host_savecmp 死等 451 s）
     // During a tick freeze (DM_TICK_HOLD) the tick number does not advance: the precondition was seen under the in-game tick clock, then the host reports "no tick", and %1 must be finished by presented frames instead, 60 frames (host_savecmp waited 451 s dead)
     setup("A@OpenPanel:PauseLayout%1>PausePanelMessage:ExitGame"); server_tick = 401; guest_frame = 1000;
     ui_cb("PanelManager", "OpenPanel", "PauseLayout"); CHECK(neutral(read_state()), "冻结前见到前置，延时未到不按");
     server_available = 0; read_state();
     guest_frame += 59; CHECK(neutral(read_state()), "冻结后按帧计：59 帧未到 1 秒不按");
     guest_frame += 1; CHECK(read_state().buttons == DM_BTN_A, "冻结后按帧计：满 60 帧（1 秒）按下A，不因拍号停住死等");
-    // 读取画面还开着时到点的局内按键：不按、请求冻结拍；撤下后才按（画面闸门 NPC 页：拍 84 的 A 被读取画面吃掉）
     // An in-game key press that comes due while the loading screen is still up: do not press, request a tick freeze; press only after it is down (screenshot gate NPC page: the A at tick 84 was swallowed by the loading screen)
     setup("A@DM:Tick:84#>OpenPanel:NpcDialogPanel"); server_tick = 84; test_loadscreen_up = 1; hold_requests = 0;
     ui_cb("DM", "Tick", "84#"); CHECK(neutral(read_state()) && hold_requests == 1, "读取画面开着：前置到了也不按 A，并请求冻结拍");

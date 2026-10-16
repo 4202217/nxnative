@@ -1,7 +1,3 @@
-// 客体内存写保护脏页跟踪：预排布贴图（CPU 写、GPU 读）的池页上传后设只读，游戏一写即缺页 → 标脏、解保护；
-// 使用前查覆盖页的写代号，比上传时新就重传。NVN 语义：贴图描述符指向池内存，GPU 每次读的是当前内容
-// （实测游戏会把流式素材写进仍被采样的贴图存储，不重新登记）。
-// 信号处理约束：缺页路径只用原子操作与 mprotect，不分配、不加锁。
 // Write-protect dirty-page tracking for guest memory: pool pages of packaged textures (CPU writes, GPU reads) are set read-only after upload, and as soon as the game writes it faults -> mark dirty, unprotect;
 // before use, check the write generation of the covered pages and re-upload if newer than at upload time. NVN semantics: a texture descriptor points to pool memory, and the GPU reads the current content every time
 // (measured: the game writes streamed assets into texture storage that is still being sampled, without re-registering).
@@ -15,12 +11,6 @@
 #include <mach/mach_time.h>
 #include <sched.h>
 
-// 页状态与 mprotect 的次序（取自 d2r-mobile ef9b1ff13）：改保护的一方先把状态改成 BUSY，mprotect 落地后才改成终态，别的线程见 BUSY 就等。
-//   设只读：NONE → BUSY → mprotect(只读) → PROT；解保护：PROT → BUSY → mprotect(可写) → NONE。
-// 不变式：状态是 NONE 的页一定可写、是 PROT 的页一定只读。原先设只读是「先记 PROT、再 mprotect」，这中间另一线程的写前解保护
-// （影片解码线程往贴图存储写一帧、读盘读进客体缓冲）会把状态改回 NONE，随后 mprotect 落地 ⇒ 页只读而状态 NONE：游戏线程写它时缺页处理只回
-// 「重执行」、永远空转；宿主用系统调用往里读时 prep_write 看 NONE 跳过，系统调用直接 EFAULT（t_dirty_race 复现）。
-// BUSY 最长持续一次 mprotect（设只读时再加几次原子写）。等待有上限 BUSY_WAIT_MS，超限报红：缺页处理里超限按「不是我们的页」返回，交给崩溃处理如实报崩
 // Order of page state and mprotect (from d2r-mobile ef9b1ff13): the side changing protection first sets the state to BUSY and sets the final state only after mprotect has landed; other threads wait when they see BUSY.
 //   set read-only: NONE -> BUSY -> mprotect(read-only) -> PROT; unprotect: PROT -> BUSY -> mprotect(writable) -> NONE.
 // Invariant: a page whose state is NONE is always writable, one whose state is PROT is always read-only. Setting read-only used to be "record PROT, then mprotect"; in between, another thread's unprotect-before-write
@@ -29,12 +19,8 @@
 // BUSY lasts at most one mprotect (plus a few atomic writes when setting read-only). The wait is capped at BUSY_WAIT_MS and reports red beyond it: in the fault handler it then returns "not our page" so the crash handler reports truthfully
 enum { PG_NONE = 0, PG_PROT = 1, PG_BUSY = 2 };
 enum { BUSY_WAIT_MS = 2000 };
-// 跟踪区间 = 各内存池（MemoryPoolInitialize 登记）。池销毁后复用 live=0 的槽，信号处理里无锁扫描。
 // Tracked ranges = the memory pools (registered by MemoryPoolInitialize). After a pool is destroyed its live=0 slot is reused; the signal handler scans without locks.
-#define MAX_RANGE 4096   // 原为 256：内存池多于它时超出的池不跟踪，里面的贴图每次取用都当成脏的重传（暗黑实测峰值见内存读数行的「内存池」；塞尔达约 300 个，踩过）。扫描只到已用的槽数，容量大不增加开销 | was 256: with more memory pools than that the excess pools are untracked and their textures are treated as dirty and re-uploaded on every use (for Diablo's measured peak see "memory pools" in the memory readout line; Zelda has about 300 and hit this). The scan only covers slots in use, so a larger capacity costs nothing
-// 区间按宿主页（16 KB）取整，客体内存池只按 4 KB 对齐：相邻的池会共用首尾页，同一个地址可能落在多个在册区间里。
-// 所以：判「贴图在不在跟踪」要找能整段装下它的区间；缺页 / 宿主写前要把覆盖该页的每个区间都解保护并记代号；销池按池的确切起点 mem 认区间。
-// （原先一律取第一个包含该地址的区间：SMBW 两张 ASTC 6x5 贴图的池首页与前一个小池共页，被判成未跟踪，每次取用都重传，每帧约 6 MB）
+#define MAX_RANGE 4096   // was 256: with more memory pools than that the excess pools are untracked and their textures are treated as dirty and re-uploaded on every use (for Diablo's measured peak see "memory pools" in the memory readout line; Zelda has about 300 and hit this). The scan only covers slots in use, so a larger capacity costs nothing
 // Ranges are rounded to host pages (16 KB) but guest memory pools are only 4 KB aligned: adjacent pools share their first / last pages, so one address can fall in several registered ranges.
 // So: "is this texture tracked" looks for a range that holds its whole span; a fault / host pre-write unprotects and stamps every range covering that page; pool destruction identifies its range by the pool's exact start mem.
 // (Previously the first range containing the address was always taken: two SMBW ASTC 6x5 textures whose pool's first page is shared with a small preceding pool were judged untracked and re-uploaded on every use, about 6 MB per frame)
@@ -45,19 +31,18 @@ static uintptr_t g_pg, g_shift;
 static _Atomic uint64_t g_now = 1;
 static _Atomic uint64_t g_faults, g_preps;
 static _Atomic uint64_t g_adds_total;
-static _Atomic int g_live, g_live_peak;   // 在册的池数与峰值（内存读数行用） | number of registered pools and peak (for the memory readout line)
+static _Atomic int g_live, g_live_peak;   // number of registered pools and peak (for the memory readout line)
 void nvn_dirty_stat(int *live, int *peak, int *cap) { *live = atomic_load(&g_live); *peak = atomic_load(&g_live_peak); *cap = MAX_RANGE; }
 static _Atomic int g_overflow_logged;
-static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // 建池 / 销池（客体线程，可能并发）互斥选槽；缺页处理路径不碰它 | Pool creation / destruction (guest threads, possibly concurrent) pick slots under a mutex; the page-fault handling path does not touch it
-static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // 本模块的 mprotect：调用次数、覆盖页数、耗时（mach 时基，缺页路径里也安全） | This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
+static pthread_mutex_t g_slot_mu = PTHREAD_MUTEX_INITIALIZER;   // Pool creation / destruction (guest threads, possibly concurrent) pick slots under a mutex; the page-fault handling path does not touch it
+static _Atomic uint64_t g_mp_calls, g_mp_pages, g_mp_ticks;   // This module's mprotect: call count, pages covered, time spent (mach timebase, safe in the page-fault path too)
 static void mp(uintptr_t a, size_t len, int prot) {
     uint64_t t = mach_absolute_time(); mprotect((void *)a, len, prot);
     atomic_fetch_add(&g_mp_ticks, mach_absolute_time() - t); atomic_fetch_add(&g_mp_calls, 1); atomic_fetch_add(&g_mp_pages, len >> g_shift);
 }
 
-static mach_timebase_info_data_t g_tb;   // 首次登记池时取好（缺页路径里只做乘除） | obtained when the first pool is registered (the fault path only multiplies and divides)
+static mach_timebase_info_data_t g_tb;   // obtained when the first pool is registered (the fault path only multiplies and divides)
 static _Atomic int g_busy_red;
-// 等这一页离开 BUSY。返回 1 = 已离开；0 = 等过了上限（报红一次）。信号处理里可用：只有原子读、mach_absolute_time、sched_yield
 // Wait for this page to leave BUSY. Returns 1 = it has left; 0 = waited past the limit (reported red once). Usable in a signal handler: only atomic reads, mach_absolute_time and sched_yield
 static int busy_wait(range_t *r, uintptr_t p) {
     uint64_t t0 = 0;
@@ -72,26 +57,24 @@ static int busy_wait(range_t *r, uintptr_t p) {
     return 1;
 }
 static int live_at(int i) { return atomic_load_explicit(&g_r[i].live, memory_order_acquire); }
-// 能整段装下 [a, a+len) 的在册区间（贴图的跟踪 / 保护 / 查脏都用它） | The registered range that holds all of [a, a+len) (used for a texture's tracking / protection / dirty check)
+// The registered range that holds all of [a, a+len) (used for a texture's tracking / protection / dirty check)
 static range_t *find_span(uintptr_t a, size_t len) {
     int n = atomic_load(&g_nr);
     for (int i = 0; i < n; i++) if (live_at(i) && a >= g_r[i].base && a + len <= g_r[i].end) return &g_r[i];
     return NULL;
 }
-static void unprotect_page(range_t *r, uintptr_t p) {   // 调用方已把状态从 PROT 改成 BUSY | The caller has already changed the state from PROT to BUSY
+static void unprotect_page(range_t *r, uintptr_t p) {   // The caller has already changed the state from PROT to BUSY
     mp(r->base + (p << g_shift), g_pg, PROT_READ | PROT_WRITE);
     atomic_store(&r->gen[p], atomic_fetch_add(&g_now, 1) + 1);
     atomic_store(&r->state[p], PG_NONE);
 }
-// 解开一个区间里的一页：受保护就解并记代号；别的线程正在改它的保护就等它改完再看——对方若是在设只读，等完这页是 PROT，照样得解
-// （写前解保护走不到缺页处理，必须在这里解掉）。返回 1 = 这一页是本模块管的；0 = 不是，或等「忙」超时
 // Unprotect one page of a range: if protected, unprotect and stamp it; if another thread is changing its protection, wait for it to finish and look again -- if the other side was setting read-only, the page is PROT after the wait and still has to be unprotected
 // (an unprotect-before-write never reaches the fault handler, so it must be done here). Returns 1 = this page is managed by this module; 0 = it is not, or the wait on BUSY timed out
 static int release_page(range_t *r, uintptr_t p, _Atomic uint64_t *count) {
     for (;;) {
         uint8_t st = PG_PROT;
         if (atomic_compare_exchange_strong(&r->state[p], &st, PG_BUSY)) { unprotect_page(r, p); if (count) atomic_fetch_add(count, 1); return 1; }
-        if (st != PG_BUSY) return atomic_load(&r->gen[p]) != 0;   // 已是 NONE：刚被别的线程解掉（缺页发生在解之前）就重执行；从未保护过的页不是我们的 | already NONE: just unprotected by another thread (the fault happened before the unprotect) -> re-execute; pages never protected are not ours
+        if (st != PG_BUSY) return atomic_load(&r->gen[p]) != 0;   // already NONE: just unprotected by another thread (the fault happened before the unprotect) -> re-execute; pages never protected are not ours
         if (!busy_wait(r, p)) return 0;
     }
 }
@@ -99,7 +82,7 @@ static int on_fault(void *addr, int is_write, void *uc) {
     (void)uc;
     if (!is_write) return 0;
     uintptr_t a = (uintptr_t)addr; int ours = 0, n = atomic_load(&g_nr);
-    for (int i = 0; i < n; i++)   // 共页的每个区间都要解：只解一个的话，另一个区间的状态仍是「受保护」，之后的写不再缺页、被漏掉 | Every range sharing the page must be released: releasing only one leaves the other range's state at "protected", and later writes no longer fault and are missed
+    for (int i = 0; i < n; i++)   // Every range sharing the page must be released: releasing only one leaves the other range's state at "protected", and later writes no longer fault and are missed
         if (live_at(i) && a >= g_r[i].base && a < g_r[i].end) ours |= release_page(&g_r[i], (a - g_r[i].base) >> g_shift, &g_faults);
     return ours;
 }
@@ -139,7 +122,6 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     if (r->cap < np) {
         state = calloc(np, 1); gen = calloc(np, sizeof *gen);
         if (!state || !gen) die("脏页表分配失败（%zu 页）", np);
-        // 旧数组不 free：信号处理里可能仍有极短暂的陈旧读者，泄漏量 = 每页 9 字节。
         // The old array is not freed: the signal handler may still have a very brief stale reader; leak = 9 bytes per page.
         r->cap = np;
     } else {
@@ -150,26 +132,22 @@ void nvn_dirty_add_range(const void *mem, size_t size) {
     atomic_store_explicit(&r->live, 1, memory_order_release);
     pthread_mutex_unlock(&g_slot_mu);
 }
-// 池销毁：先把仍受保护的页还原成可写（池内存归还游戏后可能另作他用），再标失效
 // Pool destruction: first restore still-protected pages to writable (the pool memory may be reused for something else once returned to the game), then mark invalid
 void nvn_dirty_remove_range(const void *mem) {
     pthread_mutex_lock(&g_slot_mu);
     range_t *r = NULL; int n = atomic_load(&g_nr);
-    for (int i = 0; i < n && !r; i++) if (live_at(i) && g_r[i].mem == (uintptr_t)mem) r = &g_r[i];   // 按池的确切起点认：共页的邻池取整后的 base 可能相同 | Match by the pool's exact start: an adjacent pool sharing a page may have the same rounded base
+    for (int i = 0; i < n && !r; i++) if (live_at(i) && g_r[i].mem == (uintptr_t)mem) r = &g_r[i];   // Match by the pool's exact start: an adjacent pool sharing a page may have the same rounded base
     if (r) { prep_write((void *)r->base, r->end - r->base); atomic_store_explicit(&r->live, 0, memory_order_release); atomic_fetch_sub(&g_live, 1); }
     pthread_mutex_unlock(&g_slot_mu);
 }
 int nvn_dirty_tracked(const void *addr, size_t len) {
     return find_span((uintptr_t)addr, len) != NULL;
 }
-// 设只读：先把页标成 BUSY，mprotect 落地后才标 PROT（次序与不变式见文件头的状态说明）
 // Set read-only: mark the pages BUSY first and mark them PROT only after mprotect has landed (for the order and the invariant see the state notes at the top of the file)
 void nvn_dirty_protect(const void *addr, size_t len) {
     range_t *r = len ? find_span((uintptr_t)addr, len) : NULL;
     if (!r) return;
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
-    // 连续置成 PROT 的页合成一次 mprotect（逐页调用在首传大贴图时一帧上千次；选角页启动帧 5：4888 次）。
-    // 已是 PROT / BUSY 的页断开连续段：不重复保护，也不碰别的线程正在改的页
     // Consecutive pages are merged into one mprotect (per-page calls reach thousands per frame on the first upload of large textures; character select page startup frame 5: 4888 calls).
     // Pages already PROT / BUSY break the consecutive run: do not protect again, and do not touch pages another thread is changing
     uintptr_t run = 0; int open = 0;
@@ -184,9 +162,9 @@ uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
 int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;
     range_t *r = find_span((uintptr_t)addr, len);
-    if (!r) return 1;   // 未跟踪时保守视为脏，宁可多传也不显示旧内容 | When untracked, conservatively treat as dirty: better to upload more than to show stale content
+    if (!r) return 1;   // When untracked, conservatively treat as dirty: better to upload more than to show stale content
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
-    for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // 上传前最后一次写的代号 ≤ 戳；之后的写必 > 戳 | The generation of the last write before upload is <= the stamp; any later write must be > the stamp
+    for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // The generation of the last write before upload is <= the stamp; any later write must be > the stamp
     return 0;
 }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {

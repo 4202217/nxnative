@@ -1,14 +1,3 @@
-// main 程序本体内嵌的 4 个 Maxwell 计算着色器（PC 版无对应）→ 手写 MSL，逐条按 envydis 反汇编等价。
-// 出处：main 原映像 .rodata 控制段 @0x1df10e8 / 0x1df1a94 / 0x1df2440 / 0x1df2dec（envydis -m gm107）。
-// 共同骨架（Maxwell 原文）：
-//   id = (ctaid.x << 5) + tid.x                       // 线程组 32×1×1
-//   if (id >= c3[0x0]) exit                           // 元素个数 = uniform 缓冲 0 的第 0 个字（u32 比较）
-//   src = ssbo0（c0[0x310]），dst = ssbo1（c0[0x320]），地址 = 基址 + 32 位偏移
-// 各核差别（NVN 计数器报告 16 字节 = {计数 u64, 时间戳 u64}）：
-//   q_val0   dst[id] = *(u64*)(src + (id<<4))                         取计数
-//   q_val8   dst[id] = *(u64*)(src + (id<<4) + 8)                     取时间戳
-//   q_dlt0   dst[id] = *(u64*)(src + (id<<5) + 16) - *(u64*)(src + (id<<5))        前后两报告的计数差
-//   q_dlt8   dst[id] = *(u64*)(src + (id<<5) + 24) - *(u64*)(src + (id<<5) + 8)    前后两报告的时间戳差
 // The 4 Maxwell compute shaders embedded in the main program itself (no counterpart in the PC version) -> hand-written MSL, equivalent instruction by instruction to the envydis disassembly.
 // Source: control segments in the .rodata of the original main image @0x1df10e8 / 0x1df1a94 / 0x1df2440 / 0x1df2dec (envydis -m gm107).
 // Common skeleton (original Maxwell):
@@ -35,7 +24,6 @@ static const char *const k_nvn_builtin_msl =
     "kernel void q_dlt0(ARGS) { HEAD uint b = id << 5; ST(LD(b + 16u) - LD(b)); }\n"
     "kernel void q_dlt8(ARGS) { HEAD uint b = (id << 5) + 16u; ST(LD(b + 8u) - LD(b - 8u)); }\n";
 
-// Switch 控制段哈希（sha256(控制段 0x880 字节) 前 16 位）→ 内核名
 // Switch control segment hash (first 16 hex digits of sha256(0x880 bytes of the control segment)) -> kernel name
 static const struct { const char *ctl; const char *fn; } k_nvn_builtin_map[] = {
     {"d0f769bb916bbba9", "q_val0"},

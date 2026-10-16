@@ -1,5 +1,3 @@
-// hle_audio.c 单测（静音接收端）：3 块各 100 ms 缓冲 → 按序在约 100/200/300 ms 释放、每次释放触发事件。
-// 期望值由采样率与块长直接算出：4800 帧 / 48 kHz = 100 ms。
 // hle_audio.c unit test (silent sink): 3 buffers of 100 ms each -> released in order at about 100/200/300 ms, each release triggering the event.
 // Expected values are computed directly from the sample rate and block length: 4800 frames / 48 kHz = 100 ms.
 #include "../hle_audio.c"
@@ -11,8 +9,8 @@ void objmap_put(const void *k, void *v) { for (int i = 0; i < 8; i++) if (!om[i]
 void *objmap_del(const void *k) { for (int i = 0; i < 8; i++) if (om[i].k == k) { om[i].k = 0; return om[i].v; } return NULL; }
 static _Atomic int g_sig;
 void hle_signal_system_event(void *g) { (void)g; atomic_fetch_add_explicit(&g_sig, 1, memory_order_seq_cst); }
-void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }   // 真实现要客体线程 + SDK 内核事件；单测只数触发次数 | the real implementation needs a guest thread + SDK kernel event; the unit test only counts triggers
-module_t *module_of(const void *p) { (void)p; return NULL; }   // 日志里的调用点：单测里没有客体模块 | call sites in the log: no guest modules in the unit test
+void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }   // the real implementation needs a guest thread + SDK kernel event; the unit test only counts triggers
+module_t *module_of(const void *p) { (void)p; return NULL; }   // call sites in the log: no guest modules in the unit test
 int main(void) {
     char out[64], ev[64]; uint8_t prm[16]; gbuf b[3]; static int16_t pcm[3][4800 * 2];
     h_au_InitParam(prm);
@@ -34,8 +32,6 @@ int main(void) {
     printf("释放 %d/3，事件触发 %d 次（期望 3）\n", got, sig1);
     if (fail || got != 3 || sig1 != 3) return 1;
 
-    // 场景 2：真出声端（PCM 全 0，听不到）播 6 块各 100 ms，第 150 ms 暂停（切后台 / 来电）、第 350 ms 恢复。
-    // 期望：暂停期间由静音接收端接手按实时消耗，6 块按序全部释放、事件 6 次；总时长 ≈ 600 ms（实时，不因暂停停住也不加速）。
     // Scenario 2: the real audio output sink (PCM all 0, inaudible) plays 6 blocks of 100 ms each, pausing at 150 ms (app to background / incoming call) and resuming at 350 ms.
     // Expected: during the pause the silent sink takes over and consumes in real time, all 6 blocks are released in order with 6 events; total duration ~ 600 ms (real time, neither stalled by the pause nor sped up).
     setenv("DM_AUDIO", "1", 1);

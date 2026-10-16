@@ -1,4 +1,3 @@
-// 按地址反编译：-postScript Decompile.java <模块偏移，十六进制，逗号分隔；前缀 @ = 在该地址（重）建函数> [映像基址，缺省 0x100000]
 // Decompile functions by address: -postScript Decompile.java <hex module offsets, comma separated; prefix @ = (re)create the function at that address> [image base, default 0x100000]
 import ghidra.app.script.GhidraScript;
 import ghidra.app.decompiler.*;
@@ -6,7 +5,6 @@ import ghidra.program.model.listing.Function;
 import ghidra.program.model.address.Address;
 
 public class Decompile extends GhidraScript {
-    // 曾被当成不返回的 nn::os 导入调用之后的代码没反汇编：清掉调用返回覆盖并继续反汇编
     // Calls to nn::os imports once treated as non-returning left their fall-through undisassembled; clear the call-return override and disassemble past them
     void fixFlow(Address start) {
         for (int round = 0; round < 64; round++) {
@@ -34,7 +32,6 @@ public class Decompile extends GhidraScript {
     @Override public void run() throws Exception {
         String[] args = getScriptArgs();
         long base = args.length > 1 ? Long.decode(args[1]) : 0x100000L;
-        // Ghidra 把部分 nn::os 导入（LockMutex）标成不返回，函数在第一次加锁后就被截断；撤掉这个标记
         // Ghidra marks some nn::os imports (LockMutex) as non-returning, which cuts functions short; undo that
         java.util.List<Function> all = new java.util.ArrayList<>();
         currentProgram.getFunctionManager().getFunctions(true).forEach(all::add);
@@ -46,12 +43,10 @@ public class Decompile extends GhidraScript {
         DecompInterface di = new DecompInterface();
         di.openProgram(currentProgram);
         for (String a : args[0].split(",")) {
-            // "@偏移"：没有函数包含它时在此建函数（只经虚表到达的代码）
             // "@off" = create a function starting at off when none contains it (code reached only through vtables)
             boolean mk = a.trim().startsWith("@");
             Address addr = toAddr(base + Long.decode(a.trim().replace("@", "")));
             Function f = getFunctionContaining(addr);
-            // "@偏移" 正是已有函数的入口：重建它（函数体可能在误标不返回的调用处被截断）
             // "@off" on an existing function: rebuild it, since its body may have been cut at a call wrongly marked non-returning
             if (mk && f != null && f.getEntryPoint().equals(addr)) { removeFunction(f); f = null; }
             if (f == null && mk) { fixFlow(addr); f = createFunction(addr, null); }

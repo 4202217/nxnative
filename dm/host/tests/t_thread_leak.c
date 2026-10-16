@@ -1,8 +1,3 @@
-// 客体线程每建销一条不许漏宿主堆（取自 d2r-mobile 2eb575877 的 t_thread_leak.c）：guest_thread_init 给每条线程申请 TLS 块与线程本地区，
-// 原先建键时析构传空、线程退出时不放，每条漏 8192 + 0x200 + 0x400 = 9728 字节。
-// 做法：直接包含真的 thread.c，把其中的 calloc / free 换成这里计数的版本；TLS / 线程本地区两把键照装载器的建法（析构为空），释放靠 thread.c 自己另建的那把键。
-// 期望值写死：建销 200 条线程，申请过的字节 = 200 ×（9728 + 记指针的 16）= 1948800，全部线程退出后仍没释放的块数 = 0。
-// 每条线程在退出前把两把键的槽改写成别的指针（客体就是这么干的：它自己设线程指针）——析构按槽里的值 free 会崩（第一版修法在真宿主上就崩在这里）。
 // Creating and destroying a guest thread must not leak host heap (item 1 of the memory-leak work): guest_thread_init allocates a TLS block and a thread-local region for each thread,
 // and previously the keys were created with a null destructor and nothing was freed at thread exit, leaking 8192 + 0x200 + 0x400 = 9728 bytes per thread.
 // Method: include the real thread.c directly and replace its calloc / free with the counting versions here; the TLS / thread-local-region keys are created the way the loader does (null destructor), and freeing relies on the extra key thread.c creates itself.
@@ -15,7 +10,7 @@
 #include <malloc/malloc.h>
 static _Atomic long g_live_blocks, g_live_bytes, g_total_bytes;
 static void *t_calloc(size_t n, size_t sz) { void *p = calloc(n, sz); atomic_fetch_add(&g_live_blocks, 1); atomic_fetch_add(&g_live_bytes, (long)(n * sz)); atomic_fetch_add(&g_total_bytes, (long)(n * sz)); return p; }
-static _Atomic long g_freed_req;   // 释放次数 | number of frees
+static _Atomic long g_freed_req;   // number of frees
 static void t_free(void *p) { if (!p) return; atomic_fetch_sub(&g_live_blocks, 1); atomic_fetch_add(&g_freed_req, 1); free(p); }
 #define calloc t_calloc
 #define free t_free

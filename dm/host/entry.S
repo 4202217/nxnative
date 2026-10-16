@@ -1,8 +1,3 @@
-// 两个公共入口 + 静态桩表。
-// 0) unimpl_stubs：未实现导入的记名桩，第 k 个 = movz x9,#k; b unimpl_entry（静态代码，iOS 不许运行时生成）
-// 1) unimpl_entry：未实现导入的桩入口，x9 = 桩号；保存 x0-x8+lr 调 unimpl_c(idx, regs)。
-// 2) dm_gate：改写器把 svc / cntpct 读换成「bl 到本入口」。进来时 lr = 门块返回点（gate_dispatch 据此查是哪个门），
-//    保存 x0-x30 到栈上连续区，调 gate_dispatch(ret, regs)，回写 x0（门返回值），返回。
 // Two common entries + a static stub table.
 // 0) unimpl_stubs: named stubs for unimplemented imports, the k-th = movz x9,#k; b unimpl_entry (static code; iOS does not allow runtime generation)
 // 1) unimpl_entry: stub entry for unimplemented imports, x9 = stub number; save x0-x8+lr and call unimpl_c(idx, regs).
@@ -38,7 +33,6 @@ _unimpl_entry:
     .globl _dm_gate
     .p2align 2
 _dm_gate:
-    // 开 256 字节帧，保存 x0..x30（x0..x29 成对，x30 单独），门可读改 x0..x30
     // Open a 256-byte frame and save x0..x30 (x0..x29 in pairs, x30 alone); the gate may read and modify x0..x30
     sub sp, sp, #800
     stp x0, x1, [sp, #0]
@@ -79,7 +73,7 @@ _dm_gate:
     str x9, [sp, #776]
     mrs x9, fpcr
     str x9, [sp, #784]
-    mov x0, x30              // 返回点 = 门标识 | Return point = gate identifier
+    mov x0, x30              // Return point = gate identifier
     mov x1, sp               // regs
     bl _gate_dispatch
     ldr x9, [sp, #784]
@@ -104,8 +98,6 @@ _dm_gate:
     ldp q26, q27, [sp, #672]
     ldp q28, q29, [sp, #704]
     ldp q30, q31, [sp, #736]
-    // 门可改任意通用寄存器：svc 出参在 x0..x8，mrs cntpct 的目标可以是任意 xN（sdk 33 处里 14 处是 x19..x23）
-    // ⇒ x0..x29 全部回读（x18 是苹果平台寄存器，客体的 x18 已改写到线程槽，跳过不碰）
     // A gate may modify any general-purpose register: svc out-parameters are in x0..x8, and the target of mrs cntpct can be any xN (14 of the 33 sites in sdk are x19..x23)
     // ⇒ read back all of x0..x29 (x18 is the Apple platform register; the guest's x18 has been rewritten to the thread slot, so skip it and leave it alone)
     ldp x0, x1, [sp, #0]
@@ -127,8 +119,6 @@ _dm_gate:
     add sp, sp, #800
     ret
 
-// 3) dm_thread_enter(entry, arg, sp)：客体线程起点。切到 SDK 给的客体栈，x0 = 参数调入口；
-//    Horizon 线程须经 ExitThread 退出，入口返回即报错。
 // 3) dm_thread_enter(entry, arg, sp): guest thread start. Switch to the guest stack given by the SDK and call entry with x0 = argument;
 //    Horizon threads must exit via ExitThread; returning from entry is reported as an error.
     .globl _dm_thread_enter

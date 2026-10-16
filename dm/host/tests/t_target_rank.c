@@ -1,5 +1,3 @@
-// 自动选怪单测：在本进程内存里摆假单位 / 假怪物数据，调观测门回调，核分数调整（期望值手算，不调被测实现算）。
-// 布局：单位 +0 类型、+4 类号、+0x10 → 怪物数据（+0x1A TypeFlag：0x02 超级独特 / 0x04 冠军 / 0x08 独特 / 0x10 随从）。
 // Automatic monster targeting unit test: lay out fake units / fake monster data in this process's memory, call the observation gate callback, and check the score adjustment (expected values computed by hand, not by calling the implementation under test).
 // Layout: unit +0 type, +4 class number, +0x10 -> monster data (+0x1A TypeFlag: 0x02 super unique / 0x04 champion / 0x08 unique / 0x10 minion).
 #include <stdio.h>
@@ -32,7 +30,6 @@ int main(void) {
     unit.cls = 5; unit.type = 0; data[0x1a] = 0x08; expect("玩家单位（类型 0）不动", run(&unit, 0.5f), 0.5f);
     unit.type = 1; unit.data = 0; data[0x1a] = 0; expect("怪物数据指针空：读不到，不动", run(&unit, 0.5f), 0.5f);
     expect("候选单位空指针不动", run(NULL, 0.5f), 0.5f);
-    // 跨档：精英最差分（0.01+1000）仍高于普通最好分（0.99）；Boss 最差分高于精英最好分
     // Across tiers: the worst elite score (0.01+1000) is still higher than the best normal score (0.99); the worst Boss score is higher than the best elite score
     unit.data = (uint64_t)(uintptr_t)data; data[0x1a] = 0x04; float elite = run(&unit, 0.01f);
     data[0x1a] = 0; unit.cls = 211; float boss = run(&unit, 0.01f);

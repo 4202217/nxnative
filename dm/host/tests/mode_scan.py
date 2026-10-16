@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""手柄 / 触屏模式的登记闸门（宿主单测里跑，秒级）。只读源码，不跑游戏。
-三条：
-1. dm_cursor.c 每帧那一长行里的每个泵，要么带「if (tm) 」（触屏专属：手柄模式与切换进行中不跑），要么在它上方注释「两种模式都跑：」的单子上；
-   文件里定义的每个 *_pump 也必须在这一行或那张单子上出现——新加一个泵、两边都不登记就红。
-2. 散判模式（dm_padmode_current()）与替玩家按键 / 发消息（fe_key / ui_auto_key / fe_send / dm_ui_key_pulse）的处数按文件记在下面两张表里，只许减不许加。
-   要加：先想清楚它在另一种模式下该停、照常还是换做法，登记进 dm_mode_items.h（要随切换清理的）或上面那张单子，再改这里的数并在提交说明里写原因。
-3. dm_mode_items.h 里登记的进 / 出函数都得有定义。
-用法：mode_scan.py <dm 目录>
-Registration gate for controller / touch modes (run in the host unit tests, takes seconds). Reads source only, does not run the game.
+"""Registration gate for controller / touch modes (run in the host unit tests, takes seconds). Reads source only, does not run the game.
 Three rules:
 1. Every pump on the long per-frame line in dm_cursor.c either carries "if (tm) " (touch-only: not run in controller mode or while a switch is in progress) or is on the list in the comment above it headed 「两种模式都跑：」(runs in both modes:);
    every *_pump defined in the file must also appear on this line or on that list -- a newly added pump registered in neither fails.
@@ -48,7 +40,7 @@ def count(pat, skip_defs):
         rel = os.path.relpath(f, root); s = strip_comments(open(f, encoding='utf-8').read()); n = 0
         for mm in re.finditer(pat, s):
             ls = s.rfind('\n', 0, mm.start()) + 1; head = s[ls:mm.start()]
-            if skip_defs and re.search(r'(^|\s)(static\s+)?(void|int|uint64_t)\s+$', head): continue   # 函数定义 / 声明本身不算调用 | A function definition / declaration itself does not count as a call
+            if skip_defs and re.search(r'(^|\s)(static\s+)?(void|int|uint64_t)\s+$', head): continue   # A function definition / declaration itself does not count as a call
             n += 1
         if n: out[rel] = n
     return out

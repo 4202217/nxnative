@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-# 我们自己的功能不许写原版储藏箱控件（编年史仓库是独立页面；丢装备事故：编年史页把原版 grid 设成不可见、游戏从不重设，个人 / 共享页看起来全空）。
-# 静态扫：编年史页（dm_vault_ui.c 全文）与个人仓库页码（dm_cursor.c 的 ui_pages_pump）里不许出现原版储藏箱控件名——这两处只该碰 TouchVault / TouchPgPage 底下的控件。
-# 运行时另有一道：dm_vault_ui.c vu_guard（写之前沿父链核是不是我们的控件，不是就报红不写）。
-# 第二道（不写原版控件）：整个宿主（dm/host/*.c）不许直接写控件的可见位 +0x50 / +0x51，只许在带守卫的函数里写——
-# dm_cursor.c ui_show_ours、dm_vault_ui.c vu_show、dm_kills.c kb_show（名字不是 Touch 开头就报红不写）。别处要改可见，调它们
-# 用法：native_write_scan.py <dm/host 目录>；--selftest 先拿一段故意违规的文本验这个扫描本身会报红
 # Our own features must not write the original game's stash widgets (the chronicle vault is a separate page; lost-equipment incident: the chronicle page set the original grid invisible and the game never resets it, so the personal / shared pages looked completely empty).
 # Static scan: the chronicle page (all of dm_vault_ui.c) and the personal stash page numbers (ui_pages_pump in dm_cursor.c) must not contain original stash widget names -- these two places should only touch widgets under TouchVault / TouchPgPage.
 # There is another check at run time: dm_vault_ui.c vu_guard (before writing, walk the parent chain to check whether it is our widget; if not, report a failure and do not write).
@@ -26,7 +20,7 @@ def scan(text, where):
 
 VIS = re.compile(r'\+\s*0x5[01]\)\s*=(?!=)')
 GUARDED = ('ui_show_ours', 'vu_show', 'kb_show')
-def vis_scan(text, where):   # 直接写可见位的行；在带守卫的函数里（定义那一行或其函数体内）的不算 | lines that write the visible flag directly; those inside a guarded function (its definition line or its body) do not count
+def vis_scan(text, where):   # lines that write the visible flag directly; those inside a guarded function (its definition line or its body) do not count
     bad, inside = [], None
     for no, line in enumerate(text.split('\n'), 1):
         m = re.match(r'static\s+\w+\s+(\w+)\(', line)
@@ -36,8 +30,6 @@ def vis_scan(text, where):   # 直接写可见位的行；在带守卫的函数�
         if line.startswith('}'): inside = None
     return bad
 
-# 第三道（位置守卫）：dm_cursor.c 里写控件矩形（+0x70 x、+0x74 y、+0x78 宽、+0x7c 高）只许在 mv_offset（原版控件，名单 + 记原值 + 必写回）
-# 与 ui_move_ours（只许 Touch 开头）里。认两种写法：直接 *(int32_t *)(… + 0x7?) = …；或同一函数里先取 int32_t *名 = (int32_t *)(… + 0x7?)，再写 名[k] = / *名 =
 # Third check (position guard): in dm_cursor.c, writing a widget rectangle (+0x70 x, +0x74 y, +0x78 width, +0x7c height) is allowed only in mv_offset (original-game widgets, allow list + record original value + must write back)
 # and in ui_move_ours (only names starting with Touch). Two forms are recognized: a direct *(int32_t *)(... + 0x7?) = ...; or, within the same function, first taking int32_t *name = (int32_t *)(... + 0x7?) and then writing name[k] = / *name =
 RECT_OK = ('mv_offset', 'ui_move_ours')
@@ -50,7 +42,7 @@ def rect_scan(text, where):
         if m and not line.startswith(' '): fn, ptrs = m.group(1), set()
         code = line.split('//', 1)[0]
         for pm in RECT_PTR.finditer(code): ptrs.add(pm.group(1))
-        code = RECT_PTR.sub('', code)   # 声明那一处（int32_t *名 = …）本身不算写 | the declaration itself (int32_t *name = ...) does not count as a write
+        code = RECT_PTR.sub('', code)   # the declaration itself (int32_t *name = ...) does not count as a write
         hit = RECT_DIRECT.search(code) or any(re.search(r'(?<![\w.>])(?:\*\s*%s|%s\s*\[\s*\d\s*\])\s*=(?!=)' % (q, q), code) for q in ptrs)
         if hit and fn not in RECT_OK: bad.append('%s:%d 在 %s 里直接写了控件矩形（原版控件走 mv_offset、我们的走 ui_move_ours）：%s' % (where, no, fn, line.strip()[:120]))
     return bad

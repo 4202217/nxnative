@@ -1,8 +1,3 @@
-// NSP 解包：nx_extract <prod.keys> <基础 NSP> <更新 NSP 或 -> <输出目录> [比对用的基础 RomFS 目录] [--manifest]
-// 输出 <输出目录>/ExeFS 与 <输出目录>/RomFS（有更新包时是合并后的 RomFS）；给了基础 RomFS 目录时，内容与之相同的文件做成 APFS 克隆（不占新空间）。
-// --manifest：RomFS 不写出，只写清单 <输出目录>/romfs_manifest.tsv（路径、大小、头 32 字节），给新游戏粗查用（大作的 RomFS 十几 GB）。
-// 追加内容：nx_extract <prod.keys> --aoc <DLC NSP> <输出目录>，把 DLC 数据 NCA 的 RomFS 写到 <输出目录>（打包脚本按序号放 aoc/<序号>/，宿主经 DM_AOC_DIR 挂载）。
-// 标题密钥取自 NSP 里的通用票据（.tik），只需 prod.keys；密钥值一律不打印。
 // NSP extraction: nx_extract <prod.keys> <base NSP> <update NSP or -> <output dir> [base RomFS dir to compare against] [--manifest]
 // Writes <output dir>/ExeFS and <output dir>/RomFS (the merged RomFS when there is an update); with a base RomFS dir, files whose content matches it become APFS clones (no new space).
 // --manifest: the RomFS is not written, only a list <output dir>/romfs_manifest.tsv (path, size, first 32 bytes), for surveying a new game (a large game's RomFS is well over 10 GB).
@@ -38,20 +33,20 @@ static class P {
         Nca ctrl = Pick(updPkg ?? basePkg, NcaContentType.Control);
         Console.WriteLine($"标题 | title {baseProg.Header.TitleId:x16}" + (updProg != null ? $"，更新 | update {updProg.Header.TitleId:x16}" : ""));
         string outDir = a[3], cmpDir = a.Length > 4 ? a[4] : null;
-        if (ctrl != null) {   // 控制数据（NACP）：显示版本与游戏名，原样存一份 <输出目录>/control.nacp 供出包取名 | control data (NACP): display version and game name; a raw copy goes to <output dir>/control.nacp for naming the app
+        if (ctrl != null) {   // control data (NACP): display version and game name; a raw copy goes to <output dir>/control.nacp for naming the app
             byte[] nacp = Nacp(ctrl);
             Console.WriteLine($"显示版本 | display version {System.Text.Encoding.ASCII.GetString(nacp, 0x3060, 0x10).TrimEnd('\0')}");
             Console.WriteLine($"名称 | name {TitleName(nacp)}");
             Directory.CreateDirectory(outDir); File.WriteAllBytes(Path.Combine(outDir, "control.nacp"), nacp);
-            var (icon, lang) = Icon(ctrl);   // App 图标用的游戏图标，存成 <输出目录>/icon.jpg（build_ipa.sh 取它） | the game icon for the app icon, saved as <output dir>/icon.jpg (build_ipa.sh picks it up)
+            var (icon, lang) = Icon(ctrl);   // the game icon for the app icon, saved as <output dir>/icon.jpg (build_ipa.sh picks it up)
             if (icon != null) { File.WriteAllBytes(Path.Combine(outDir, "icon.jpg"), icon); Console.WriteLine($"图标 | icon {lang}（{icon.Length} 字节 | bytes）"); }
             else Console.WriteLine("控制数据里没有图标 | no icon in the control data");
         }
-        // 代码区：更新包的 ExeFS 是完整的，叠在基础上打开也一样 | Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
+        // Code section: the update's ExeFS is complete; opening it layered over the base gives the same result
         IFileSystem exefs = updProg != null ? baseProg.OpenFileSystemWithPatch(updProg, NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid) : baseProg.OpenFileSystem(NcaSectionType.Code, IntegrityCheckLevel.ErrorOnInvalid);
         Copy(exefs, Path.Combine(outDir, "ExeFS"), null);
         string[] mods = Directory.GetFiles(Path.Combine(outDir, "ExeFS")); Array.Sort(mods, StringComparer.Ordinal);
-        foreach (string p in mods) {   // 每个 NSO 模块（main、sdk、subsdk*、rtld…）的构建号 | build ID of every NSO module (main, sdk, subsdk*, rtld...)
+        foreach (string p in mods) {   // build ID of every NSO module (main, sdk, subsdk*, rtld...)
             if (new FileInfo(p).Length < 0x50) continue;
             byte[] h = new byte[0x50]; using (var f = File.OpenRead(p)) f.ReadExactly(h);
             if (h[0] == 'N' && h[1] == 'S' && h[2] == 'O' && h[3] == '0') Console.WriteLine($"{Path.GetFileName(p)} 构建号 | build id {Convert.ToHexString(h, 0x40, 16).ToLowerInvariant()}");
@@ -62,7 +57,7 @@ static class P {
         return 0;
     }
 
-    // DLC NSP：一个数据 NCA（内容类型 PublicData / Data）+ 元数据 NCA + 票据；只写数据 NCA 的 RomFS | DLC NSP: one data NCA (content type PublicData / Data) + a meta NCA + the ticket; only the data NCA's RomFS is written
+    // DLC NSP: one data NCA (content type PublicData / Data) + a meta NCA + the ticket; only the data NCA's RomFS is written
     static int Aoc(KeySet ks, string nsp, string outDir) {
         var pkg = OpenNsp(ks, nsp);
         Nca data = Pick(pkg, NcaContentType.PublicData) ?? Pick(pkg, NcaContentType.Data) ?? throw new Exception("DLC NSP 里没有数据 NCA | no data NCA in the DLC NSP");
@@ -72,7 +67,7 @@ static class P {
         return 0;
     }
 
-    // 打开 NSP（PFS0），导入其中的通用票据，列出所有 NCA | Open an NSP (PFS0), import its common tickets, list all NCAs
+    // Open an NSP (PFS0), import its common tickets, list all NCAs
     static List<Nca> OpenNsp(KeySet ks, string path) {
         var pfs = new PartitionFileSystem();
         pfs.Initialize(new LocalStorage(path, FileAccess.Read)).ThrowIfFailure();
@@ -91,7 +86,6 @@ static class P {
     }
     static Nca Pick(List<Nca> l, NcaContentType t) { foreach (Nca n in l) if (n.Header.ContentType == t) return n; return null; }
 
-    // 图标：控制数据里每种语言一张 256×256 JPEG（/icon_<语言>.dat）。用英文的（美式英语，其次英式），都没有就按 NACP 的语言顺序取第一张
     // Icon: the control data holds one 256x256 JPEG per language (/icon_<language>.dat). Use the English one (American, then British); if neither exists, take the first in NACP language order
     static readonly string[] IconLangs = { "AmericanEnglish", "BritishEnglish", "Japanese", "French", "German", "LatinAmericanSpanish", "Spanish", "Italian",
                                            "Dutch", "CanadianFrench", "Portuguese", "Russian", "Korean", "TraditionalChinese", "SimplifiedChinese", "BrazilianPortuguese" };
@@ -106,7 +100,7 @@ static class P {
         }
         return (null, null);
     }
-    static byte[] Nacp(Nca ctrl) {   // 整份 control.nacp（0x4000 字节） | the whole control.nacp (0x4000 bytes)
+    static byte[] Nacp(Nca ctrl) {   // the whole control.nacp (0x4000 bytes)
         IFileSystem fs = ctrl.OpenFileSystem(NcaSectionType.Data, IntegrityCheckLevel.ErrorOnInvalid);
         using var f = new UniqueRef<IFile>();
         fs.OpenFile(ref f.Ref, "/control.nacp".ToU8Span(), OpenMode.Read).ThrowIfFailure();
@@ -114,8 +108,6 @@ static class P {
         byte[] v = new byte[n]; f.Get.Read(out _, 0, v, ReadOption.None).ThrowIfFailure();
         return v;
     }
-    // 游戏名：NACP 开头 16 种语言各 0x300 字节（名称 0x200 + 发行商 0x100），取第一个非空的（0 = 美式英语）；DisplayVersion 在 0x3060
-    //   新 SDK 的 NACP（如马力欧 1.2.1）把这 0x3000 字节压缩：u16 长度 + raw deflate，解开是 32 种语言 × 0x300。LibHac 0.19 不认，这里自己解
     // Game name: the NACP starts with 16 language entries of 0x300 bytes each (name 0x200 + publisher 0x100); take the first non-empty one (0 = American English); DisplayVersion is at 0x3060
     //   NACPs from newer SDKs (such as Mario 1.2.1) compress these 0x3000 bytes: a u16 size + raw deflate, inflating to 32 languages × 0x300. LibHac 0.19 does not know this, so it is decoded here
     static string TitleName(byte[] nacp) {
@@ -123,8 +115,8 @@ static class P {
         if (n > 0 && n <= 0x2ffe) try {
             using var z = new System.IO.Compression.DeflateStream(new MemoryStream(nacp, 2, n), System.IO.Compression.CompressionMode.Decompress);
             var m = new MemoryStream(); z.CopyTo(m);
-            if (m.Length == 0x6000) t = m.ToArray();   // 长度不对就是未压缩的名称碰巧能解 | a wrong length means an uncompressed name that happened to inflate
-        } catch (InvalidDataException) { }   // 未压缩 | not compressed
+            if (m.Length == 0x6000) t = m.ToArray();   // a wrong length means an uncompressed name that happened to inflate
+        } catch (InvalidDataException) { }   // not compressed
         for (int i = 0; i < (t == nacp ? 16 : 32); i++) {
             int z = Array.IndexOf(t, (byte)0, i * 0x300, 0x200), len = (z < 0 ? i * 0x300 + 0x200 : z) - i * 0x300;
             if (len > 0) return System.Text.Encoding.UTF8.GetString(t, i * 0x300, len);
@@ -132,7 +124,7 @@ static class P {
         return "";
     }
 
-    // 逐文件拷出；与比对目录同路径、同内容的文件改做 APFS 克隆 | Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
+    // Copy out file by file; files identical to the same path in the compare dir become APFS clones instead
     static void Copy(IFileSystem fs, string dst, string cmpDir) {
         long n = 0, cloned = 0, bytes = 0, written = 0; byte[] buf = new byte[4 << 20], cb = new byte[4 << 20];
         foreach (DirectoryEntryEx e in fs.EnumerateEntries("*", SearchOptions.RecurseSubdirectories)) {
@@ -157,7 +149,7 @@ static class P {
         }
         Console.WriteLine($"{dst}：{n} 个文件 {bytes / 1048576.0:F1} MB，其中 {cloned} 个与比对目录相同（克隆），新写 {written / 1048576.0:F1} MB | {n} files {bytes / 1048576.0:F1} MB, {cloned} identical to the compare dir (cloned), {written / 1048576.0:F1} MB newly written");
     }
-    // 只列 RomFS 清单（路径、大小、头 32 字节），不写游戏文件 | List the RomFS only (path, size, first 32 bytes) without writing game files
+    // List the RomFS only (path, size, first 32 bytes) without writing game files
     static void Manifest(IFileSystem fs, string path) {
         long n = 0, bytes = 0; byte[] h = new byte[32];
         Directory.CreateDirectory(Path.GetDirectoryName(path));

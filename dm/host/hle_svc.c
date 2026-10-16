@@ -1,5 +1,3 @@
-// Horizon 内核系统调用（装 SDK 后由 SDK 运行时触发）。只实现 P1 启动链要的：内存布局 + 堆 + 查询 + 调试输出 + 计时。
-// 寄存器约定：入参 w1.. / 出参 w0=Result、x1=值（GetInfo / SetHeapSize），与公开 Horizon ABI 一致。
 // Horizon kernel system calls (triggered by the SDK runtime once the SDK is loaded). Only what the P1 boot chain needs is implemented: memory layout + heap + query + debug output + timing.
 // Register convention: inputs w1.. / outputs w0=Result, x1=value (GetInfo / SetHeapSize), consistent with the public Horizon ABI.
 #include "dm.h"
@@ -11,26 +9,20 @@
 #include <time.h>
 #include <stdatomic.h>
 
-// 预留一整块客体地址空间，按 Horizon 分区（地址值直接用宿主 mmap 得到的真地址）。只占地址、不占内存。
-// 大小 5 GB：游戏要的是开头 1 GB（别名区、栈）+ 一整块堆（应用内存池 3285 MiB，见下面 APP_POOL），合计约 4.2 GB；
-// iOS 上不带「扩展虚拟寻址」权限时一次最多能预留 6 GB（真机实读：6 GB 成、7 GB 不成），所以不能留得更宽——
-// 留到 8 GB 的话，签不了那项权限的开发者账号（免费账号）出的包在这一步就退出。
 // Reserve one whole block of guest address space, partitioned the Horizon way (address values are the real addresses returned by the host's mmap).
 // It only takes address space, not memory.
 // Size 5 GB: the game needs the first 1 GB (alias region, stacks) + one whole heap block (application memory pool of 3285 MiB, see APP_POOL below),
 // about 4.2 GB in total; on iOS without the "extended virtual addressing" entitlement a single reservation can be at most 6 GB
 // (read on a real device: 6 GB succeeds, 7 GB fails), so it cannot be made any wider --
 // with an 8 GB reservation, builds from developer accounts that cannot sign that entitlement (free accounts) would exit at this step.
-#define RESERVE DM_GAME_MEM_RESERVE   // 游戏档案 mem_reserve。SMBW：堆只要 1.47 GB，整块与 D2R 一样 5 GB（真机已跑通的总量；6 GB 单块虽能预留，但还要给 Metal 等留地址） | SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB like D2R (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
-static uint8_t *g_as;              // ASLR 区基址 = 整块 | ASLR region base = the whole block
+#define RESERVE DM_GAME_MEM_RESERVE   // SMBW: the heap needs only 1.47 GB, so the block stays at 5 GB like D2R (the total proven on a real device; a single 6 GB block can be reserved, but Metal etc. still need address space)
+static uint8_t *g_as;              // ASLR region base = the whole block
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap;
-// 地址段整个落在客体堆当前已开放（可读写）的范围内：这种读不用陷内核核对，直接 memcpy（diag.c tk_rd 等每拍读客体内存的地方用）
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
 static uint8_t *g_alias; static size_t g_alias_cap;
-static _Atomic uint64_t *g_alias_bits;   // 别名区页位图（alias_pages） | alias region page bitmap (alias_pages)
+static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_pages)
 static uint8_t *g_stack; static size_t g_stack_cap;
-// 地址在客体地址块里（客体线程的栈都在这里：游戏自己的堆或栈区）；大栈入口（hle_bigstack.c）据此判断要不要换栈
 // The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
 int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < RESERVE; }
 
@@ -38,17 +30,11 @@ static void mem_init(void) {
     if (g_as) return;
     g_as = mmap(NULL, RESERVE, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (g_as == MAP_FAILED) die("reserve guest AS");
-    // 固定划分（都在预留块内）：alias 2.875 GB、stack 256 MB、heap 其余 1.625 GB。
-    // 较新 SDK 的 AddressRegionManager 在别名区开头固定占 0x3fe00000（约 1 GB）作节点区（sdk 0x134728），之后才给游戏分区域；别名区只有 512 MB 时第一次 AllocateAddressRegion 就失败（0x1803）。
-    // SMBW 还在 HeapDef（System/HeapSize）里定了 1792000 KB（1.75 GB）的 VirtualAddressMemory：开堆时先从内存池里扣掉它（SetHeapSize 只要 0x5be00000），
-    //   资源加载再按需 MapPhysicalMemory 到别名区节点区之后。别名区只给 1.25 GB 时那里只剩约 256 MB，3 MB 级的布局归档（WipeCourseIn / WipeWarp）
-    //   分不到地址就被跳过，用到时空指针崩（main +0x373e04）。所以别名区 = 节点区 + 1.75 GB + 余量；堆只要 1.47 GB，给 1.625 GB 够用。
     // Fixed partition (all inside the reserved block): alias 2.875 GB, stack 256 MB, heap the remaining 1.625 GB.
     // In newer SDKs the AddressRegionManager always takes 0x3fe00000 (~1 GB) at the start of the alias region as its node area (sdk 0x134728) before handing out regions; with a 512 MB alias region the very first AllocateAddressRegion fails (0x1803).
     // SMBW also defines a 1792000 KB (1.75 GB) VirtualAddressMemory in HeapDef (System/HeapSize): it is subtracted from the memory pool before the heap is opened (SetHeapSize asks for only 0x5be00000),
     //   and resource loading then MapPhysicalMemory's into the alias region after the node area on demand. With a 1.25 GB alias region only about 256 MB was left there, and 3 MB-class layout archives (WipeCourseIn / WipeWarp)
     //   got no address, were skipped, and crashed on a null pointer when used (main +0x373e04). So alias = node area + 1.75 GB + slack; the heap needs only 1.47 GB, and 2.625 GB is plenty.
-    // 别名区与栈区的大小取自游戏档案（mem_alias / mem_stack），堆占剩下的；马力欧：别名 0xB8000000、栈 0x10000000 → 栈在 +0xC8000000、堆在 +0xD8000000
     // The alias and stack sizes come from the game profile (mem_alias / mem_stack), the heap takes the rest; Mario: alias 0xB8000000, stack 0x10000000 → stack at +0xC8000000, heap at +0xD8000000
     g_alias = g_as + 0x10000000; g_alias_cap = DM_GAME_MEM_ALIAS;
     g_stack = g_alias + g_alias_cap; g_stack_cap = DM_GAME_MEM_STACK;
@@ -57,25 +43,17 @@ static void mem_init(void) {
     LOG("guest AS %p +%#llx  heap %p alias %p stack %p", g_as, (unsigned long long)RESERVE, g_heap, g_alias, g_stack);
 }
 
-// 应用内存池 = Switch（4 GB 机型）给应用的 3285 MB。游戏启动（main+0x1b66160）把 QueryMemoryInfo 报的总量整块设成堆、失败就减 2 MB 重试，
-// 整块交给自己的 StandardAllocator（main+0x32137a0）——所以堆大小 = 池 − 映像占用，宿主报多少它就只有多少。
-// 之前这里报 3 GB 且 SetHeapSize 从不失败：堆比真机少约 150 MB，进局高峰主堆只剩约 18 MB，本机负载高时时序一偏申请 128 KB 返回空、
-// 客体不判空直接写（CRASH main+0x1b36138，合入后复核 inv_tap）。
 // Application memory pool = the 3285 MB the Switch (4 GB model) gives applications. At startup (main+0x1b66160) the game sets the whole total reported by QueryMemoryInfo as the heap, retrying with 2 MB less on failure,
 // and hands the whole block to its own StandardAllocator (main+0x32137a0) -- so heap size = pool − image footprint, it has only as much as the host reports.
 // Previously 3 GB was reported here and SetHeapSize never failed: the heap was about 150 MB smaller than on the real device, at the run entry peak the main heap had only about 18 MB left, and under high local load a timing shift made a 128 KB request return null,
 // which the guest writes to without a null check (CRASH main+0x1b36138, re-verified after merge with inv_tap).
-#define APP_POOL DM_GAME_APP_POOL   // 游戏档案 app_pool（马力欧 0xCD500000） | game profile app_pool (Mario 0xCD500000)
+#define APP_POOL DM_GAME_APP_POOL   // game profile app_pool (Mario 0xCD500000)
 static size_t image_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) n += g_mod[i].size; return (n + 0x1fffff) & ~(size_t)0x1fffff; }
-// 巨型 bss（补丁区在首址前的模块，patch_nso.py FAR）：映像里文件部分之外的字节。已用内存原按「堆 + 64 MB」报，64 MB 涵盖普通模块的代码与数据（马力欧两模块共约 74 MB，
-// 它开的堆 = 池 − 64 MB − 1.75 GB 虚拟地址内存 − 1 MB = 0x5be00000，与真机一致）；银河战士 生存恐惧 main 的 bss 约 1.8 GB 是引擎的静态堆，Switch 把它算作已用，
-// 不加上它游戏就按池 − 64 MB 要 3.15 GB 堆
 // Giant bss (modules with the patch area before the base, patch_nso.py FAR): the image bytes beyond the file part. Used memory was reported as "heap + 64 MB", where the 64 MB covers ordinary modules' code and data (Mario's two modules are about 74 MB together,
 // and the heap it opens = pool − 64 MB − 1.75 GB virtual address memory − 1 MB = 0x5be00000, as on hardware); Metroid Dread's main has about 1.8 GB of bss, the engine's static heap, which the Switch counts as used;
 // without it the game asks for pool − 64 MB = 3.15 GB of heap
 static size_t big_bss_bytes(void) { size_t n = 0; for (int i = 0; i < g_nmod; i++) if (g_mod[i].patch_off < 0) n += g_mod[i].size - g_mod[i].file_image_len; return n; }
 
-// 内存账（memstat.m）用：客体地址空间整块范围（未初始化时 base = NULL）
 // For memory accounting (memstat.m): the range of the whole guest address space block (base = NULL when not initialized)
 void svc_guest_range(uint8_t **base, size_t *size) { *base = g_as; *size = RESERVE; }
 
@@ -86,13 +64,12 @@ enum { I_CoreMask=0, I_PriorityMask=1, I_AliasAddr=2, I_AliasSize=3, I_HeapAddr=
 
 static uint8_t g_seen[256];
 
-// 已映射区间登记（MapMemory 栈、MapPhysicalMemory alias 页），QueryMemory 据此回报；SDK 靠它找空位
 // Registry of mapped ranges (MapMemory stacks, MapPhysicalMemory alias pages), QueryMemory reports from it; the SDK relies on it to find free space
 #define MAX_MAP 4096
 static struct { uint64_t base, size, src; uint32_t state; } g_map[MAX_MAP];
 static int g_nmap;
 static pthread_mutex_t g_map_lock = PTHREAD_MUTEX_INITIALIZER;
-static int map_find(uint64_t a, uint64_t n) {       // 返回 1 基下标，0 = 无重叠 | returns a 1-based index, 0 = no overlap
+static int map_find(uint64_t a, uint64_t n) {       // returns a 1-based index, 0 = no overlap
     for (int i = 0; i < g_nmap; i++) if (a < g_map[i].base + g_map[i].size && g_map[i].base < a + n) return i + 1;
     return 0;
 }
@@ -104,7 +81,6 @@ static void map_add(uint64_t b, uint64_t n, uint64_t src, uint32_t st) {
 }
 static void map_del(int i) { pthread_mutex_lock(&g_map_lock); g_map[i] = g_map[--g_nmap]; pthread_mutex_unlock(&g_map_lock); }
 
-// 别名区每个 4 KB 页一位（已映射 = 1）：Map 置位、Unmap 清位，返回状态真变了的页数（带符号：Map 为正、Unmap 为负）
 // One bit per 4 KB page of the alias region (mapped = 1): Map sets bits, Unmap clears them; returns the number of pages whose state really changed (signed: positive for Map, negative for Unmap)
 static int64_t alias_pages(uint64_t off, uint64_t n, int map) {
     int64_t ch = 0;
@@ -117,18 +93,18 @@ static int64_t alias_pages(uint64_t off, uint64_t n, int map) {
     return map ? ch : -ch;
 }
 
-int svc_thread(int num, uint64_t *regs);   // hle_thread.c：线程与同步类 | hle_thread.c: thread and synchronization kind
+int svc_thread(int num, uint64_t *regs);   // hle_thread.c: thread and synchronization kind
 
 uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
-    { void hlecount_svc(int); hlecount_svc(num); }   // DM_HLECOUNT：svc 按号计数 | DM_HLECOUNT: svc counts by number
+    { void hlecount_svc(int); hlecount_svc(num); }   // DM_HLECOUNT: svc counts by number
     mem_init();
     if (svc_thread(num, regs)) return regs[0];
-    { uint64_t svc_host_call(int, uint64_t *); if (num >= 0x80 && svc_host_call(num, regs)) return regs[0]; }   // 0x80 起：剪口约定的宿主调用（hle_tact.c） | from 0x80: host calls by cut convention (hle_tact.c)
+    { uint64_t svc_host_call(int, uint64_t *); if (num >= 0x80 && svc_host_call(num, regs)) return regs[0]; }   // from 0x80: host calls by cut convention (hle_tact.c)
     switch (num) {
     case 0x01: {  // SetHeapSize(out_addr*, size)  → x1 = heap base
         size_t size = regs[1];
         if (size > g_heap_cap) { LOG("SetHeapSize OOM: req %#zx > cap %#zx", size, g_heap_cap); regs[0] = 0xD401; return 0; }
-        if (size + image_bytes() > APP_POOL) { regs[0] = 0x10801; return 0; }   // 超出应用内存池：ResultLimitReached。游戏启动时按 2 MB 递减重试直到放得下（main+0x1b66184） | exceeds the application memory pool: ResultLimitReached. At startup the game retries in 2 MB decrements until it fits (main+0x1b66184)
+        if (size + image_bytes() > APP_POOL) { regs[0] = 0x10801; return 0; }   // exceeds the application memory pool: ResultLimitReached. At startup the game retries in 2 MB decrements until it fits (main+0x1b66184)
         int rc = 0;
         if (size > g_heap_cur) rc = mprotect(g_heap + g_heap_cur, size - g_heap_cur, PROT_READ | PROT_WRITE);
         else if (size < g_heap_cur) rc = mprotect(g_heap + size, g_heap_cur - size, PROT_NONE);
@@ -139,20 +115,19 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
     }
     case 0x02: regs[0] = 0; return 0;   // SetMemoryPermission
     case 0x03: regs[0] = 0; return 0;   // SetMemoryAttribute
-    case 0x04: {  // MapMemory(dst, src, size)：SDK 建线程时把堆上的栈搬进栈区 | MapMemory(dst, src, size): when creating a thread the SDK moves the stack on the heap into the stack region
+    case 0x04: {  // MapMemory(dst, src, size): when creating a thread the SDK moves the stack on the heap into the stack region
         uint64_t dst = regs[0], src = regs[1], size = regs[2];
         if ((uint8_t *)dst < g_stack || (uint8_t *)dst + size > g_stack + g_stack_cap || map_find(dst, size)) {
             LOG("MapMemory 目标非法或已占用 %#llx+%#llx", dst, size); regs[0] = 0xDC01; return 0; }
-        // 苹果页 16K、Horizon 页 4K：可访问区扩到 16K 边界（多放开的是同区未用页，不影响语义）
         // Apple pages are 16K, Horizon pages 4K: the accessible region is extended to a 16K boundary (the extra pages opened are unused pages of the same region, semantics unaffected)
         uint64_t lo = dst & ~0x3FFFull, hi = (dst + size + 0x3FFF) & ~0x3FFFull;
         if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE)) die("MapMemory mprotect errno=%d", errno);
-        memcpy((void *)dst, (void *)src, size);   // 搬移语义：映射期间源区不被访问（Horizon 把它设为不可访问） | move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
+        memcpy((void *)dst, (void *)src, size);   // move semantics: the source region is not accessed while mapped (Horizon makes it inaccessible)
         map_add(dst, size, src, 0x0B /*MappedMemory*/);
         if (g_flag.svc) LOG("MapMemory %#llx <- %#llx +%#llx", dst, src, size);
         regs[0] = 0; return 0;
     }
-    case 0x05: {  // UnmapMemory(dst, src, size)：内容搬回源区；16K 页可能与相邻映射共用，不收回权限 | UnmapMemory(dst, src, size): contents are moved back to the source region; a 16K page may be shared with an adjacent mapping, permissions are not revoked
+    case 0x05: {  // UnmapMemory(dst, src, size): contents are moved back to the source region; a 16K page may be shared with an adjacent mapping, permissions are not revoked
         uint64_t dst = regs[0], src = regs[1], size = regs[2];
         int k = map_find(dst, size);
         if (!k || g_map[k - 1].base != dst || g_map[k - 1].size != size || g_map[k - 1].src != src) {
@@ -169,7 +144,7 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         int k;
         if (a >= g_heap && a < g_heap + g_heap_cur) { base=(uint64_t)g_heap; size=g_heap_cur; state=5/*Heap*/; perm=3; }
         else if ((k = map_find(addr, 1))) { base=g_map[k-1].base; size=g_map[k-1].size; state=g_map[k-1].state; perm=3; }
-        else if (a >= g_as && a < g_as + RESERVE) {   // 空闲：到相邻映射/堆边界为止 | free: up to the adjacent mapping/heap boundary
+        else if (a >= g_as && a < g_as + RESERVE) {   // free: up to the adjacent mapping/heap boundary
             uint64_t lo = (uint64_t)g_as, hi = (uint64_t)g_as + RESERVE;
             if (a >= g_heap) lo = (uint64_t)g_heap + g_heap_cur;
             else if (hi > (uint64_t)g_heap) hi = (uint64_t)g_heap;
@@ -180,15 +155,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             }
             base=lo; size=hi-lo; state=0; perm=0; }
         else if (module_of(a)) {
-            // 已装模块：照 Horizon 的布局回报分区——代码 [0, ro) Code+RX、只读 [ro, data) Code+R、数据与 bss [data, 补丁区) CodeData+RW。
-            // SDK 的 C++ 异常展开（nn::ro::detail::GetExceptionInfo）从 PC 起往回并「Code+RX」区找模块首、往前并 Code 再并 CodeData 找模块尾，再从模块首读 MOD0 取 .eh_frame_hdr。
-            // 原先回报「所在 4 KiB 页、Code+RX」：往回一直并到别的内存，读不到 MOD0 就中止（Engage 的 IL2CPP 每次托管异常都抛 C++ 异常）。
-            // 改写器的补丁区报 CodeData+RX：模块在宿主里首尾相接，补丁区（可执行）若报 Code+RX，往回找模块首会并进前一个模块
             // Loaded module: report the regions in Horizon's layout -- code [0, ro) Code+RX, read-only [ro, data) Code+R, data and bss [data, patch area) CodeData+RW.
             // The SDK's C++ exception unwinding (nn::ro::detail::GetExceptionInfo) walks back from the PC over "Code+RX" regions to find the module start, forward over Code then CodeData to find its end, then reads MOD0 at the module start for .eh_frame_hdr.
             // Previously "the 4 KiB page around it, Code+RX" was reported: the backward walk ran on into other memory, found no MOD0 and aborted (Engage's IL2CPP throws a C++ exception for every managed exception).
             // The rewriter's patch area is reported as CodeData+RX: modules sit back to back in the host, and an executable patch area reported as Code+RX would merge the previous module into the backward walk
-            // 补丁区在首址前的模块（patch_off < 0）：补丁区单报 CodeData+RX，数据与 bss 一直到映像尾
             // Modules with the patch area before the base (patch_off < 0): the patch area is reported alone as CodeData+RX, and data and bss run to the end of the image
             module_t *mm = module_of(a); uint64_t off = (uint64_t)(a - mm->base), mb = (uint64_t)mm->base;
             uint64_t ro = mm->ro_off ? mm->ro_off : mm->text_end, da = mm->data_off ? mm->data_off : ro, pa = mm->patch_off > 0 ? (uint64_t)mm->patch_off : mm->size;
@@ -199,27 +169,20 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
             else               { base = mb + pa; size = mm->size - pa; state = 4/*CodeData*/; perm = 5; }
         }
         else {
-            // 地址落在「当前宿主线程的栈」里：回报整段栈（状态 0xB = 栈）。SDK 初始化主线程记录时拿当时的 sp 查这里，把回报的区间当主线程栈；
-            // 之后 nn::os::GetCurrentStackInfo 会断言 sp 仍在那个区间里，不在就中止。原先对客体地址空间之外的地址一律回报「它所在的 4 KiB 页」，
-            // 主线程栈于是被记成一页——初始化时的 sp 与后来的 sp 是否同页，取决于宿主栈顶的绝对位置，而它随环境变量 / 启动参数总长移动（换个环境偶发启动即中止）。
-            // 暗黑这一版不调 GetCurrentStackInfo（main / subsdk0 没有导入它，SDK 内部也没有调用点；宿主垫 12 档环境变量长度都起得到主菜单），所以没踩到；回报「一页」本身是错的，照改。
             // The address lies in "the current host thread's stack": report the whole stack (state 0xB = stack). When the SDK initializes the main thread record it queries here with the sp at that moment and takes the reported range as the main thread stack;
             // later nn::os::GetCurrentStackInfo asserts that sp is still inside that range and aborts if not. Previously every address outside the guest address space was reported as "the 4 KiB page containing it",
             // so the main thread stack was recorded as one page. Whether the sp at init and a later sp share a page depends on the absolute position of the host stack top, which moves with the total length of environment variables / launch arguments (a different environment occasionally aborts at startup).
             // This Diablo build does not call GetCurrentStackInfo (main / subsdk0 do not import it and the SDK has no internal call site; the host reaches the main menu with 12 different environment padding lengths), so it was never hit; reporting "one page" is wrong in itself, so fix it anyway.
             uint64_t top = (uint64_t)pthread_get_stackaddr_np(pthread_self()), ssz = pthread_get_stacksize_np(pthread_self());
             if (addr < top && addr >= top - ssz) { base = top - ssz; size = ssz; state = 0xB/*Stack*/; perm = 3; }
-            // 其余宿主内存：照 Horizon 对未映射地址的回报给「空闲、无权限」（所在 4 KiB 页）。原先报 Code+RX，GetExceptionInfo 从 main 往回并区时会一路并进宿主内存直到 0
             // Other host memory: report "free, no permissions" (the 4 KiB page around it) as Horizon does for unmapped addresses. It used to report Code+RX, and GetExceptionInfo walking back from main merged on through host memory down to 0
             else { base=addr & ~0xFFFull; size=0x1000; state=0/*Free*/; perm=0; } }
         if (mi) { uint64_t *m=(uint64_t*)mi; m[0]=base; m[1]=size; ((uint32_t*)mi)[4]=state; ((uint32_t*)mi)[5]=0; ((uint32_t*)mi)[6]=perm; ((uint32_t*)mi)[7]=0; ((uint32_t*)mi)[8]=0; }
         regs[0] = 0; regs[1] = 0; return 0;
     }
-    case 0x2C: case 0x2D: {  // MapPhysicalMemory / UnmapPhysicalMemory(addr, size)：只许在 alias 区内（SDK 的 VammManager 用） | MapPhysicalMemory / UnmapPhysicalMemory(addr, size): only allowed inside the alias region (used by the SDK's VammManager)
+    case 0x2C: case 0x2D: {  // MapPhysicalMemory / UnmapPhysicalMemory(addr, size): only allowed inside the alias region (used by the SDK's VammManager)
         uint8_t *a = (uint8_t *)regs[0]; size_t size = regs[1];
         if (a < g_alias || a + size > g_alias + g_alias_cap) { LOG("SVC %#x 越出 alias 区 %p+%#zx", num, a, size); regs[0] = 0xD401; return 0; }
-        // 宿主页 16 KB、Horizon 页 4 KB：映射向外取整到宿主页（多开的相邻 4K 页在别名区内，只是提前可写，无害）；
-        // 解除只收回整页都落在区间里的宿主页（部分覆盖的页可能还有相邻映射在用，保持可写）
         // Host pages are 16 KB, Horizon pages 4 KB: a map is rounded out to host pages (the extra neighboring 4K pages are inside the alias region and merely become writable early, harmless);
         // an unmap only reclaims host pages lying entirely inside the range (a partly covered page may still be used by an adjacent mapping, so it stays writable)
         uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)a, hi = (uintptr_t)a + size;
@@ -229,25 +192,23 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
                                         : (madvise((void *)mlo, mhi - mlo, MADV_FREE), mprotect((void *)mlo, mhi - mlo, PROT_NONE));
         if (rc) die("SVC %#x mprotect %p+%#zx errno=%d", num, a, size, errno);
         if (g_flag.svc) LOG("%sPhysicalMemory %p+%#zx", num == 0x2C ? "Map" : "Unmap", a, size);
-        // 别名区用到多深（每过 256 MB 记一行）：定预留块与别名区大小用（iOS 单块预留上限 6 GB） | how deep the alias region is used (one line per 256 MB crossed): for sizing the reservation and alias region (iOS caps a single reservation at 6 GB)
+        // how deep the alias region is used (one line per 256 MB crossed): for sizing the reservation and alias region (iOS caps a single reservation at 6 GB)
         if (num == 0x2C) { static _Atomic uint64_t hw; uint64_t end = (uint64_t)(a + size - g_alias), old = atomic_load(&hw);
             while (end > old && !atomic_compare_exchange_weak(&hw, &old, end)) {}
             if (end > old && end >> 28 != old >> 28) LOG("[内存] 别名区映射到 +%.2f GB（别名区 %.2f GB）", end / 1073741824.0, g_alias_cap / 1073741824.0); }
-        // 别名区实际映射的总量（每跨 256 MB 记一行，涨跌都记）：看游戏用了多少物理内存、有没有一直涨。按页位图计，只数状态真变了的页——
-        // SDK 会对已映射的页再 Map、对比映射更大的范围 Unmap（Engage 先解 0x1000000 再解同址 0x103f000），按请求大小计会算成负数
         // Total actually mapped in the alias region (one line per 256 MB crossed, up or down): how much physical memory the game uses and whether it keeps growing. Counted with a page bitmap, only pages whose state really changed --
         // the SDK maps pages that are already mapped and unmaps ranges larger than what it mapped (Engage unmaps 0x1000000 and then 0x103f000 at the same address), so counting requested sizes went negative
         { static _Atomic int64_t tot; int64_t d = alias_pages((uint64_t)(a - g_alias), size, num == 0x2C) << 12, before = atomic_fetch_add(&tot, d), after = before + d;
           if (before >> 28 != after >> 28) LOG("[内存] 别名区已映射 %.2f GB（应用池 %.2f GB）", after / 1073741824.0, APP_POOL / 1073741824.0); }
         regs[0] = 0; return 0;
     }
-    case 0x26: {  // Break(reason, ptr, size)：SDK 致命中止 | Break(reason, ptr, size): SDK fatal abort
+    case 0x26: {  // Break(reason, ptr, size): SDK fatal abort
         uint32_t res = (regs[1] && regs[2] >= 4) ? *(uint32_t *)regs[1] : 0;
         module_t *mm = module_of((void *)regs[30]);
         static int nb;
         LOG("Break#%d reason=%#llx Result=%#x svc 位于 %s+%#llx", ++nb, regs[0], res, mm ? mm->name : "?", orig_addr);
         dm_backtrace(regs[29]);
-        if (regs[0] & 0x80000000ull) return 0;   // 仅通知，可继续 | notification only, can continue
+        if (regs[0] & 0x80000000ull) return 0;   // notification only, can continue
         _exit(42);
     }
     case 0x1E: regs[0] = 0; regs[1] = guest_ns() * 12 / 625; return 0;   // GetSystemTick
@@ -268,10 +229,10 @@ uint64_t svc_dispatch(int num, uint64_t *regs, uint64_t orig_addr) {
         case I_UsedMem:  case I_UsedNonSys:  v = g_heap_cur + 0x4000000 + big_bss_bytes(); break;
         case I_SysResTotal: v = 0x2000000; break; case I_SysResUsed: v = 0x400000; break;
         case I_DebuggerAttached: v = 0; break;
-        case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // DM_DETCLOCK 开时为确定流（hle_os.c） | a deterministic stream when DM_DETCLOCK is on (hle_os.c)
-        case I_ProgramId: { static uint64_t pid; if (!pid) { const char *e = getenv("DM_PROGRAM_ID"); pid = e ? strtoull(e, NULL, 16) : DM_GAME_PROGRAM_ID; } v = pid; break; }   // 缺省取游戏档案 program_id；DM_PROGRAM_ID=十六进制 可改 | default from the game profile's program_id; DM_PROGRAM_ID=hex overrides
+        case I_RandomEntropy: { uint64_t dm_entropy64(void); v = dm_entropy64(); break; }   // a deterministic stream when DM_DETCLOCK is on (hle_os.c)
+        case I_ProgramId: { static uint64_t pid; if (!pid) { const char *e = getenv("DM_PROGRAM_ID"); pid = e ? strtoull(e, NULL, 16) : DM_GAME_PROGRAM_ID; } v = pid; break; }   // default from the game profile's program_id; DM_PROGRAM_ID=hex overrides
         case I_IsApplication: v = 1; break;
-        case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // 用户异常上下文区：较新 SDK 的 SetDyingMessageRegion 往 +0x1c0 写（给 0 会写空指针）| user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
+        case I_UserExcAddr: { static _Alignas(0x1000) uint8_t ctx[0x1000]; v = (uint64_t)ctx; break; }   // user exception context area: newer SDKs' SetDyingMessageRegion writes to +0x1c0 (0 would write through a null pointer)
         default: v = 0; break;
         }
         regs[0] = 0; regs[1] = v; return 0;

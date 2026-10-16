@@ -1,5 +1,3 @@
-// 块线性解排布单测（秒级）。A 往返；B 手算地址；C 真数据对拍（Switch 块线性 vs PC 线性，含逐级偏移核对）；D 错块高负对照。
-// 用法：t_tex <样本目录>（fetch_samples.py 产出）。样本缺失算红，不跳过。
 // Block-linear deswizzle unit tests (seconds). A round trip; B hand-calculated addresses; C real-data cross-check (Switch block-linear vs PC linear, including per-level offset verification); D wrong-block-height negative control.
 // Usage: t_tex <sample dir> (produced by fetch_samples.py). Missing samples count as red, not skipped.
 #include "../nvn_deswizzle.h"
@@ -14,7 +12,6 @@ static uint32_t mipd(uint32_t s, unsigned l) { s >>= l; return s ? s : 1; }
 static uint64_t rng = 0x9E3779B97F4A7C15ull;
 static uint8_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (uint8_t)rng; }
 
-// 本级线性尺寸（测试侧独立算：块宽字节、块行、切片）
 // Linear size of this level (computed independently on the test side: width-in-blocks bytes, block rows, slices)
 static void dims(const nvn_texdesc *d, unsigned l, uint32_t *rb, uint32_t *rows, uint32_t *sl) {
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
@@ -22,7 +19,6 @@ static void dims(const nvn_texdesc *d, unsigned l, uint32_t *rb, uint32_t *rows,
     *sl = d->target == 2 ? mipd(d->depth, l) : 1;
 }
 
-// ---------- A 往返：全部级 / 层先各写入不同随机数据，再全部解出比对（级间、层间重叠或越界都会红）----------
 // ---------- A round trip: first write different random data into every level / layer, then decode them all and compare (overlap between levels or between layers, or out-of-bounds, all fail) ----------
 static void roundtrip(const char *tag, int target, int fmt, uint32_t w, uint32_t h, uint32_t depth, uint32_t levels) {
     nvn_texdesc d = {target, fmt, 0, 0, w, h, depth, levels, 0};
@@ -49,19 +45,16 @@ static void roundtrip(const char *tag, int target, int fmt, uint32_t w, uint32_t
     free(st);
 }
 
-// ---------- 真数据 ----------
 // ---------- Real data ----------
 static uint8_t *slurp(const char *p, size_t *n) {
     FILE *f = fopen(p, "rb"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); *n = (size_t)ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t *b = malloc(*n); if (fread(b, 1, *n, f) != *n) { free(b); b = NULL; } fclose(f); return b;
 }
-// Switch 转换过的文件：0x14 四字节 = 00 00 00 07（PC 为 0），0x13 = 第 0 级块高 log2（与游戏 SetPackagedTextureLayout 第 0 字节同义）。
-// 未转换的（如 hd/debug 下的）与 PC 文件逐字节相同、线性存放。
 // Files converted for Switch: the four bytes at 0x14 = 00 00 00 07 (0 on PC), 0x13 = log2 of the level-0 block height (same meaning as byte 0 of the game's SetPackagedTextureLayout).
 // Unconverted ones (e.g. those under hd/debug) are byte-identical to the PC files and stored linearly.
 typedef struct { int code, nvn, bl, th_hdr; uint32_t w, h, mips, hdr; uint32_t size[16]; uint64_t off[16]; const uint8_t *px; } tex_t;
-static int d2r_nvn(int code) {   // D2R .texture 格式码 → NVNformat | D2R .texture format code → NVNformat
+static int d2r_nvn(int code) {   // D2R .texture format code → NVNformat
     switch (code) { case 0x1F: return 0x25; case 0x39: return 0x42; case 0x3A: return 0x46; case 0x3D: return 0x44;
                     case 0x3E: return 0x48; case 0x3F: return 0x49; case 0x41: return 0x4B; }
     return 0;
@@ -77,7 +70,6 @@ static int parse(const uint8_t *b, size_t n, tex_t *t) {
     t->px = b + t->hdr; return 0;
 }
 
-// 解码成 8 位 RGB（BC1 / BC3 取颜色块，BC4 取单通道铺三份，RGBA8 取 RGB）。行 = 块行，按 4×4 展开
 // Decode to 8-bit RGB (BC1 / BC3 take the color block, BC4 takes the single channel replicated three times, RGBA8 takes RGB). Row = block row, expanded as 4×4
 static void bc1(const uint8_t *b, uint8_t out[16][3]) {
     unsigned c0 = b[0] | b[1] << 8, c1 = b[2] | b[3] << 8; uint32_t bits = b[4] | b[5] << 8 | b[6] << 16 | (uint32_t)b[7] << 24;
@@ -110,7 +102,6 @@ static double psnr(const uint8_t *a, const uint8_t *b, size_t n) {
     double e = 0; for (size_t i = 0; i < n; i++) { double d = (double)a[i] - b[i]; e += d * d; }
     return e == 0 ? 99 : 10 * log10(255.0 * 255.0 / (e / n));
 }
-// 用指定块高解一级（负对照用；越过存储的地址按 0 读）
 // Decode one level with a specified block height (for the negative control; addresses beyond the storage read as 0)
 static void deswz_tile(const uint8_t *st, uint64_t st_size, uint64_t base, uint32_t rb, uint32_t rows, unsigned th, uint8_t *out) {
     for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < rb; x++) {
@@ -119,8 +110,6 @@ static void deswz_tile(const uint8_t *st, uint64_t st_size, uint64_t base, uint3
     }
 }
 
-// 判据阈值：正确块高须 ≥、错块高须 < 此值。实测：正确 28.45–38.90 dB（降分辨率重压缩的 3 张；同分辨率的逐字节全等），
-// 错一级块高 6.94–16.64 dB ⇒ 取两侧中点 22 dB，两边各留约 6 dB
 // Criterion threshold: the correct block height must be ≥ this value and a wrong block height must be < it. Measured: correct 28.45–38.90 dB (the 3 reduced-resolution recompressed ones; same-resolution ones are byte-identical),
 // block height off by one step 6.94–16.64 dB ⇒ take the midpoint of the two sides, 22 dB, leaving about 6 dB on each side
 #define PSNR_PASS 22.0
@@ -132,14 +121,13 @@ static void real_pair(const char *dir, int i, const char *why) {
     tex_t s, c;
     CHECK(sb && pb && !parse(sb, ns, &s) && !parse(pb, np, &c), "样本 %d 读取 / 解析失败（%s）", i, why);
     if (!sb || !pb || parse(sb, ns, &s) || parse(pb, np, &c)) return;
-    if (!s.bl) {   // 未经 Switch 转换：线性，应与 PC 原件逐字节相同 | not converted for Switch: linear, should be byte-identical to the PC original
+    if (!s.bl) {   // not converted for Switch: linear, should be byte-identical to the PC original
         CHECK(ns == np && !memcmp(sb, pb, ns), "样本%d 无块线性标记但与 PC 原件不同", i);
         printf("  C %d %-30s 无 Switch 块线性标记（0x14 = 0）→ 线性存放，与 PC 原件 %s（%zu 字节）\n", i, why, ns == np && !memcmp(sb, pb, ns) ? "逐字节全等" : "不等", ns);
         free(sb); free(pb); return;
     }
-    nvn_texdesc d = {1, s.nvn, 0, 0, s.w, s.h, 1, s.mips, 0, s.th_hdr + 1};   // 块高以文件头为准（同游戏传入的预排布参数） | block height follows the file header (same as the packaged layout parameters the game passes in)
+    nvn_texdesc d = {1, s.nvn, 0, 0, s.w, s.h, 1, s.mips, 0, s.th_hdr + 1};   // block height follows the file header (same as the packaged layout parameters the game passes in)
     unsigned th_auto, td_auto; { nvn_texdesc a = d; a.pkg_block_h = 0; nvn_tex_level_tiles(&a, 0, &th_auto, &td_auto); }
-    // ③ 文件里的逐级偏移（mip 表累加）对 nvn_tex_level_offset
     // ③ Per-level offsets in the file (cumulative mip table) vs nvn_tex_level_offset
     int off_ok = 1;
     for (unsigned l = 0; l < s.mips; l++)
@@ -148,7 +136,6 @@ static void real_pair(const char *dir, int i, const char *why) {
     uint64_t file_total = s.off[s.mips - 1] + s.size[s.mips - 1];
     checks++; if (!off_ok) fails++;
     CHECK(file_total == L.size, "样本%d 文件像素区 %llu ≠ nvn_tex 总尺寸 %llu", i, (unsigned long long)file_total, (unsigned long long)L.size);
-    // 对应 PC 级：PC 边长 = Switch × 2^k
     // Corresponding PC level: PC side length = Switch × 2^k
     unsigned k = 0; while ((s.w << k) < c.w) k++;
     if ((s.w << k) != c.w || (s.h << k) != c.h) { CHECK(0, "样本%d 尺寸比非 2 的幂", i); return; }
@@ -165,7 +152,7 @@ static void real_pair(const char *dir, int i, const char *why) {
         if (l == 0) {
             uint32_t w = s.w, h = s.h;
             uint8_t *a = decode(s.nvn, lin, w, h), *b = decode(c.nvn, pcl, w, h); ps = psnr(a, b, (size_t)w * h * 3);
-            for (int dt = -1; dt <= 1; dt += 2) {                          // D：块高错一级（只有 1 个 GOB 高时块高不影响排布，不适用） | D: block height off by one step (when only 1 GOB high, block height does not affect the layout; not applicable)
+            for (int dt = -1; dt <= 1; dt += 2) {                          // D: block height off by one step (when only 1 GOB high, block height does not affect the layout; not applicable)
                 if ((int)th0 + dt < 0 || rows <= 8) continue;
                 uint8_t *bad = malloc((size_t)rb * rows); deswz_tile(s.px, ns - s.hdr, 0, rb, rows, th0 + dt, bad);
                 uint8_t *e = decode(s.nvn, bad, w, h); double q = psnr(e, b, (size_t)w * h * 3); if (q < ps_bad) ps_bad = q;
@@ -211,8 +198,6 @@ int main(int argc, char **argv) {
         {0, 0, 2, 64, 8, 0, 1, 1024, "块深 2：第 1 层块 = 1 列 × 1 行 × 1024"},
         {200, 40, 0, 256, 64, 2, 0, 9284, "块高 4（32 行）：第 1 行块 4·2048=8192 + 第 3 列块 3·2048=6144？见下"},
     };
-    // 最后一例手算：rb=256 → 4 个 GOB 宽；块高 4 GOB = 32 行、块 2048 字节；y=40 → 第 1 行块：4×2048 = 8192；
-    // x=200 → 第 3 列块：3×2048 = 6144；块内 GOB = (40%32)/8 = 1 → 512；GOB 内 x%64=8、y%8=0 → 8。合计 8192+6144+512+8 = 14856
     // Last hand-calculated case: rb=256 → 4 GOBs wide; block height 4 GOBs = 32 rows, block 2048 bytes; y=40 → block row 1: 4×2048 = 8192;
     // x=200 → block column 3: 3×2048 = 6144; GOB within the block = (40%32)/8 = 1 → 512; within the GOB x%64=8, y%8=0 → 8. Total 8192+6144+512+8 = 14856
     B[5].want = 14856; B[5].how = "块高 4：行块 8192 + 列块 6144 + 块内 GOB 512 + GOB 内 8";
@@ -222,15 +207,12 @@ int main(int argc, char **argv) {
         printf("  B%u (%u,%u,%u) → %llu %s  %s\n", i, B[i].x, B[i].y, B[i].z, (unsigned long long)got, got == B[i].want ? "✓" : "✗", B[i].how);
     }
 
-    // ---------- E 手工 3D：按手算地址往块线性存储里放标记，解出后核标记落点（往返 A 只证自洽，证不了排布对不对）----------
-    // 块高块深规则出处：deko3d dk_image.cpp —— 3D 贴图块高固定 1 个 GOB，块深 = pickTileSize(深度 + 深度/2)。
     // ---------- E hand-built 3D: place markers into block-linear storage at hand-calculated addresses, decode, and verify where the markers land (round trip A only proves self-consistency, not whether the layout is right) ----------
     // Source of the block height / block depth rule: deko3d dk_image.cpp - for 3D textures block height is fixed at 1 GOB, block depth = pickTileSize(depth + depth/2).
     printf("E 手工 3D 块线性（标记放在手算地址，解排布后核落点）\n");
     {
-        nvn_texdesc d = {2, 0x25, 0, 0, 32, 16, 20, 1, 0, 0};   // 3D RGBA8 32×16×20：行 128 字节 = 2 个 GOB 宽，16 行 = 2 个 GOB 高 | 3D RGBA8 32×16×20: row 128 bytes = 2 GOBs wide, 16 rows = 2 GOBs high
+        nvn_texdesc d = {2, 0x25, 0, 0, 32, 16, 20, 1, 0, 0};   // 3D RGBA8 32×16×20: row 128 bytes = 2 GOBs wide, 16 rows = 2 GOBs high
         nvn_texlayout L; nvn_tex_layout(&d, &L);
-        // 块深：20 + 10 = 30 ≥ 16 → 16 片（log2 = 4）；块 = 512 × 16 = 8192 字节；一层块 = 2 列 × 2 行 × 8192 = 32768；ceil(20/16) = 2 层 → 65536
         // Block depth: 20 + 10 = 30 ≥ 16 → 16 slices (log2 = 4); block = 512 × 16 = 8192 bytes; one block layer = 2 columns × 2 rows × 8192 = 32768; ceil(20/16) = 2 layers → 65536
         CHECK(L.tileH == 0 && L.tileD == 4, "E 32×16×20 块高/块深 = %u/%u，期望 0/4", L.tileH, L.tileD);
         CHECK(L.size == 65536, "E 32×16×20 存储 %llu 期望 65536", (unsigned long long)L.size);
@@ -252,7 +234,6 @@ int main(int argc, char **argv) {
         size_t nz = 0; for (size_t j = 0; j < 128 * 16 * 20; j++) nz += lin[j] != 0;
         CHECK(nz == 16, "E 解出非零字节 %zu 期望 16（标记外不该有数据）", nz);
         free(st); free(lin);
-        // 选角页真调色表的形态：32³ RGBA16F（ser 17 / 16）。块深 32 + 16 = 48 ≥ 16 → 16 片；行 256 字节 = 4 GOB 宽、32 行 = 4 GOB 高、2 层块 → 4·4·2·8192 = 262144
         // Shape of the real color lookup table on the character select screen: 32³ RGBA16F (ser 17 / 16). Block depth 32 + 16 = 48 ≥ 16 → 16 slices; row 256 bytes = 4 GOBs wide, 32 rows = 4 GOBs high, 2 block layers → 4·4·2·8192 = 262144
         nvn_texdesc lut = {2, 0x29, 0, 0, 32, 32, 32, 1, 0, 0}; nvn_tex_layout(&lut, &L);
         CHECK(L.tileH == 0 && L.tileD == 4 && L.size == 4 * 4 * 2 * 8192ull, "E 32³ RGBA16F 块高/块深 %u/%u 存储 %llu，期望 0/4、262144", L.tileH, L.tileD, (unsigned long long)L.size);

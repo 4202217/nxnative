@@ -1,7 +1,6 @@
-// 实际RT单级选择不变，仅view范围4→1；同纹理同CB原guard参考与候选，手写常量shader不冒游戏shader。
 // The actual RT single-level selection is unchanged, only the view range goes 4→1; same texture and same CB for the original-guard reference and the candidate; hand-written constant shaders do not pass themselves off as game shaders.
 #include "../nvn/nvn_mtl.m"
-int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 void *front_metal_layer(void){return NULL;}
 module_t *module_of(const void *p){(void)p;return NULL;}
 module_t g_mod[MAX_MOD];int g_nmod;
@@ -27,7 +26,7 @@ int main(int argc,char **argv){@autoreleasepool{enabled=1;for(int i=1;i<argc;i++
  id<MTLLibrary> lib=[g_dev newLibraryWithSource:@"#include <metal_stdlib>\nusing namespace metal;vertex float4 v(uint n[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[n],.5,1);}\nfragment float4 r(){return float4(1,0,0,1);}\nfragment float4 g(){return float4(0,1,0,0);}struct A{texture2d<float> t[[id(0)]];};fragment float4 s(constant A&a[[buffer(0)]]){return a.t.read(uint2(0));}\n"options:nil error:&err];if(!lib)abort();
  for(int i=0;i<2;i++){NvProg *p=[NvProg new];p->sh[0]=[NvShader new];p->sh[0]->fn=[lib newFunctionWithName:@"v"];p->sh[1]=[NvShader new];p->sh[1]->fn=[lib newFunctionWithName:i?(sample_attachment?@"s":@"g"):@"r"];p->sh[1]->stage=1;p->sh[1]->rf.color_mask=1;if(i&&sample_attachment){p->sh[1]->rf.nb=1;p->sh[1]->rf.b[0]=(nvn_rbind){.kind=NVN_RB_TEX,.dtt=MTLTextureType2D};p->sh[1]->ae=[p->sh[1]->fn newArgumentEncoderWithBufferIndex:0];}
 #ifdef NVN_RT_RANGE_RO_IMPL
- p->sh[0]->range_ro=p->sh[1]->range_ro=1; // 本测试手写constant shader，已直接查无外部写 | this test hand-writes constant shaders and has directly verified there are no external writes
+ p->sh[0]->range_ro=p->sh[1]->range_ro=1; // this test hand-writes constant shaders and has directly verified there are no external writes
 #endif
  serial_put(pg[i].serial,p);}
  color.d.width=color.d.height=depth.d.width=depth.d.height=8;color.d.depth=color.d.samples=depth.d.depth=depth.d.samples=1;color.d.levels=4;depth.d.levels=small_depth?2:1;color.d.target=depth.d.target=NVN_TEXTURE_TARGET_2D;color.d.format=NVN_FORMAT_RGBA8;depth.d.format=NVN_FORMAT_DEPTH32F_STENCIL8;
@@ -38,13 +37,13 @@ int main(int argc,char **argv){@autoreleasepool{enabled=1;for(int i=1;i<argc;i++
  emit(&second,OP_RESET_COUNTER,&reset,8);emit(&second,OP_SET_RT,&b,sizeof b);if(small_depth){ds_st off={.df=NVN_DEPTH_FUNC_ALWAYS};st(&second,5,&off,sizeof off);}pr.prog=&pg[1];emit(&second,OP_BIND_PROGRAM,&pr,sizeof pr);if(sample_attachment){p_bind_handles h={.stage=1,.first=0,.n=1};h.h[0]=1000;emit(&second,OP_BIND_TEX,&h,sizeof h);}col.blend_en=1;st(&second,1,&col,sizeof col);blend_st blend={0,NVN_BLEND_FUNC_ONE,NVN_BLEND_FUNC_ONE,NVN_BLEND_FUNC_ONE,NVN_BLEND_FUNC_ZERO,NVN_BLEND_EQUATION_ADD,NVN_BLEND_EQUATION_ADD};st(&second,0,&blend,sizeof blend);p_draw_idx di={.prim=NVN_DRAW_PRIMITIVE_TRIANGLES,.count=120,.itype=1,.ibuf=(uint64_t)ix,.instances=1};emit(&second,OP_DRAW_IDX,&di,sizeof di);emit(&second,OP_END,NULL,0);
  id<MTLBuffer> buffers[2][3];for(int m=0;m<2;m++)for(int j=0;j<3;j++)buffers[m][j]=[g_dev newBufferWithLength:j==2?64:256 options:MTLResourceStorageModeShared];uint64_t passes[2],bytes[2],q[2][2]={{0}};
  mtl_sub_begin();
- for(int m=0;m<2;m++){state_reset();memset(&R,0,sizeof R);vis_clear();g_vis_on=g_vis_counting=0;seed();uint64_t p=g_stat_pass,l=g_bw_load,s=g_bw_store,draws=g_stat_draw;mtl_exec(first.b);E("首绘按深度只读模式",4,g_enc_mode);if(!m)rp_end();else if(force_invalid)R.rt.cview[0].nlevels=1; // 负控：错误地假设附件范围/目标始终等价 | negative control: wrongly assume the attachment range/target is always equivalent
+ for(int m=0;m<2;m++){state_reset();memset(&R,0,sizeof R);vis_clear();g_vis_on=g_vis_counting=0;seed();uint64_t p=g_stat_pass,l=g_bw_load,s=g_bw_store,draws=g_stat_draw;mtl_exec(first.b);E("首绘按深度只读模式",4,g_enc_mode);if(!m)rp_end();else if(force_invalid)R.rt.cview[0].nlevels=1; // negative control: wrongly assume the attachment range/target is always equivalent
  mtl_exec(second.b);rp_end();passes[m]=g_stat_pass-p;bytes[m]=g_bw_load-l+g_bw_store-s;E("真实draw次数不变",2,g_stat_draw-draws);post((post_op){3,NULL,0,0,(uint64_t)q[m],(uint32_t)reset,vis_snapshot()});rr_read_planes(buffers[m]);if(g_blit){[g_blit endEncoding];g_blit=nil;}}
  int done=mtl_wait(mtl_sub_commit(),5000000000ull);E("同纹理同CB完成",1,done);if(!done)abort();E("提交反馈无错误",0,mtl_last_commit_error());
- uint8_t yellow[4]={255,255,0,0},green[4]={0,255,0,0}; // alpha由第二draw ONE/ ZERO给0；整数闭式RGB黄色。 | alpha is given 0 by the second draw's ONE/ ZERO; integer closed-form RGB yellow.
+ uint8_t yellow[4]={255,255,0,0},green[4]={0,255,0,0}; // alpha is given 0 by the second draw's ONE/ ZERO; integer closed-form RGB yellow.
  for(int m=0;m<2;m++){unsigned bc=0,bd=0,bs=0;for(int i=0;i<64;i++){bc+=memcmp((uint8_t *)buffers[m][0].contents+4*i,small_depth && (i%8>=4||i/8>=4)?green:yellow,4)!=0;bd+=((float *)buffers[m][1].contents)[i]!=.75f;bs+=((uint8_t *)buffers[m][2].contents)[i]!=0x2d;}E("各64纹素手算黄色",0,bc);E("depth .75种子保持",0,bd);E("stencil 0x2d种子保持",0,bs);E("Reset后120索引40三角采样数",2560,q[m][0]);}
  E("三平面原候选逐字节",0,memcmp(buffers[0][0].contents,buffers[1][0].contents,256)||memcmp(buffers[0][1].contents,buffers[1][1].contents,256)||memcmp(buffers[0][2].contents,buffers[1][2].contents,64));
- E("原guard两pass",2,passes[0]);E("候选一pass/默认两pass",enabled&&!small_depth&&!sample_attachment?1:2,passes[1]);{ // DontCare（本通道没写不写回）：两个通道的深度状态都只开测试不开写，每个通道省一次深度模板写回 = 8×8×5 字节（Depth32F_S8 附件模型 5 B/像素） | DontCare (not stored if this pass did not write it): both passes' depth state enables only test, not write, so each pass saves one depth-stencil store = 8×8×5 bytes (Depth32F_S8 attachment model, 5 B/pixel)
+ E("原guard两pass",2,passes[0]);E("候选一pass/默认两pass",enabled&&!small_depth&&!sample_attachment?1:2,passes[1]);{ // DontCare (not stored if this pass did not write it): both passes' depth state enables only test, not write, so each pass saves one depth-stencil store = 8×8×5 bytes (Depth32F_S8 attachment model, 5 B/pixel)
    const char *u=getenv("DM_NVN_UNWRITTEN_DC"); int udc=!(u&&!strcmp(u,"0")); unsigned dsb=udc&&!small_depth&&!sample_attachment?8*8*5:0;
    E(udc?"原附件模型2048−2×320（DontCare）":"原附件模型2048",(small_depth?1152:2048)-2*dsb,bytes[0]);
    E(udc?"候选附件模型1024−320（DontCare）":"候选附件模型1024/默认2048",(small_depth?1152:enabled&&!sample_attachment?1024:2048)-(enabled&&!sample_attachment?1:2)*dsb,bytes[1]); }

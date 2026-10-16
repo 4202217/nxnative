@@ -1,12 +1,10 @@
-// 反射转换单测：真实 B 反射 json（Switch 原版翻译，build/cache/metal_shader_cache/<键>_b.json）→ C 数组，期望按 json 原文手抄。
-// 哑贴图类型 MTLTextureType：1D=0 1DArray=1 2D=2 2DArray=3 Cube=5 CubeArray=6 3D=7
 // Reflection conversion unit tests: real B reflection json (translation of the original Switch shaders, build/cache/metal_shader_cache/<key>_b.json) → C arrays, expectations hand-copied from the json text.
 // Dummy texture type MTLTextureType: 1D=0 1DArray=1 2D=2 2DArray=3 Cube=5 CubeArray=6 3D=7
 #import "../nvn/nvn_refl.h"
 #import <Foundation/Foundation.h>
 #include <stdio.h>
 #include <string.h>
-#include "dmsh_chain.h"   // 游戏档案目录（Makefile 给 -I） | the game profile folder (-I from the Makefile)
+#include "dmsh_chain.h"   // the game profile folder (-I from the Makefile)
 
 enum { C = NVN_RB_CBUF, S = NVN_RB_SAMP, T = NVN_RB_TEX, I = NVN_RB_IMG, TB = NVN_RB_TBUF };
 enum { F = NVN_DPF_FLOAT, U = NVN_DPF_UINT, D = NVN_DPF_DEPTH };
@@ -16,7 +14,7 @@ static void check(const char *what, long want, long got) {
     if (!ok) printf("  %-40s 期望 %ld → 真结果 %ld ✗\n", what, want, got);
 }
 static NSDictionary *load(const char *key) {
-    NSString *p = [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache/b-%s/%s.json", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work", DMSH_CHAIN, key];   // 现行翻译链版本的那一份库 | the library of the current translation chain version
+    NSString *p = [NSString stringWithFormat:@"%s%s/build/cache/metal_shader_cache/b-%s/%s.json", getenv("DM_ROOT") ?: getenv("HOME"), getenv("DM_ROOT") ? "" : "/dm-work", DMSH_CHAIN, key];   // the library of the current translation chain version
     NSData *d = [NSData dataWithContentsOfFile:p];
     if (!d) { printf("【红】缺反射样本 %s\n", p.UTF8String); fail++; return nil; }
     return [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
@@ -24,13 +22,12 @@ static NSDictionary *load(const char *key) {
 
 int main(void) { @autoreleasepool {
     nvn_refl r; char err[160] = "";
-    {   int f0 = fail;   // A 路线已退役：PC 链反射（无 route = B）必须被拒 | Route A is retired: PC-chain reflection (no route = B) must be rejected
+    {   int f0 = fail;   // Route A is retired: PC-chain reflection (no route = B) must be rejected
         NSDictionary *pc = @{@"arg_buffer_index": @0, @"bindings": @[@{@"type": @"cbuffer", @"reg": @10, @"arg_id": @0, @"access": @"constant", @"msl_type": @"constant cb1_struct*"}], @"vertex_inputs": @[]};
         check("PC 链反射（无 route = B）报失败", 1, nvn_refl_from_json(pc, &r, err, sizeof err) != 0);
         printf("%-60s %s\n", "负对照：PC 链反射被拒（A 路线已退役）", fail == f0 ? "✓" : "✗");
     }
 
-    // B 路线（Switch 原版翻译，tools/dmsh_build.py 出）：真实反射 ps_models_p#0 / vs_models_v#0，期望按 json 原文手抄
     // Route B (translation of the original Switch shaders, produced by tools/dmsh_build.py): real reflection ps_models_p#0 / vs_models_v#0, expectations hand-copied from the json text
     {   NSDictionary *j = load("5c1ca4e7c3e4657c_b");
         if (j) { int f1 = fail;

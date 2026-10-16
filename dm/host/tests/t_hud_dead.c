@@ -1,4 +1,3 @@
-// 底栏死亡隐藏单测：模式 → 已死、底栏显隐判定（dm_hud.h）。期望值按游戏代码手写：main+0x6e5c48 玩家模式 0 / 0x11 即已死
 // Unit test for hiding the bottom bar on death: mode -> dead, bottom bar show/hide decision (dm_hud.h). Expected values are hand-written from the game code: main+0x6e5c48 player mode 0 / 0x11 means dead
 #include <stdio.h>
 #include "dm_hud.h"
@@ -8,7 +7,7 @@ static void expect(const char *what, int got, int want) {
 }
 int main(void) {
     char buf[64];
-    for (unsigned m = 0; m <= 19; m++) {   // D2 玩家模式 0..19（DEATH … KNOCKBACK） | D2 player modes 0..19 (DEATH ... KNOCKBACK)
+    for (unsigned m = 0; m <= 19; m++) {   // D2 player modes 0..19 (DEATH ... KNOCKBACK)
         snprintf(buf, sizeof buf, "模式 %u %s", m, (m == 0 || m == 17) ? "→ 已死" : "→ 活着");
         expect(buf, dm_hud_player_mode_dead(m), m == 0 || m == 17);
     }

@@ -1,4 +1,3 @@
-// 节拍器单测：给定时钟序列，期望等待时长手算。周期 16.666 ms 记为 P = 16666667 ns。
 // Pacer unit tests: given a clock sequence, the expected wait durations are hand-calculated. The period 16.666 ms is written as P = 16666667 ns.
 #include "../nvn/nvn_pace.h"
 #include <stdio.h>

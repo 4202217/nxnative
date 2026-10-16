@@ -1,5 +1,4 @@
 DM_ROOT ?= $(HOME)/dm-work
-# 贴图子块单测（秒级）：make run。真数据样本 make samples 取到 $(SAMPLES)（构建缓存，不进仓）
 # Texture sub-module unit tests (seconds): make run. Real-data samples: make samples fetches them into $(SAMPLES) (build cache, not in the repo)
 SAMPLES ?= $(DM_ROOT)/build/cache/dm/tex_samples
 PY ?= $(DM_ROOT)/build/cache/dm/venv/bin/python

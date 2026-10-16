@@ -1,5 +1,3 @@
-// nv::（NVN 下面的显卡驱动胶水层：建传输内存、连 nvdrv 服务）。NVN 已整块换成宿主空设备，这层无事可做。
-// 分配器回调记在宿主全局 g_nv_alloc，图形层以后要按游戏的分配器分内存时从这里取。
 // nv:: (the GPU driver glue layer beneath NVN: creates transfer memory, connects to the nvdrv service). NVN has been replaced wholesale with a host null device, so this layer has nothing to do.
 // The allocator callbacks are recorded in the host global g_nv_alloc; the graphics layer takes them from here later when it needs to allocate memory with the game's allocator.
 #include "../host/hle.h"

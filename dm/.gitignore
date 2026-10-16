@@ -3,7 +3,7 @@ host/*.dSYM/
 *.bin
 *.pkl
 __pycache__/
-# 着色器翻译工具的编译中间产物（dotnet 在源码目录旁生成）
+# Intermediate build outputs of the shader translation tool (dotnet writes them next to the sources)
 gfx/tools/dmsh_xlate/obj/
 gfx/tools/dmsh_xlate/bin/
 tools/nx_extract/obj/

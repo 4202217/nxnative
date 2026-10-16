@@ -1,10 +1,3 @@
-// 大栈入口（hle.h HLE_FORCE_BIG）：接管函数直接跑在调用它的客体线程栈上，而游戏给线程的栈可以很小——
-// 超级马力欧 3D 世界 + 狂怒世界的存档线程只有 8 KB（CreateThread 栈顶 0x…9fe0、崩在其下 0x21a0），它调 fs::MountSaveData 时，
-// 宿主的挂载路径（h_fs_MountSave 两个 1 KB 级路径缓冲 + mount_ex 两个 1100 字节 + snprintf）越过栈底，SIGBUS 在 __vfprintf 里。
-// 真机上这一调用只是一次 IPC，几百字节栈就够；宿主的文件系统接管按 PATH_MAX 开缓冲，一次打开文件就要 6–7 KB（-fstack-usage：OpenFile 1.3 KB → host_path_ex 1.9 KB → path_component 3.2 KB）。
-// 做法：登记的是一段静态桩（每个接管函数一段，取实现地址进 x16 后跳到 dm_bigstack_enter），入口看当前 sp：在客体地址块里（客体线程栈）就换到本线程的宿主栈（512 KB，首用时映射，带保护页），
-// 原样带着 x0–x8 / d0–d7 调实现，返回后换回原栈；不在客体块里（宿主线程、已在宿主栈上）直接跳过去。只转寄存器参数：参数超过 8 个整数 / 8 个浮点、可变参数从栈上取的函数不能用它。
-// iOS 不许运行时生成可执行代码，所以桩在编译期由宏生成，不像 DM_HLECOUNT 那样运行时写
 // Big-stack entry (hle.h HLE_FORCE_BIG): a take-over function runs directly on the stack of the guest thread that calls it, and the stack a game gives a thread can be small --
 // the save thread of Super Mario 3D World + Bowser's Fury has only 8 KB (CreateThread stack top 0x…9fe0, crash 0x21a0 below it); when it calls fs::MountSaveData,
 // the host's mount path (two 1 KB-class path buffers in h_fs_MountSave + two 1100-byte ones in mount_ex + snprintf) ran past the stack bottom, SIGBUS in __vfprintf.
@@ -27,7 +20,6 @@ static pthread_once_t g_bs_once = PTHREAD_ONCE_INIT;
 static void bs_free(void *top) { if (top) munmap((uint8_t *)top - BS_SIZE - BS_GUARD, BS_SIZE + BS_GUARD); }
 static void bs_init(void) { if (pthread_key_create(&g_bs_key, bs_free)) die("大栈 pthread_key_create"); }
 
-// sp 在客体地址块里 → 本线程宿主栈的栈顶（16 字节对齐）；否则 0（不换栈）
 // sp inside the guest address block -> the top of this thread's host stack (16-byte aligned); otherwise 0 (no switch)
 uintptr_t dm_bigstack_top(uintptr_t sp);
 uintptr_t dm_bigstack_top(uintptr_t sp) {
@@ -37,14 +29,13 @@ uintptr_t dm_bigstack_top(uintptr_t sp) {
     if (!top) {
         uint8_t *m = mmap(NULL, BS_SIZE + BS_GUARD, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
         if (m == MAP_FAILED) { LOG("【红】大栈映射失败，本次留在客体栈上"); return 0; }
-        mprotect(m, BS_GUARD, PROT_NONE);   // 保护页：宿主栈自己用穿时崩在这里，而不是悄悄写坏别的映射 | guard page: running off the host stack itself crashes here instead of quietly corrupting another mapping
+        mprotect(m, BS_GUARD, PROT_NONE);   // guard page: running off the host stack itself crashes here instead of quietly corrupting another mapping
         top = m + BS_GUARD + BS_SIZE;
         pthread_setspecific(g_bs_key, top);
     }
     return (uintptr_t)top;
 }
 
-// x16 = 实现。帧（在原栈上，0xa0 字节）：+0x00 x0–x8、x16，+0x50 d0–d7，+0x90 x29 / x30。换栈后新栈顶存原 sp，实现返回后取回
 // x16 = implementation. Frame (on the original stack, 0xa0 bytes): +0x00 x0-x8, x16, +0x50 d0-d7, +0x90 x29 / x30. After the switch the original sp is stored at the new stack top and restored when the implementation returns
 __asm__(
     ".text\n"

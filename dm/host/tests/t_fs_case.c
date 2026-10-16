@@ -1,5 +1,3 @@
-// Horizon 路径大小写单测：期望手写；在默认不分大小写的 APFS 上跑真实文件操作。
-// 同名不同大小写必须共存，所有路径组件精确匹配，目录列举仍给客体名字，Commit/重挂保留名字与内容。
 // Horizon path case unit test: expectations are hand-written; runs real file operations on the default case-insensitive APFS.
 // Names differing only in case must coexist, all path components match exactly, directory listing still gives the guest names, and Commit/remount preserve names and content.
 #ifndef HLE_FS_SOURCE
@@ -43,8 +41,8 @@ static int entry_count(void) {
     h_fs_ReadDirectory(&n, e, h, 32); h_fs_CloseDirectory(h); return (int)n;
 }
 static void *create_race(void *p) { return (void *)(uintptr_t)h_fs_CreateFile(p, 0); }
-module_t g_mod[MAX_MOD]; int g_nmod;   // 模块表（MountSave 按 main 构建号挑存档补丁）：这份单测不装模块 | Module table (MountSave picks save fixes by main build ID): this unit test loads no modules
-int dm_custom_lang_explicit(void) { return -1; }   // 语言开关（dm_custom.c）：这份单测不涉及，当作玩家没点过 | Language switch (dm_custom.c): not involved in this unit test, treated as the player never having tapped it
+module_t g_mod[MAX_MOD]; int g_nmod;   // Module table (MountSave picks save fixes by main build ID): this unit test loads no modules
+int dm_custom_lang_explicit(void) { return -1; }   // Language switch (dm_custom.c): not involved in this unit test, treated as the player never having tapped it
 int main(void) {
     char root[1024], save[1024], p[1100];
     const char *tmp = getenv("TMPDIR");

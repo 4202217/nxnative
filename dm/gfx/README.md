@@ -1,7 +1,5 @@
 # dm/gfx — graphics layer (NVN → Metal)
 
-中文：[README.zh-CN.md](README.zh-CN.md)
-
 The Switch version of the game draws with NVN (the Switch's native graphics interface). The graphics layer reimplements this interface on top of Apple's Metal: every NVN call the game makes lands here, is recorded as a command, and is replayed as Metal commands at submit time. The game's shaders are not translated at run time; they are translated offline, once, on a computer, into Metal shader libraries (when the computer has no Apple Metal compiler, the final compile step moves to the phone; see below).
 
 For the build steps of the whole project see `README.md` and `setup.sh` in the repository root, and for dependencies see `docs/DEPENDENCIES.md`; this page covers only the graphics layer's own matters.

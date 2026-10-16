@@ -1,5 +1,3 @@
-// dm_textbox_core 单测：期望全部手写。U+E07E = EE 81 BE。
-// 判据：表里的注释版整串 / 子串换成文字框版；表外的串（含原版自带的带码串、不带码的串）逐字节不动；没有表时一律不动。
 // dm_textbox_core unit test: all expectations are hand-written. U+E07E = EE 81 BE.
 // Criterion: whole strings / substrings of the annotated version found in the table are replaced by the text box version; strings outside the table (including the original game's own coded strings and strings without codes) are untouched byte for byte; with no table nothing is touched.
 #include "../dm_textbox_core.h"
@@ -19,8 +17,8 @@ static void expect(const char *what, const char *in, int want_k, const char *wan
 int main(void) {
     char path[] = "/tmp/t_textbox_XXXXXX"; int fd = mkstemp(path); FILE *f = fdopen(fd, "w");
     fprintf(f, "# 注释版\t文字框版\n");
-    fprintf(f, "%s\t%s\n", C "5[强伤60-70%]\\n" C "4死亡之铲", "死亡之铲");   // 范围行 + 名字 | range line + name
-    fprintf(f, "%s\t%s\n", C "1怀特之脚", "怀特之脚");                         // 红叶名字色 | Hongye mod name color
+    fprintf(f, "%s\t%s\n", C "5[强伤60-70%]\\n" C "4死亡之铲", "死亡之铲");   // range line + name
+    fprintf(f, "%s\t%s\n", C "1怀特之脚", "怀特之脚");                         // Hongye mod name color
     fclose(f);
     expect("没有表：带码串不动", C "1怀特之脚", 0, NULL);
     if (dm_textbox_load(path) != 2) { printf("✗ 读表条数不是 2\n"); return 1; }

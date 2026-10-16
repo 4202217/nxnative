@@ -1,5 +1,3 @@
-// 联网类（排除范围：联机/好友/商城/云存档）：一律接成「网络不可用」，游戏走离线分支。
-// 剪口：nifm 报无网络；socket 只接 Initialize（返回成功，不建会话），其余 socket/ssl/friends 用到时再接成失败。
 // Networking (out of scope: online play/friends/store/cloud saves): all hooked up as "network unavailable", the game takes the offline branch.
 // Cuts: nifm reports no network; socket only hooks up Initialize (returns success, creates no session), the rest of socket/ssl/friends are hooked up as failures when they come into use.
 #include "hle.h"
@@ -16,11 +14,9 @@ HLE_FORCE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", "离线：
 HLE_FORCE("nnsslInitialize", "连 ssl 服务；网络库全局初始化依赖它成功，离线不建会话（剪）", Result, h_ssl_Initialize, void) { return RES_OK; }
 HLE_FORCE("nnsslFinalize", "与 nnsslInitialize 配对（剪）", Result, h_ssl_Finalize, void) { return RES_OK; }
 
-// ---------- socket：离线，所有连服务的调用按 BSD 习惯回 -1、错误码 ENETDOWN ----------
-// 不剪：Inet* / nnsocketInet* 字节序与地址文本转换（纯计算）。
 // ---------- socket: offline, all calls that contact the service return -1 in BSD convention, error code ENETDOWN ----------
 // Not cut: Inet* / nnsocketInet* byte order and address text conversion (pure computation).
-#define SK_ENETDOWN 50                  // Horizon 套接字用 FreeBSD 错误码 | Horizon sockets use FreeBSD error codes
+#define SK_ENETDOWN 50                  // Horizon sockets use FreeBSD error codes
 static __thread int t_skerr = SK_ENETDOWN;
 static int sk_fail(void) { t_skerr = SK_ENETDOWN; return -1; }
 #define SKF(m, cname, ...) HLE_FORCE(m, "bsd 套接字服务（剪）：回 -1/ENETDOWN", int, cname, __VA_ARGS__)
@@ -51,7 +47,6 @@ HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", "域名解�
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", "与 GetAddrInfo 配对（剪）", void, h_sk_FreeAddrInfo, void *ai) { (void)ai; }
 HLE_FORCE("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", "域名解析（剪）：NULL", void *, h_sk_GetHostEnt, const char *n, const void *o, unsigned long c) { (void)n; (void)o; (void)c; t_skerr = SK_ENETDOWN; return NULL; }
 HLE_FORCE("_ZN2nn6socket12GetLastErrorEv", "套接字错误码由宿主记录", int, h_sk_GetLastError, void) { return t_skerr; }
-// C 接口
 // C interface
 SKF("nnsocketSocket", h_nsk_Socket, int a, int b, int c) { (void)a; (void)b; (void)c; return sk_fail(); }
 SKF("nnsocketBind", h_nsk_Bind, int s, const void *a, unsigned n) { (void)s; (void)a; (void)n; return sk_fail(); }
@@ -71,8 +66,6 @@ HLE_FORCE("nnsocketGetHostByNameWithOptions", "域名解析（剪）：NULL", vo
 HLE_FORCE("nnsocketGetLastErrno", "套接字错误码由宿主记录", int, h_nsk_GetErrno, void) { return t_skerr; }
 HLE_FORCE("nnsocketSetLastErrno", "套接字错误码由宿主记录", void, h_nsk_SetErrno, int e) { t_skerr = e; }
 
-// ---------- ssl：离线，Initialize 成功（网络库全局初始化依赖），其余连服务的一律失败 ----------
-// 不剪：Context / Connection 构造析构、Context::GetContextId（只读写游戏对象）。
 // ---------- ssl: offline, Initialize succeeds (the network library's global initialization depends on it), everything else that contacts the service fails ----------
 // Not cut: Context / Connection construction and destruction, Context::GetContextId (only read and write game objects).
 #define SSF(m, cname, ...) HLE_FORCE(m, "ssl 服务（剪）：失败", Result, cname, __VA_ARGS__)
@@ -97,7 +90,6 @@ SSF("_ZN2nn3ssl10Connection4PeekEPcPij", h_ssl_CnPeek, void *self, char *b, int 
 SSF("_ZN2nn3ssl10Connection4PollEPNS1_9PollEventES3_j", h_ssl_CnPoll, void *self, void *o, void *i, unsigned t) { (void)self; (void)o; (void)i; (void)t; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ssl10Connection4ReadEPcj", "ssl 服务（剪）：读到 -1", int, h_ssl_CnRead, void *self, char *b, unsigned n) { (void)self; (void)b; (void)n; return -1; }
 HLE_FORCE("_ZN2nn3ssl10Connection5WriteEPKcj", "ssl 服务（剪）：写出 -1", int, h_ssl_CnWrite, void *self, const char *b, unsigned n) { (void)self; (void)b; (void)n; return -1; }
-// C 接口：全部返回 nnResult
 // C interface: all return nnResult
 #define SSC(m, cname) HLE_FORCE(m, "ssl 服务（剪）：失败", Result, cname, void) { return RES_FAIL; }
 SSC("nnsslConnectionCreate", h_nssl_Create) SSC("nnsslConnectionDestroy", h_nssl_Destroy)

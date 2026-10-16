@@ -1,5 +1,3 @@
-// 局内双渲染回归：直接走生产 fz_end / fz_check_run，用 16×16 真 Metal 附件。
-// 后通道逻辑 c0 位于并集物理 c3；红色与蓝色的期望值由常量定义，不借被测实现算。
 // In-run double-render regression: goes directly through production fz_end / fz_check_run, with real 16×16 Metal attachments.
 // The later pass's logical c0 is at physical c3 of the union; the expected red and blue values are defined by constants, not computed via the implementation under test.
 #include "../nvn/nvn_mtl.m"
@@ -7,7 +5,7 @@ void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
 void svc_thread_dump(void) {}
-int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 uint64_t now_ns(void) { return bp_now(); }
 
 static int fail, count;

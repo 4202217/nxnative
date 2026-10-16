@@ -1,5 +1,3 @@
-// 诊断 DM_FD_LOG=<秒>：每隔这么多秒记一行「进程在用的文件描述符数与构成」（长时间游玩会不会撞打开文件数上限：iOS 软上限缺省 256，main.m 启动时已提到 4096）。
-// 逐个描述符 fstat 判类型；普通文件 / 目录用 fcntl(F_GETPATH) 取路径后按去处归类。只读、不动任何描述符；不设变量时不起线程。
 // Diagnostic DM_FD_LOG=<seconds>: every this many seconds log one line with "the number and breakdown of file descriptors the process has in use" (whether long play sessions will hit the open file limit: the iOS soft limit defaults to 256, already raised to 4096 at startup in main.m).
 // fstat each descriptor to determine its type; for regular files / directories get the path with fcntl(F_GETPATH) and classify by where it points. Read-only, touches no descriptor; no thread is started when the variable is unset.
 #include "hle.h"

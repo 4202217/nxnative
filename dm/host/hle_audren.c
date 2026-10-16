@@ -1,15 +1,3 @@
-// nn::audio AudioRenderer（audren）——进程内渲染：用游戏 SDK 自带的整套渲染器，不重写混音。
-// 较新的 SDK 把渲染器服务端（nn::audio::server：InfoUpdater / CommandGenerator …）和 DSP 命令处理的 CPU 版（nn::audio::dsp::CommandListProcessor：
-// ADPCM / PCM 解码、重采样、混音、混响 / 延迟 / 双二阶 / 压限 …）都链进了应用，供「CPU 渲染 + 手动执行」模式用（AudioRendererParameter
-// +0x2c renderingDevice = 1 CPU，+0x30 executionMode = 1 手动）。这个模式下 OpenAudioRenderer 走进程内的 DFC 管理器（CreateAudioRendererManagerByDfc），
-// RequestUpdate 直接在进程内解析，渲染由调用 nn::audio::ExecuteAudioRendererRendering 的线程在 CPU 上做，做完触发游戏的渲染器事件。
-// 宿主做三件事：
-//   1. 接管 GetAudioRendererWorkBufferSize / OpenAudioRenderer：参数改成 CPU + 手动后调 SDK 原函数（工作区大小按改后的参数算）；
-//   2. 渲染线程（宿主起的客体线程）：输出端每放回一块 5 ms 缓冲就渲一帧，节奏跟着声卡时钟走；
-//   3. 接管 AudioRendererImpl::ExecuteAudioRendererRendering（经 PLT 调到）：照原函数生成命令、交 CommandListProcessor 处理，
-//      再从命令表里找 DeviceSink 命令（CPU 处理器对它是空操作），把它的输入混音缓冲（int32，16 位范围）夹成 int16 立体声交给 AudioOut 输出（hle_audio.c）。
-// 命令表格式（SDK 16）：头 +0x04 命令数、+0x08 混音缓冲地址、+0x10 缓冲数、+0x14 每帧采样数、+0x18 采样率，命令从 +0x20 起；
-//   每条命令 +0x00 魔数 0xcafebabe、+0x04 启用、+0x05 命令号（DeviceSink = 0x13）、+0x06 大小；DeviceSink +0x128 上采样缓冲、+0x130 输入数、+0x134 输入下标（s16）。
 // nn::audio AudioRenderer (audren) -- in-process rendering: use the complete renderer the game's SDK ships with, no mixer of our own.
 // Newer SDKs link the renderer server side (nn::audio::server: InfoUpdater / CommandGenerator ...) and the CPU version of the DSP command processing (nn::audio::dsp::CommandListProcessor:
 // ADPCM / PCM decoding, resampling, mixing, reverb / delay / biquad / limiter / compressor ...) into the application, for the "CPU rendering + manual execution" mode (AudioRendererParameter
@@ -49,14 +37,14 @@ HLE_FORCE("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22Au
     uint8_t p[P_SIZE]; cpu_manual(p, param); return orig(handle, p, work, sz);
 }
 
-// ---------- 渲染与输出 | rendering and output ----------
-static void *g_handle[2];                    // AudioRendererHandle（渲染器对象、客户端状态）| AudioRendererHandle (renderer object, client state)
+// ---------- rendering and output ----------
+static void *g_handle[2];                    // AudioRendererHandle (renderer object, client state)
 static _Atomic int g_open;
-static int16_t g_frame[FRAME_MAX * 2]; static int g_frame_n;   // 最近一帧（立体声 int16）| the latest frame (stereo int16)
+static int16_t g_frame[FRAME_MAX * 2]; static int g_frame_n;   // the latest frame (stereo int16)
 static _Atomic uint64_t g_frames, g_nonsilent;
-enum { CQ = 4 }; static int16_t g_cq[CQ][FRAME_MAX * 2]; static int g_cq_n[CQ]; static _Atomic uint32_t g_cq_head, g_cq_tail;   // 追帧的输出队列 | output queue of catch-up frames
+enum { CQ = 4 }; static int16_t g_cq[CQ][FRAME_MAX * 2]; static int g_cq_n[CQ]; static _Atomic uint32_t g_cq_head, g_cq_tail;   // output queue of catch-up frames
 
-typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // 与 hle_audio.c 的 AudioOutBuffer 前部一致 | same as the front of hle_audio.c's AudioOutBuffer
+typedef struct { void *ptr; uint64_t cap, size; } gbuf;       // same as the front of hle_audio.c's AudioOutBuffer
 static void render_main(void *arg) {
     (void)arg;
     void (*exec)(void *, void *) = gsym("_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE");
@@ -66,7 +54,7 @@ static void render_main(void *arg) {
     dm_pcmout_start(out);
     LOG("audren：渲染线程开跑（%d 块缓冲在途，节奏跟输出端）", NBUF);
     while (atomic_load(&g_open)) {
-        while (!nfree) {   // 等输出端放回一块（静音接收端 / 声卡每 5 ms 一块）| wait for the output to hand a block back (silent sink / sound card, one every 5 ms)
+        while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms)
             gbuf *b = dm_pcmout_released(out);
             if (b) { free_list[nfree++] = b; break; }
             usleep(1000);
@@ -74,8 +62,8 @@ static void render_main(void *arg) {
         }
         const int16_t *src; int got;
         uint32_t h = atomic_load(&g_cq_head);
-        if (h != atomic_load(&g_cq_tail)) { src = g_cq[h % CQ]; got = g_cq_n[h % CQ]; atomic_store(&g_cq_head, h + 1); }   // 先放追帧的输出 | play queued catch-up output first
-        else { g_frame_n = 0; exec(g_handle[0], g_handle[1]); src = g_frame; got = g_frame_n; }   // SDK：生成命令 → CPU 处理（宿主接管处取出输出）→ 触发游戏的渲染器事件 | SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
+        if (h != atomic_load(&g_cq_tail)) { src = g_cq[h % CQ]; got = g_cq_n[h % CQ]; atomic_store(&g_cq_head, h + 1); }   // play queued catch-up output first
+        else { g_frame_n = 0; exec(g_handle[0], g_handle[1]); src = g_frame; got = g_frame_n; }   // SDK: generate commands → CPU processing (output taken in the host takeover) → signal the game's renderer event
         int n = got ? got : 240;
         gbuf *b = free_list[--nfree];
         if (got) memcpy(b->ptr, src, (size_t)n * 4); else memset(b->ptr, 0, (size_t)n * 4);
@@ -101,12 +89,10 @@ HLE_FORCE("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11S
 }
 HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "关渲染器：先停宿主渲染线程再交 SDK", void, h_ar_Close, void *obj, void *state) {
     static void (*orig)(void *, void *); if (!orig) orig = gsym("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE");
-    if (obj == g_handle[0]) { atomic_store(&g_open, 0); usleep(20000); }   // 渲染线程每轮查一次，最多等一帧多 | the render thread checks every round; wait a little over one frame
+    if (obj == g_handle[0]) { atomic_store(&g_open, 0); usleep(20000); }   // the render thread checks every round; wait a little over one frame
     orig(obj, state);
 }
 
-// 取 DeviceSink 的输入混音缓冲 → int16 立体声。命令号 SDK 16 是 0x13；SDK 20 在它前面插了一个命令，成了 0x14（sdk+0x233f44 写命令处，布局不变：0x148 字节，
-//   +0x128 上采样缓冲、+0x130 输入数、+0x134 输入下标）。render_once 按布局设
 // DeviceSink input mix buffers → int16 stereo. The command ID is 0x13 in SDK 16; SDK 20 inserted a command before it, making it 0x14 (written at sdk+0x233f44, same layout: 0x148 bytes,
 //   +0x128 upsample buffer, +0x130 input count, +0x134 input indices). render_once sets it by layout
 static int g_sink_id = 0x13;
@@ -114,7 +100,7 @@ static int capture(const uint8_t *cl, int16_t *dst) {
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
     const int32_t *mix = *(const int32_t *const *)(cl + 8);
     static int logged;
-    if (!logged && ncmd > 4) {   // 第一帧完整命令表：命令号分布 | first full command list: command ID histogram
+    if (!logged && ncmd > 4) {   // first full command list: command ID histogram
         int hist[64] = {0}; const uint8_t *q = cl + 0x20; char line[512]; size_t o = 0;
         for (uint32_t i = 0; i < ncmd && *(const uint32_t *)q == 0xcafebabeu && *(const int16_t *)(q + 6) > 0; i++) { hist[q[5] & 63]++; q += *(const int16_t *)(q + 6); }
         for (int k = 0; k < 64; k++) if (hist[k]) o += snprintf(line + o, sizeof line - o, " %d×%d", k, hist[k]);
@@ -129,11 +115,9 @@ static int capture(const uint8_t *cl, int16_t *dst) {
             const int32_t *up = *(const int32_t *const *)(c + 0x128);
             if (!logged++) LOG("audren：DeviceSink 输入 %u 个（%d %d …）采样率 %u 每帧 %u 混音缓冲 %p 上采样缓冲 %p", nin, nin ? in[0] : -1, nin > 1 ? in[1] : -1, rate, samples, (void *)mix, (void *)up);
             if (!nin || samples > FRAME_MAX) return 0;
-            // 输入缓冲：48 kHz 读混音缓冲；32 kHz 渲染时 DeviceSink 读上采样后的缓冲（按输入顺序连排）
             // Input buffers: at 48 kHz the mix buffers; with 32 kHz rendering DeviceSink reads the upsampled buffer (inputs laid out in order)
             const int32_t *ch[6]; uint32_t k = nin > 6 ? 6 : nin;
             for (uint32_t j = 0; j < k; j++) ch[j] = up && rate != 48000 ? up + (size_t)j * samples : mix + (size_t)in[j] * samples;
-            // 声道顺序 前左 前右 中 低音 后左 后右；6 → 2 按系统缺省下混系数（前 1.0、中 0.707、低音 0.251、后 0.707，Q15）
             // Channel order front-left front-right center LFE back-left back-right; 6 → 2 with the system default downmix coefficients (front 1.0, center 0.707, LFE 0.251, back 0.707, Q15)
             enum { CF = 32768, CC = 23167, CL = 8224, CB = 23167 };
             uint64_t loud = 0;
@@ -153,13 +137,9 @@ static int capture(const uint8_t *cl, int16_t *dst) {
     }
     return 0;
 }
-// 渲染一帧（生成命令 + CPU 处理）；dst = 输出（立体声 int16，*nout 采样数）。两处调用（渲染线程、追帧）由宿主锁串行：共用同一块命令缓冲
 // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
 static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_updates, g_renders, g_catchups;
-// SDK 20（塞尔达传说 旷野之息 1.9.0）的 AudioRenderSystem 换了布局：取模式 / 设备 / 命令缓冲的成员函数都内联掉了（sdk+0x22a70c ExecuteAudioRendererRendering：
-//   +0x48 渲染设备、+0x4c 执行模式，都要是 1；+0xf8 / +0x100 命令缓冲起址 / 长），GenerateCommand 改收 Span<std::byte> 并回 Span（x0 起址、x1 长，就是生成出的命令表），
-//   UpdateImpl 持的互斥锁在 +0x2d0（SDK 16 是 +0x1f0）。按有没有 Span 版 GenerateCommand 认布局
 // SDK 20's AudioRenderSystem (The Legend of Zelda: Breath of the Wild 1.9.0) has another layout: the member functions for mode / device / command buffer are inlined (sdk+0x22a70c ExecuteAudioRendererRendering:
 //   +0x48 rendering device and +0x4c execution mode, both must be 1; +0xf8 / +0x100 command buffer start / length), GenerateCommand takes a Span<std::byte> and returns a Span (x0 start, x1 length: the generated command list),
 //   and the mutex UpdateImpl holds is at +0x2d0 (+0x1f0 in SDK 16). The layout is recognized by the presence of the Span version of GenerateCommand
@@ -182,10 +162,9 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
         process = gsym("_ZN2nn5audio3dsp20CommandListProcessor7ProcessEv");
     }
     int md = gen20 ? *(int32_t *)(sys + 0x4c) : mode(sys), dv = gen20 ? *(int32_t *)(sys + 0x48) : device(sys);
-    if (md != 1 || dv != 1) return 0x40299;   // 同原函数：非 CPU 手动模式不能手动渲染 | same as the original: manual rendering needs CPU + manual mode
+    if (md != 1 || dv != 1) return 0x40299;   // same as the original: manual rendering needs CPU + manual mode
     pthread_mutex_lock(&g_render_mu);
     uint64_t t0 = now_ns();
-    // 生成命令要与游戏线程的 RequestUpdate（AudioRenderSystem::Update，持 mu_off 处的互斥锁）互斥：原版的系统线程（SendCommandToDsp）也是持同一把锁生成。处理（CPU 版 DSP）照原版在锁外。
     // Command generation must exclude the game thread's RequestUpdate (AudioRenderSystem::Update, which holds the mutex at mu_off): the original system thread (SendCommandToDsp) generates under the same lock. Processing (the CPU DSP) stays outside the lock, as in the original.
     uint8_t *cl; size_t n;
     lock(sys + mu_off);
@@ -193,30 +172,23 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
     else { cl = cbuf(sys); n = gen(sys, cl, cbsz(sys)); }
     unlock(sys + mu_off);
     atomic_fetch_add(&g_renders, 1);
-    uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor（0x58 字节）| CommandListProcessor (0x58 bytes)
+    uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor (0x58 bytes)
     tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);
     if (dst) *nout = capture(cl, dst);
-    // 每帧渲染耗时（5 ms 一帧的预算）：每 2000 帧报均值 / 最大 | render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
+    // render time per frame (budget: 5 ms per frame): mean / max every 2000 frames
     static uint64_t sum, mx, cnt; uint64_t d = now_ns() - t0; sum += d; if (d > mx) mx = d;
     if (++cnt == 2000) { LOG("audren：渲染耗时 均 %.2f ms / 最大 %.2f ms（每帧 5 ms 预算，最近 2000 帧）；追帧累计 %llu 次", sum / 2000 / 1e6, mx / 1e6, (unsigned long long)atomic_load(&g_catchups)); sum = mx = cnt = 0; }
     pthread_mutex_unlock(&g_render_mu);
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv", "手动渲染一帧：SDK 生成命令 + CPU 处理，宿主取 DeviceSink 输出",
-          Result, h_ar_ImplExec, uint8_t *impl) { return render_once(impl + 0x60, g_frame, &g_frame_n); }   // AudioRendererImpl 里的 AudioRenderSystem 在 +0x60 | the AudioRenderSystem sits at +0x60 inside AudioRendererImpl
-// SDK 20（塞尔达传说 旷野之息 1.9.0）：公开的 ExecuteAudioRendererRendering（sdk+0x221e90）经虚表直接调 AudioRendererImpl 那一版（sdk+0x22ca88，只有 x0 += 0x60 再经 PLT 跳到这里），
-// 上面那条接管碰不到。原版这里生成命令不持更新锁，渲染线程走原版、游戏线程的 RequestUpdate 又因「上次更新后没渲过」追渲，两边同时写同一块命令缓冲，
-// CommandListProcessor::Process 偶发读到写了一半的命令表崩溃（神庙里 60 秒、134 秒各一次）。这里接管，渲染照样走宿主的加锁渲染
+          Result, h_ar_ImplExec, uint8_t *impl) { return render_once(impl + 0x60, g_frame, &g_frame_n); }   // the AudioRenderSystem sits at +0x60 inside AudioRendererImpl
 // SDK 20 (The Legend of Zelda: Breath of the Wild 1.9.0): the public ExecuteAudioRendererRendering (sdk+0x221e90) calls the AudioRendererImpl version through the vtable (sdk+0x22ca88, just x0 += 0x60 and a jump through the PLT to here),
 // so the takeover above is never reached. The original generates commands here without the update lock; with the render thread on the original and the game thread's RequestUpdate rendering catch-up frames ("nothing rendered since the last update"),
 // both sides wrote the same command buffer at once and CommandListProcessor::Process sometimes read a half-written command list and crashed (once at 60 s and once at 134 s in the shrine). Taken over here, so rendering goes through the host's locked render as well
 HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem29ExecuteAudioRendererRenderingEv", "手动渲染一帧（SDK 20 经 PLT 调到）：同上，走宿主的加锁渲染",
           Result, h_ars_Exec, uint8_t *sys) { return render_once(sys, g_frame, &g_frame_n); }
 
-// 两次 RequestUpdate 之间至少渲一帧。效果的「待初始化」只在游戏标「新加」的那次更新里置上（如 LightLimiterInfo::Update：isNew → 参数状态 0），
-// 下一次更新照游戏的值覆盖；中间没生成过命令，DSP 就永远收不到初始化，之后 ApplyLightLimiterEffect 读空指针。真机渲染器每 5 ms 自己出一帧、
-// 游戏又等渲染器事件，正常是一更新一帧；但开局游戏连着更新两次（相隔 0.04 ms），真出声时声卡打开慢、第一帧来得晚，两次之间没帧。
-// 这里遇到「上次更新后没渲过」就先在当前线程追渲一帧；输出进队列，渲染线程下一轮放它、不再另渲。
 // At least one rendered frame between two RequestUpdates. An effect's "needs initialization" is set only by the update in which the game flags it as new (e.g. LightLimiterInfo::Update: isNew → parameter status 0);
 // the next update overwrites it with the game's value; if no commands were generated in between, the DSP never receives the initialization and ApplyLightLimiterEffect later reads a null pointer. The real renderer produces a frame every 5 ms on its own
 // and the game waits on the renderer event, so normally it is one update per frame; but at start-up the game updates twice in a row (0.04 ms apart), and with real audio output the sound card opens slowly and the first frame comes late, leaving no frame in between.
@@ -231,7 +203,7 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "渲染�
         if (c <= 3) LOG("audren：第 %llu 次更新前没渲过帧，先追渲一帧（累计 %llu 次）", (unsigned long long)u, (unsigned long long)c);
         uint32_t t = atomic_load(&g_cq_tail);
         if (t - atomic_load(&g_cq_head) < CQ) { render_once(sys, g_cq[t % CQ], &g_cq_n[t % CQ]); atomic_store(&g_cq_tail, t + 1); }
-        else render_once(sys, NULL, NULL);   // 队列满（不该发生）：照渲，输出丢弃 | queue full (should not happen): render anyway, output discarded
+        else render_once(sys, NULL, NULL);   // queue full (should not happen): render anyway, output discarded
     }
     static int tr = -1; if (tr < 0) tr = getenv("DM_AUDREN_TRACE") != NULL;
     if (tr && u < 200) LOG("audren 更新 #%llu t=%.3f ms 距上次更新渲了 %llu 帧", (unsigned long long)u, now_ns() / 1e6, (unsigned long long)(atomic_load(&g_renders) - (last_r == ~0ull ? 0 : last_r)));
@@ -240,13 +212,12 @@ HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem6UpdateEPvmS3_mPKvm", "渲染�
     return res;
 }
 
-// 输出设备：一个内置扬声器，立体声（音频设备服务仍走 IPC，宿主直接答）
 // Output device: one built-in speaker, stereo (the audio device service still goes through IPC; the host answers directly)
 enum { DEVNAME = 0x100 };
 static void out_devname(char *out) { memset(out, 0, DEVNAME); strlcpy(out, "AudioBuiltInSpeakerOutput", DEVNAME); }
 HLE_FORCE("_ZN2nn5audio25ListAudioOutputDeviceNameEPNS0_15AudioDeviceNameEi", "输出设备列表：内置扬声器 1 个", int, h_ad_List, char *names, int n) { if (n <= 0 || !names) return 0; out_devname(names); return 1; }
 HLE_FORCE("_ZN2nn5audio30GetActiveAudioOutputDeviceNameEPNS0_15AudioDeviceNameE", "当前输出设备：内置扬声器", void, h_ad_Active, char *name) { out_devname(name); }
-// SDK 12 的旧名（Engage）：同一服务、同样回答 | The SDK 12 names (Engage): the same service, the same answers
+// The SDK 12 names (Engage): the same service, the same answers
 HLE_FORCE("_ZN2nn5audio19ListAudioDeviceNameEPNS0_15AudioDeviceNameEi", "输出设备列表（SDK 12 名）：内置扬声器 1 个", int, h_ad_List12, char *names, int n) { return h_ad_List(names, n); }
 HLE_FORCE("_ZN2nn5audio24GetActiveAudioDeviceNameEPNS0_15AudioDeviceNameE", "当前输出设备（SDK 12 名）：内置扬声器", void, h_ad_Active12, char *name) { out_devname(name); }
 HLE_FORCE("_ZN2nn5audio41GetActiveAudioDeviceChannelCountForOutputEv", "输出声道数：2", int, h_ad_Channels, void) { return 2; }

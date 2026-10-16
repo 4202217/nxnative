@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-# 两个构建之间搬偏移（游戏更新后找回宿主 / 改写器里写死的地址）：nso_fnmap.py <旧 .orig.bin> <新 .orig.bin> 0x偏移...
-# 函数表取自 eh_frame（起点 + FDE 长度）。每个函数按「屏蔽与地址有关的位」后的指令串求哈希：b / bl / b.cond / cbz / tbz / adr / adrp / 字面量 ldr 的立即数，
-# 以及紧跟 adrp、以其目的寄存器为基址的 add / ldr / str 的低 12 位（数据段整体挪了位置，页内偏移也跟着变）。结构体成员偏移、常数照常参与比较。
-#   代码偏移：所在函数在新构建里哈希唯一相同 → 同一函数内偏移（「全同」）；否则在前后最近的全同函数之间按指令相似度挑（「近似」，报相似度）。
-#   数据偏移（全局变量）：旧构建里用 adrp + add/ldr/str 正好算出该地址的指令对，所在函数全同时在新构建同位置解码出新地址；多处引用须一致。
-# 输出每个偏移一行：旧 → 新、方法、旧 / 新所在函数；新位置的指令与旧的（屏蔽后）不同时报红。
-# .orig.bin 由 dm/tools/nso.py 解出（整块内存映像）。
 # Carry offsets across two builds (recover addresses hard-coded in the host / rewriter after a game update): nso_fnmap.py <old .orig.bin> <new .orig.bin> 0xoffset...
 # The function table comes from eh_frame (starts + FDE lengths). Each function is hashed over its instructions with address-dependent bits masked: the immediates of b / bl / b.cond / cbz / tbz / adr / adrp / literal ldr,
 # and the low 12 bits of an add / ldr / str that follows an adrp and uses its destination register as the base (the data segments moved as a whole, so in-page offsets change too). Struct member offsets and constants still take part.
@@ -29,7 +22,7 @@ class Img:
         for i in range(n):
             loc, fde = struct.unpack_from('<ii', self.b, ehs + 12 + i * 8); loc += ehs; fde += ehs
             pc0 = fde + 8 + struct.unpack_from('<i', self.b, fde + 8)[0]; size = struct.unpack_from('<I', self.b, fde + 12)[0]
-            if pc0 != loc: continue   # FDE 编码不是 pcrel sdata4 的略过 | skip FDEs whose encoding is not pcrel sdata4
+            if pc0 != loc: continue   # skip FDEs whose encoding is not pcrel sdata4
             fn[loc] = max(fn.get(loc, 0), size)
         self.starts = sorted(fn); self.size = fn
         self.mask = masked(self.w, min(self.starts), max(s + fn[s] for s in self.starts))
@@ -40,16 +33,15 @@ class Img:
     def u32(self, off): return int(self.w[off // 4])
 
 def masked(w, lo, hi):
-    """lo..hi 范围内逐字屏蔽地址相关位（之外原样） | mask address-dependent bits word by word within lo..hi (unchanged outside)"""
+    """mask address-dependent bits word by word within lo..hi (unchanged outside)"""
     m = w.copy(); s = slice(lo // 4, hi // 4); x = m[s]
     for msk, val, keep in ((0x7c000000, 0x14000000, 0xfc000000),   # b / bl
                            (0xff000010, 0x54000000, 0xff00001f),   # b.cond
                            (0x7e000000, 0x34000000, 0xff00001f),   # cbz / cbnz
                            (0x7e000000, 0x36000000, 0xfff8001f),   # tbz / tbnz
                            (0x1f000000, 0x10000000, 0x9f00001f),   # adr / adrp
-                           (0x3b000000, 0x18000000, 0xff00001f)):  # ldr 字面量 | literal ldr
+                           (0x3b000000, 0x18000000, 0xff00001f)):  # literal ldr
         sel = (x & msk) == val; x[sel] &= keep
-    # adrp 之后 8 条内、以其目的寄存器为基址的 add（64 位立即数）/ ldr / str（无符号偏移）：屏蔽低 12 位
     # add (64-bit immediate) / ldr / str (unsigned offset) within 8 instructions after an adrp, based on its destination register: mask the low 12 bits
     raw = w[s]; adrp = np.nonzero((raw & 0x9f000000) == 0x90000000)[0]
     for i in adrp:
@@ -57,11 +49,11 @@ def masked(w, lo, hi):
         for j in range(i + 1, min(i + 9, len(raw))):
             v = int(raw[j])
             if ((v & 0xff800000) == 0x91000000 or (v & 0x3b000000) == 0x39000000) and (v >> 5) & 31 == rd: x[j] &= ~np.uint32(0x3ffc00); break
-            if (v & 31) == rd and (v & 0x9f000000) != 0x90000000 and (v & 0x3b000000) != 0x39000000: break   # 目的寄存器被别的指令改写 | destination register rewritten by another instruction
+            if (v & 31) == rd and (v & 0x9f000000) != 0x90000000 and (v & 0x3b000000) != 0x39000000: break   # destination register rewritten by another instruction
     return m
 
 def adrp_refs(img, target):
-    """img 里 adrp + add/ldr/str 正好算出 target 的指令对 [(adrp 偏移, 配对指令偏移)] | instruction pairs in img whose adrp + add/ldr/str compute exactly target"""
+    """instruction pairs in img whose adrp + add/ldr/str compute exactly target"""
     out = []; w = img.w; page = target & ~0xfff
     cand = np.nonzero((w & 0x9f000000) == 0x90000000)[0]
     for i in cand:

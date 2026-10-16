@@ -1,10 +1,3 @@
-# 带符号的反汇编：按 dynsym 定义符号与 PLT 导入名标注 bl/b/adrp 目标。
-# 用法：sdis.py <原映像 .orig.bin> <符号名|0x偏移> [条数=200]
-#       sdis.py <原映像> --sym 0x偏移...    偏移 → 函数+偏移
-#       sdis.py <原映像> --xref 0x地址...  谁用 adrp+add 引用了该地址
-#       sdis.py <原映像> --fn 0x地址...     所在函数起点（eh_frame 函数表）
-#       sdis.py <原映像> --find <子串>        列出名字含子串的定义符号
-#       sdis.py <原映像> --callers <符号名>   列出直接 bl/b 到该符号的调用点
 # Disassembly with symbols: annotates bl/b/adrp targets with dynsym defined symbols and PLT import names.
 # Usage: sdis.py <original image .orig.bin> <symbol name|0xoffset> [count=200]
 #       sdis.py <original image> --sym 0xoffset...    offset → function+offset
@@ -33,7 +26,6 @@ for i in range(1, nsym):
     if shn and val:
         n = cstr(STR + nm); defs[n] = (val, sz); byaddr.setdefault(val, n)
 funcs = sorted(byaddr.items()); addrs = [a for a, _ in funcs]
-# PLT：adrp x16 / ldr x17,[x16,#o] / add / br x17 → JUMP_SLOT 名
 # PLT: adrp x16 / ldr x17,[x16,#o] / add / br x17 → JUMP_SLOT name
 got = {}
 for i in range(0, t.get(2, 0), 24):
@@ -41,7 +33,7 @@ for i in range(0, t.get(2, 0), 24):
     got[off] = cstr(STR + struct.unpack_from('<I', img, SYM + (info >> 32) * 24)[0])
 plt = {}
 def plt_scan():
-    lo = t[23]  # PLT 紧随 text 末尾附近；直接扫 text 里 adrp x16 序列 | The PLT is right near the end of text; scan text directly for adrp x16 sequences
+    lo = t[23]  # The PLT is right near the end of text; scan text directly for adrp x16 sequences
     for o in range(0, len(img) - 16, 4):
         w = struct.unpack_from('<I', img, o)[0]
         if w & 0x9F00001F != 0x90000010: continue
@@ -55,7 +47,7 @@ def name(a):
     if i < 0: return hex(a)
     return funcs[i][1] + ('' if a == funcs[i][0] else f'+{a - funcs[i][0]:#x}')
 
-def fn_starts():               # eh_frame_hdr 二分表里的全部函数起点（升序） | All function starts in the eh_frame_hdr binary search table (ascending)
+def fn_starts():               # All function starts in the eh_frame_hdr binary search table (ascending)
     m0 = struct.unpack_from('<I', img, 4)[0]
     ehs = m0 + struct.unpack_from('<i', img, m0 + 16)[0]
     ver, penc, cenc, tenc = img[ehs:ehs + 4]
@@ -75,11 +67,11 @@ def fn_starts():               # eh_frame_hdr 二分表里的全部函数起点�
 def resolve(s):
     return int(s, 16) if s.startswith('0x') else defs[s][0]
 
-if sys.argv[2] == '--sym':      # sdis.py <映像> --sym 0x偏移...  逐个给出所在函数 | sdis.py <image> --sym 0xoffset...  give the containing function for each one
+if sys.argv[2] == '--sym':      # sdis.py <image> --sym 0xoffset...  give the containing function for each one
     plt_scan()
     for a in sys.argv[3:]: print(a, name(int(a, 16)))
     sys.exit()
-if sys.argv[2] == '--xref':     # sdis.py <映像> --xref 0x地址...  找 adrp+add/ldr 拼出该地址的指令 | sdis.py <image> --xref 0xaddr...  find the instructions that build this address with adrp+add/ldr
+if sys.argv[2] == '--xref':     # sdis.py <image> --xref 0xaddr...  find the instructions that build this address with adrp+add/ldr
     want = {int(a, 16) for a in sys.argv[3:]}
     textend = max(v + s for v, s in defs.values() if v < 0x10000000 and s)
     for o in range(0, min(len(img), textend), 4):
@@ -94,11 +86,11 @@ if sys.argv[2] == '--xref':     # sdis.py <映像> --xref 0x地址...  找 adrp+
                 if page + ops[2].imm in want: print(f'{i.address:#x} {name(i.address)} -> {page + ops[2].imm:#x}')
                 break
     sys.exit()
-if sys.argv[2] == '--fn':       # sdis.py <映像> --fn 0x地址...  所在函数起点（eh_frame） | sdis.py <image> --fn 0xaddr...  start of the containing function (eh_frame)
+if sys.argv[2] == '--fn':       # sdis.py <image> --fn 0xaddr...  start of the containing function (eh_frame)
     st = fn_starts()
     for a in sys.argv[3:]:
         a = int(a, 16); k = bisect.bisect_right(st, a) - 1
-        if k < 0 or k + 1 >= len(st): print(f'{a:#x} 不在函数表'); continue   # 首函数前 / 末函数后（如改写区）：单条报，不连累整批 | Before the first function / after the last function (e.g. the rewrite area): report it on its own, without dragging down the whole batch
+        if k < 0 or k + 1 >= len(st): print(f'{a:#x} 不在函数表'); continue   # Before the first function / after the last function (e.g. the rewrite area): report it on its own, without dragging down the whole batch
         print(f'{a:#x} 函数 {st[k]:#x} +{a - st[k]:#x}  下一函数 {st[k + 1]:#x}')
     sys.exit()
 if sys.argv[2] == '--find':
@@ -106,7 +98,7 @@ if sys.argv[2] == '--find':
         if sys.argv[3] in n: print(f'{v:#x} {sz:#x} {n}')
     sys.exit()
 if sys.argv[2] == '--callers':
-    tgt = resolve(sys.argv[3]); textend = max(v + s for v, s in defs.values() if v < 0x10000000 and s)  # 粗上界 | Coarse upper bound
+    tgt = resolve(sys.argv[3]); textend = max(v + s for v, s in defs.values() if v < 0x10000000 and s)  # Coarse upper bound
     for o in range(0, min(len(img), textend), 4):
         w = struct.unpack_from('<I', img, o)[0]
         if w >> 26 in (0x25, 0x05) and o + ((((w & 0x3ffffff) ^ 0x2000000) - 0x2000000) * 4) == tgt:

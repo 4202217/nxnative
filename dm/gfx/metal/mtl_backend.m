@@ -1,9 +1,4 @@
-// mtl_backend.m —— mtl_backend.h 的实现（ObjC，-fobjc-arc）
 //
-// 渲染目标存储模式取 MTLStorageModeShared：本机是 Apple Silicon 统一内存，
-// Shared 纹理可直接当渲染附件，GPU 完成后 CPU 用 getBytes 直接读，无需额外的
-// blit 拷贝与中转缓冲，回读路径最短。代价：Shared 纹理不能做无损帧缓冲压缩，
-// 将来走性能路线时再换 Private + blit 回读（只影响 mtlb_target / mtlb_readback）。
 // mtl_backend.m - implementation of mtl_backend.h (ObjC, -fobjc-arc)
 // Render targets use storage mode MTLStorageModeShared: this machine is Apple Silicon with unified memory,
 // a Shared texture can be used directly as a render attachment, and once the GPU is done the CPU reads it directly with getBytes, with no extra
@@ -15,15 +10,14 @@
 #include <stdio.h>
 #include "mtl_backend.h"
 
-// ---- 内部对象（用 ObjC 类承载，ARC 管理 Metal 对象生命周期；对外是不透明 C 指针）----
 // ---- Internal objects (held in ObjC classes, ARC manages Metal object lifetimes; exposed as opaque C pointers) ----
 
 @interface MTLBCtx : NSObject
 @property(nonatomic, strong) id<MTLDevice> dev;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
-@property(nonatomic, strong) id<MTLCommandBuffer> frame;   // 当前帧，懒建，readback 时提交 | current frame, created lazily, committed at readback
+@property(nonatomic, strong) id<MTLCommandBuffer> frame;   // current frame, created lazily, committed at readback
 @property(nonatomic, strong) id<MTLLibrary> triLib;
-@property(nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *triPso; // 按像素格式缓存 | cached by pixel format
+@property(nonatomic, strong) NSMutableDictionary<NSNumber *, id<MTLRenderPipelineState>> *triPso; // cached by pixel format
 @end
 @implementation MTLBCtx
 @end
@@ -48,7 +42,6 @@ static id<MTLCommandBuffer> frame_cb(MTLBCtx *c) {
     return c.frame;
 }
 
-// ---- 设备 ----
 // ---- Device ----
 
 mtlb_ctx *mtlb_init(void) {
@@ -74,7 +67,6 @@ void mtlb_shutdown(mtlb_ctx *ctx) {
     }
 }
 
-// ---- 渲染目标 ----
 // ---- Render targets ----
 
 static MTLPixelFormat pixfmt(mtlb_fmt f) {
@@ -105,7 +97,6 @@ void mtlb_target_free(mtlb_rt *rt) {
     if (rt) CFBridgingRelease(rt);
 }
 
-// ---- pass 录制 ----
 // ---- Pass recording ----
 
 static MTLRenderPassDescriptor *pass_desc(MTLBRt *r, MTLLoadAction load, MTLClearColor cc) {
@@ -139,11 +130,9 @@ static NSString *const kTriMSL =
      "}\n"
      "fragment float4 tri_fs(O in [[stage_in]]) { return in.col; }\n";
 
-// 与 kTriMSL 中 struct V 布局一致（两个 float4，32 字节）
 // Matches the layout of struct V in kTriMSL (two float4, 32 bytes)
 typedef struct { float pos[4]; float col[4]; } TriVert;
 
-// 顶点（NDC）：上红、左下绿、右下蓝
 // Vertices (NDC): top red, bottom-left green, bottom-right blue
 static const TriVert kTri[3] = {
     {{ 0.0f,  0.5f, 0.0f, 1.0f}, {1, 0, 0, 1}},
@@ -187,7 +176,6 @@ int mtlb_triangle(mtlb_ctx *ctx, mtlb_rt *rt) {
     }
 }
 
-// ---- 提交与回读 ----
 // ---- Commit and readback ----
 
 int mtlb_readback(mtlb_ctx *ctx, mtlb_rt *rt, void *buf, size_t buf_size) {

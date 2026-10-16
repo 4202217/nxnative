@@ -1,14 +1,10 @@
-// nn::ro（运行时装 NRO 模块）：真机上连 ldr:ro 服务。宿主没有这个服务，原样跑 SDK 的 Initialize 会在 InitializeWithPortName 里读空会话崩（Engage）。
-// Engage（Unity）导入 8 个 ro 接口但 RomFS 里没有 .nro / .nrr：启动时只 Initialize，查符号走 LookupSymbol。
-// 接管：Initialize 空操作；LookupSymbol 在已装模块（main / subsdk* / sdk）里按名字找定义；装卸 / 登记模块一律失败并报红一次（没有可装的东西）。
-// 只看成败：游戏只判 IsSuccess，失败码取 ro 模块号 22 下的一个非零值。
 // nn::ro (loading NRO modules at run time): on the real device it connects to the ldr:ro service. The host has no such service; running the SDK's Initialize as is reads a null session in InitializeWithPortName and crashes (Engage).
 // Engage (Unity) imports 8 ro interfaces but its RomFS has no .nro / .nrr: at startup it only calls Initialize, and symbol lookups go through LookupSymbol.
 // Takeover: Initialize is a no-op; LookupSymbol finds the definition by name in the loaded modules (main / subsdk* / sdk); loading / unloading / registering modules always fails and reports red once (there is nothing to load).
 // Only success matters: the game checks IsSuccess only, so the failure code is a non-zero value under the ro module number 22.
 #include "hle.h"
 
-#define RO_FAIL ((Result)(22 | (1 << 9)))   // ro 模块 22 下的失败 | a failure under ro module 22
+#define RO_FAIL ((Result)(22 | (1 << 9)))   // a failure under ro module 22
 
 HLE_FORCE("_ZN2nn2ro10InitializeEv", "连 ldr:ro 服务；宿主没有，查符号直接查已装模块", Result, h_ro_Initialize, void) { LOG("init 接管：ro::Initialize（空操作）"); return 0; }
 

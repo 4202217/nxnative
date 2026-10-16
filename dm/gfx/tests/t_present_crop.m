@@ -1,12 +1,10 @@
-// 出图裁切回归：彩色8×8纹理，闭式RGBA期望；真实Metal渲染，不依赖游戏或跨局确定性。
 // Present crop regression: colored 8×8 texture, closed-form RGBA expectations; real Metal rendering, no dependence on the game or on cross-run determinism.
-// nvn_mtl.m 的 nvn_game_fps 是弱定义缺省值，hle_nvn.c 给强定义；两者进同一个编译单元就重定义，把弱的那份改名（本测试不看帧数档）
 // nvn_mtl.m's nvn_game_fps is a weak default and hle_nvn.c gives the strong definition; in one translation unit that is a redefinition, so the weak one is renamed (this test does not look at the frame-rate target)
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
 #include "../nvn/hle_nvn.c"
-uint64_t g_t0_ns;   // 宿主 main.c 的进程起点（hle_nvn 逐帧 @t_s 用），单测替身 | process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
+uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
@@ -32,13 +30,13 @@ static void check(id<MTLTexture> src, const char *name, const int crop[4], int w
     int bad=0;
     for(int y=0;y<h;y++)for(int x=0;x<w;x++) {
         int q=color;
-        if(q==4) { // 正方形有效区对2:1目标：两侧各4列黑，中间8列全红。 | square valid area onto a 2:1 target: 4 black columns on each side, the middle 8 columns all red.
+        if(q==4) { // square valid area onto a 2:1 target: 4 black columns on each side, the middle 8 columns all red.
             static const uint8_t black[4]={0,0,0,255};
             const uint8_t *want=x<4||x>=12?black:colors[0];bad+=memcmp(out+4*(y*w+x),want,4)!=0;continue;
         }
-        if(q==-2) { // crop=(1,1,4,4)：3×3红、末列绿、末行蓝、右下1格黄。 | crop=(1,1,4,4): 3×3 red, last column green, last row blue, bottom-right 1 cell yellow.
+        if(q==-2) { // crop=(1,1,4,4): 3×3 red, last column green, last row blue, bottom-right 1 cell yellow.
             q=(x+1>=4)+2*(y+1>=4);
-        } else if(q<0) { // 同尺寸默认整帧：分界在正中。 | same-size default whole frame: the boundary is dead center.
+        } else if(q<0) { // same-size default whole frame: the boundary is dead center.
             q=(x>=w/2)+2*(y>=h/2);
         }
         bad+=memcmp(out+4*(y*w+x),colors[q],4)!=0;
@@ -63,7 +61,7 @@ int main(void) { @autoreleasepool {
     check(src,"非零双偏移16像素逐字节等手写子矩形",inset,4,4,-2);
     check(src,"有效区比例保留，128像素中间红/两侧黑",tl,16,8,4);
 #ifndef CROP_LEGACY_HEADER
-    {   // sRGB 交换链：出图送原始字节（Switch 扫描输出口径），不先解码；不修时 128/64/200 解成约 55/13/148
+    {
         // sRGB swapchain: present sends the raw bytes (as the Switch's scan-out does) without decoding first; unfixed, 128/64/200 decode to about 55/13/148
         MTLTextureDescriptor *sd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm_sRGB width:8 height:8 mipmapped:NO];sd.storageMode=MTLStorageModeShared;sd.usage=MTLTextureUsageShaderRead;
         id<MTLTexture> s8=[g_dev newTextureWithDescriptor:sd];uint8_t g[8*8*4];
@@ -83,7 +81,6 @@ int main(void) { @autoreleasepool {
         id<MTLTexture> dst=[g_dev newTextureWithDescriptor:dd];
         EXPECT("无效crop不编码、不把整张拉伸冒充成功",0,ENCODE([g_q commandBuffer],src,dst,invalid[i]));
     }
-    // 真实QueuePresent入口：先设crop入队，再立即改window，出图票号必须保留当帧副本。
     // Real QueuePresent entry: set crop and enqueue first, then immediately change the window; the present ticket must keep that frame's copy.
     PFNNVNDEVICEGETPROCADDRESSPROC get=(PFNNVNDEVICEGETPROCADDRESSPROC)h_nvnBootstrapLoader("nvnDeviceGetProcAddress");
     NVNT_nvnWindowSetCrop set=(NVNT_nvnWindowSetCrop)get(NULL,"nvnWindowSetCrop");

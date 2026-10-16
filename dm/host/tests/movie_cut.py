@@ -1,5 +1,3 @@
-# 过场空播静态核对（hle_movie.c 头注释里的游戏侧协议）：在原映像上逐条核关键指令与虚表槽名，任一不符即红。
-# 用法：movie_cut.py <main.orig.bin> <subsdk0.orig.bin>      （.orig.bin 由 dm/tools/nso.py 从 ExeFS 生成）
 # Static check of cutscene no-op playback (the game-side protocol in the header comment of hle_movie.c): check the key instructions and vtable slot names one by one on the original image; any mismatch is a failure.
 # Usage: movie_cut.py <main.orig.bin> <subsdk0.orig.bin>      (.orig.bin is generated from ExeFS by dm/tools/nso.py)
 import struct, sys
@@ -8,7 +6,6 @@ main, sub = open(sys.argv[1], 'rb').read(), open(sys.argv[2], 'rb').read()
 md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
 def ins(a): i = next(md.disasm(main[a:a + 4], a)); return f'{i.mnemonic} {i.op_str}'
 
-# (偏移, 期望反汇编, 这条在链里的意义)——过场「按真实时长空播」所依赖的游戏侧协议（hle_movie.c 头注释）
 # (offset, expected disassembly, meaning of this instruction in the chain) -- the game-side protocol that cutscene "no-op playback for the real duration" (plays nothing but lasts the real duration) depends on (header comment of hle_movie.c)
 CHAIN = [
     (0x898ed0, 'mov w1, #0x10', 'Extractor 对象 0x10 字节：剪口把状态指针存在第二个字'),
@@ -51,7 +48,6 @@ for a, want, why in CHAIN:
     got = ins(a); ok = got == want; bad += not ok
     print(f'{"✓" if ok else "✗"} {a:#x}  {got:28s} {"" if ok else "期望 " + want}  {why}')
 
-# 虚表槽名（subsdk0 动态符号 + RELATIVE 重定位）：剪口虚表按这些槽号排
 # Vtable slot names (subsdk0 dynamic symbols + RELATIVE relocations): the cut vtable is ordered by these slot numbers
 m0 = struct.unpack_from('<I', sub, 4)[0]; dyn = m0 + struct.unpack_from('<i', sub, m0 + 4)[0]
 D = {}; o = dyn
@@ -62,7 +58,7 @@ while True:
 rel = {}
 for k in range(D[8] // 24):
     off, info, add = struct.unpack_from('<QQq', sub, D[7] + 24 * k)
-    rel[off] = add if info & 0xffffffff == 1027 else ('sym', info >> 32)   # RELATIVE 给地址；ABS64 / GLOB_DAT 给符号号 | RELATIVE gives an address; ABS64 / GLOB_DAT give a symbol number
+    rel[off] = add if info & 0xffffffff == 1027 else ('sym', info >> 32)   # RELATIVE gives an address; ABS64 / GLOB_DAT give a symbol number
 names, sym, symn = {}, {}, {}
 for k in range(1, (D[5] - D[6]) // 24):
     nm, info, oth, shn, val, sz = struct.unpack_from('<IBBHQQ', sub, D[6] + 24 * k)

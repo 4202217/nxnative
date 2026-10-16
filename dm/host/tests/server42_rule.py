@@ -1,5 +1,3 @@
-# disabled_bit_guard只测原位资格；人工局部内存fixture，不证明存活player控制锁的合法来源。
-# 执行原完整42 handler的输入合法性与分派；decoder/下游movement/致命日志为显式外围替身。
 # disabled_bit_guard only tests in-place eligibility; a hand-made local memory fixture, which does not prove the legitimate source of the control lock of a living player.
 # Executes the input validity checks and dispatch of the original full 42 handler; the decoder/downstream movement/fatal log are explicit peripheral stand-ins.
 import sys,struct

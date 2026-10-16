@@ -28,7 +28,7 @@ rel = {}
 for k in range(tags[8] // 24):                                   # DT_RELA = 7, DT_RELASZ = 8
     off, info, add = struct.unpack_from('<QQq', d, tags[7] + k * 24)
     if info & 0xffffffff == 1027: rel[off] = add                 # R_AARCH64_RELATIVE
-# DT_RELR（36 / 35，SDK 20 起）：加数在槽里；偶数项 = 起点，奇数项 = 其后 63 槽的位图 | DT_RELR (36 / 35, from SDK 20): the addend is in the slot; even entry = start, odd entry = bitmap of the next 63 slots
+# DT_RELR (36 / 35, from SDK 20): the addend is in the slot; even entry = start, odd entry = bitmap of the next 63 slots
 where = None
 for k in range(tags.get(35, 0) // 8):
     e = struct.unpack_from('<Q', d, tags[36] + k * 8)[0]

@@ -1,4 +1,3 @@
-# 逐通道 GPU：按帧内序号平均时间线增量 inc_ms；与 @gpu_ms 对照（列见 nvn_mtl.m DM_NVN_PASSGPU 注释）
 # Per-pass GPU: average the timeline increment inc_ms by in-frame index; compare against @gpu_ms (for the columns see the DM_NVN_PASSGPU comment in nvn_mtl.m)
 import sys, collections, statistics as S
 X=sys.argv[1]; F0=int(sys.argv[2]) if len(sys.argv)>2 else 300; N=int(sys.argv[3]) if len(sys.argv)>3 else 10

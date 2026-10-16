@@ -1,4 +1,3 @@
-// 实际dm_input_set→GetNpadState返回收样；假时钟只固定timestamp，不替换输入/返回布局。
 // The actual dm_input_set -> GetNpadState return takes the sample; the fake clock only fixes the timestamp and does not replace the input/return layout.
 #ifndef HLE_HID_SOURCE
 #define HLE_HID_SOURCE "../hle_hid.c"

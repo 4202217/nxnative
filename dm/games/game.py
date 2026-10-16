@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# 游戏档案：dm/games/<基础版标题号>/game.tsv（键 <TAB> 值…，# 开头为注释）+ 同目录的着色器表与 dmsh_chain.h。着色器工具、宿主构建、iOS 打包与 NSP 脚本都从这里取每个游戏的常数。
-# 用法：game.py list（列出全部档案）；game.py <名> <键>（打印该键的值，shell 用）；game.py header <名> <输出.h>（生成宿主的 game_profile.h）
-#   Python 里：import game; g = game.load()（取 DM_GAME，没有缺省游戏：不设就报错并列出档案）；game.by_title(标题号)；g.get / g.words / g.int / g.builds() / g.table(文件名)
 # Game profiles: dm/games/<base game title ID>/game.tsv (key <TAB> values..., lines starting with # are comments) + the shader tables and dmsh_chain.h in the same folder. The shader tools, the host build, iOS packaging and the NSP script take each game's constants from here.
 # Usage: game.py list (list all profiles); game.py <id> <key> (print that key's value, for shell); game.py header <id> <out.h> (generate the host's game_profile.h)
 #   From Python: import game; g = game.load() (takes DM_GAME; there is no default game: unset is an error that lists the profiles); game.by_title(title ID); g.get / g.words / g.int / g.builds() / g.table(file name)
@@ -9,7 +6,7 @@ import os, re, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-STAGES = {'vs': 0, 'ps': 1, 'gs': 2, 'hs': 3, 'ds': 4, 'cs': 5}   # NVN 着色器阶段号 | NVN shader stage numbers
+STAGES = {'vs': 0, 'ps': 1, 'gs': 2, 'hs': 3, 'ds': 4, 'cs': 5}   # NVN shader stage numbers
 
 
 class Game:
@@ -19,7 +16,7 @@ class Game:
             if not line.strip() or line.lstrip().startswith('#'): continue
             c = line.split('\t'); self.rows.append((c[0].strip(), [v.strip() for v in c[1:]]))
 
-    def values(self, key):   # 该键的每一行（build 等可重复的键） | every row of this key (keys such as build repeat)
+    def values(self, key):   # every row of this key (keys such as build repeat)
         return [v for k, v in self.rows if k == key]
 
     def get(self, key, default=None):
@@ -36,23 +33,23 @@ class Game:
     def title_id(self): return int(self.get('title_id'), 16)
 
     def builds(self):
-        """{版本: {'display': 显示版本, 模块名: 构建号, …}} | {version: {'display': display version, module name: build ID, ...}}"""
+        """{version: {'display': display version, module name: build ID, ...}}"""
         out = {}
         for ver, disp, *mods in self.values('build'):
             out[ver] = dict([('display', disp)] + [tuple(m.split('=', 1)) for m in mods])
         return out
 
-    def pairs(self, key):   # 「a=b c=d」→ [(a, b), (c, d)] | "a=b c=d" → [(a, b), (c, d)]
+    def pairs(self, key):   # "a=b c=d" → [(a, b), (c, d)]
         return [tuple(w.split('=', 1)) for w in self.words(key)]
 
 
 def load(name=None):
     name = name or os.environ.get('DM_GAME')
-    if not name:   # 没有缺省游戏 | there is no default game
+    if not name:   # there is no default game
         have = ', '.join(f'{g.id} ({g.get("name", "")})' for g in all_games())
         raise SystemExit(f'【红】没设 DM_GAME：用基础版标题号选游戏档案：{have} | DM_GAME is not set: pick a game profile by base game title ID: {have}')
     d = Path(name) if os.sep in str(name) else HERE / name
-    if not (d / 'game.tsv').exists():   # 档案目录以基础版标题号命名（旧名 smbw / fe_engage 已不用）| profile folders are named after the base game's title ID (the old names smbw / fe_engage are gone)
+    if not (d / 'game.tsv').exists():   # profile folders are named after the base game's title ID (the old names smbw / fe_engage are gone)
         have = ', '.join(f'{g.id} ({g.get("name", "")})' for g in all_games())
         raise SystemExit(f'【红】没有游戏档案 {d / "game.tsv"}（DM_GAME / GAME 用基础版标题号：{have}）| no game profile {d / "game.tsv"} (DM_GAME / GAME take the base game title ID: {have})')
     return Game(d)
@@ -67,23 +64,25 @@ def by_title(tid):
 
 
 def header(g):
-    """宿主的 game_profile.h：把档案里宿主要用的常数写成宏 | the host's game_profile.h: the profile constants the host uses, as macros"""
+    """the host's game_profile.h: the profile constants the host uses, as macros"""
     q = lambda s: '"' + s.replace('\\', '\\\\').replace('"', '\\"') + '"'
     mods = g.words('modules')
     ssbo = dict(g.pairs('nvn_ssbo_bases'))
     sb = ' : '.join(f'(stage) == {STAGES[k]} ? {v}' for k, v in ssbo.items()) + ' : -1'
     vers = ', '.join('{' + q(b['main']) + ', ' + q(b['display']) + '}' for b in g.builds().values() if 'main' in b)
-    pi = g.get('present_interval', 'game')   # 出图间隔：game = 按游戏设的（同 Switch），display = 每个显示节拍一帧 | present interval: game = as the game sets it (as on the Switch), display = one frame per display tick
+    pi = g.get('present_interval', 'game')   # present interval: game = as the game sets it (as on the Switch), display = one frame per display tick
     if pi not in ('game', 'display'): sys.exit(f'{g.id}: present_interval 只能是 game / display | present_interval must be game or display: {pi}')
-    cp = g.get('core_preempt', 'off')   # 同核抢占近似（hle_thread.c）：on / off | same-core preemption approximation (hle_thread.c): on / off
+    cp = g.get('core_preempt', 'off')   # same-core preemption approximation (hle_thread.c): on / off
     if cp not in ('on', 'off'): sys.exit(f'{g.id}: core_preempt 只能是 on / off | core_preempt must be on or off: {cp}')
-    sf = g.get('shared_font', 'bfttf')   # 共享字体地址处放什么（hle_sdk16.c）：bfttf = 8 字节头 + TTF，ttf = 只有 TTF | what the shared-font address points at (hle_sdk16.c): bfttf = 8-byte header + TTF, ttf = the TTF alone
+    sf = g.get('shared_font', 'bfttf')   # what the shared-font address points at (hle_sdk16.c): bfttf = 8-byte header + TTF, ttf = the TTF alone
     if sf not in ('bfttf', 'ttf'): sys.exit(f'{g.id}: shared_font 只能是 bfttf / ttf | shared_font must be bfttf or ttf: {sf}')
-    pl = g.get('pad_layout', 'simple')   # 虚拟手柄首次的布局（DmGamepad.m，之后按玩家在游戏里切的记）：simple = 2D，full = 3D（十字键、右摇杆、L3 / R3） | the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3)
+    pl = g.get('pad_layout', 'simple')   # the virtual gamepad's first layout (DmGamepad.m; afterwards whatever the player switched to in game is kept): simple = 2D, full = 3D (D-pad, right stick, L3 / R3)
     if pl not in ('simple', 'full'): sys.exit(f'{g.id}: pad_layout 只能是 simple / full | pad_layout must be simple or full: {pl}')
-    api = g.get('device_api', '55.15')   # nvnDeviceGetInteger 报的 NVN API 主.次版本（hle_nvn.c） | the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
+    fbs = g.words('feedback_snap', '')   # fragment shader key prefixes whose same-pass feedback sampling gets a snapshot first (nvn_mtl.m fb_prepare); none by default
+    if any(not re.fullmatch(r'[0-9a-f]{8,16}', k) for k in fbs): sys.exit(f'{g.id}: feedback_snap 要写片元着色器键（8–16 位小写十六进制）| feedback_snap takes fragment shader keys (8-16 lowercase hex digits): {fbs}')
+    api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api 要写成 主.次 | device_api must be major.minor: {api}')
-    L = [f'// 由 dm/games/game.py 从 dm/games/{g.id}/game.tsv 生成，勿手改 | Generated by dm/games/game.py from dm/games/{g.id}/game.tsv; do not edit',
+    L = [f'// Generated by dm/games/game.py from dm/games/{g.id}/game.tsv; do not edit',
          '#pragma once',
          f'#define DM_GAME_ID {q(g.id)}',
          f'#define DM_GAME_NAME {q(g.get("name"))}',
@@ -106,6 +105,7 @@ def header(g):
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',
          f'#define DM_GAME_SHARED_FONT_TTF {int(sf == "ttf")}',
          f'#define DM_GAME_PAD_FULL {int(pl == "full")}',
+         f'#define DM_GAME_FEEDBACK_SNAP {q(" ".join(fbs))}',
          f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}',
          f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}',
          '']

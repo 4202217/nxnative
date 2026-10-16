@@ -1,5 +1,3 @@
-// iOS 前端（front.h 的 iOS 实现）：16:9 的 Metal 视图居中（两侧留黑边）+ 全屏的虚拟手柄层（DmGamepad.m，按键叠在画面上）。
-// 宿主在 main.m 起的大栈线程上跑；front_run 直接在调用线程跑客体。
 // iOS front end (the iOS implementation of front.h): a centered 16:9 Metal view (black bars on both sides) + a full-screen virtual gamepad layer (DmGamepad.m, controls drawn over the picture).
 // The host runs on the big-stack thread started by main.m; front_run runs the guest directly on the calling thread.
 #import <UIKit/UIKit.h>
@@ -46,7 +44,7 @@ static CAMetalLayer *g_layer;
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
-    if (!front_ios_boot_ok()) {   // 没有游戏文件：给一句提示，不起宿主 | No game files: show a hint and do not start the host
+    if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
         lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         lb.numberOfLines = 0; lb.textAlignment = NSTextAlignmentCenter; lb.textColor = UIColor.whiteColor;
@@ -63,23 +61,23 @@ static CAMetalLayer *g_layer;
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    CGFloat w = b.size.width, h = b.size.height;   // 16:9 等比放进整屏 | Fit 16:9 into the whole screen
+    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen
     if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
     self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
 }
 - (void)viewDidAppear:(BOOL)a { [super viewDidAppear:a]; front_ios_boot(); }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
-- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // 边缘手势要滑两次，免得误触退出 | Edge gestures need two swipes, to avoid accidental exits
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
-uint64_t front_game_res(int docked) { return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280; }   // 同 Mac：原版 16:9 常数 | Same as Mac: the original 16:9 constants
-void front_run(void (*guest)(void)) { guest(); }   // 已在 main.m 的大栈线程上 | Already on main.m's big-stack thread
+uint64_t front_game_res(int docked) { return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280; }   // Same as Mac: the original 16:9 constants
+void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
 
-// 软键盘输入框：主线程弹 UIAlertController，调用线程等结果 | Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result
+// Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {
     (void)max_chars;
     if (!g_layer) return -1;
@@ -105,8 +103,6 @@ int front_text_input(const char *title, const char *sub, const char *guide, cons
     return 1;
 }
 
-// 存档写失败（多半是手机存储满了）：主线程弹提示，不挡游戏（取自 d2r-mobile 的做法）。hle_fs.c 在存档事务被拒、或挂载时只能改成只读时调；
-// 原先 iOS 前端没接，只有日志里一行，玩家不知道进度没存上
 // Save write failed (most likely the phone's storage is full): show a notice on the main thread without blocking the game (as d2r-mobile does). hle_fs.c calls this when a save transaction is refused or a mount has to fall back to read-only;
 // the iOS front end used not to implement it, so there was only a log line and the player never learned that progress was not being saved
 void front_save_failed(int err) {
@@ -124,9 +120,6 @@ void front_save_failed(int err) {
     });
 }
 
-// 音频会话：RemoteIO 每次回调要的帧数跟着 I/O 缓冲时长走，iOS 缺省约 21 ms（48 kHz 下 1024 帧）。游戏在途只有 4 块 × 5 ms = 20 ms，
-// 每次回调都差 1.3 ms、补零，每秒约 47 次断续（爆破音；Mac 上把回调改成 1024 帧可复现：2000 次回调欠载 1999 次）。要 5 ms，系统取它支持的最近值；
-// 类别仍是缺省的 SoloAmbient（静音键、打断其他 App 声音的行为不变）。启动时设一次，回前台再设（打断之后系统可能复原）
 // Audio session: the frames RemoteIO asks for in each callback follow the I/O buffer duration, about 21 ms by default on iOS (1024 frames at 48 kHz). The game keeps only 4 blocks × 5 ms = 20 ms in flight,
 // so every callback came up 1.3 ms short and was zero-filled, about 47 gaps per second (crackling; reproducible on the Mac by forcing 1024-frame callbacks: 1999 underruns in 2000 callbacks). Ask for 5 ms and the system picks the nearest it supports;
 // the category stays the default SoloAmbient (silent switch and interrupting other apps' audio behave as before). Set once at boot and again on return to the foreground (the system may reset it after an interruption)
@@ -139,7 +132,6 @@ void front_ios_audio_session(void) {
     LOG("音频会话：采样率 %.0f Hz，I/O 缓冲 %.2f ms（要 5 ms）", s.sampleRate, s.IOBufferDuration * 1000);
 }
 
-// 场景生命周期（main.m 的 SceneDelegate 调）：0 失活 1 进后台 2 回前台 3 激活。进后台时冻结客体时钟、等在途 GPU 完成后挂起（后台提交 GPU 会被系统杀）
 // Scene lifecycle (called by SceneDelegate in main.m): 0 resign active, 1 enter background, 2 return to foreground, 3 become active. On entering background, freeze the guest clock and suspend after in-flight GPU work completes (submitting GPU work in background gets the process killed)
 void front_ios_focus_event(int ev) {
     if (!g_layer) return;

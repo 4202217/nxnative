@@ -1,7 +1,3 @@
-// nninitInitializeSdkModule 调的服务层初始化：真机上各自连 Horizon 系统服务（IPC），宿主没有这些服务进程。
-// 原生接管：不建会话，直接返回；各服务的后续接口在用到时逐个接管成宿主实现（见同目录 hle_*.c）。
-// nn::os::InitializeVirtualAddressMemory 属 SDK 的 os 层，不接管；fs::SetLocalApplicationAccessLog /
-// SetResultHandledByApplication 只写 SDK 内部开关，不接管。
 // Service layer initialization called by nninitInitializeSdkModule: on the real device each connects to a Horizon system service (IPC), the host has no such service processes.
 // Native takeover: create no session, return directly; each service's later interfaces are taken over one by one as host implementations when they come into use (see hle_*.c in the same directory).
 // nn::os::InitializeVirtualAddressMemory belongs to the SDK's os layer and is not taken over; fs::SetLocalApplicationAccessLog /

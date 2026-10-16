@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-# main 的 NVN 取址表与静态调用面（3.3.94012）。
-# 1) 解析 main 里的 NVN 加载函数（按名字取址后逐个存进全局指针槽）→ 名字 → 槽；
-# 2) 全 .text 扫「ldr xT,[xN,#imm]」读槽：从读取点往回找 xN 的上一次写入，是 adrp 到槽页才算一次调用点。
-#    （前向寄存器跟踪会把陈旧值当槽地址、或漏掉循环外提的 adrp，两种都抽查出过错，故用回溯。）
-# 用法：nvn_slots.py <main 原映像 .bin（dm/tools/nso.py 解出）> <输出 tsv> [名字表输出]
-# 输出列：名字 槽地址 调用点数 首个调用点；名字表按槽地址（= 加载顺序）。
 # main's NVN address-lookup table and static call surface (3.3.94012).
 # 1) Parse the NVN loader function in main (looks up addresses by name and stores them one by one into global pointer slots) → name → slot;
 # 2) Scan all of .text for "ldr xT,[xN,#imm]" slot reads: search backward from the read for the previous write to xN; it only counts as a call site if that write is an adrp to the slot's page.
@@ -12,10 +6,10 @@
 # Usage: nvn_slots.py <main raw image .bin (extracted by dm/tools/nso.py)> <output tsv> [name table output]
 # Output columns: name, slot address, call site count, first call site; the name table is ordered by slot address (= load order).
 import struct, sys
-LOADER = 0x1739290                    # main 内 NVN 加载函数（3.3.94012；换版本先重新定位） | NVN loader function inside main (3.3.94012; re-locate it first when changing versions)
+LOADER = 0x1739290                    # NVN loader function inside main (3.3.94012; re-locate it first when changing versions)
 img, out = sys.argv[1], sys.argv[2]
 d = open(img, 'rb').read()
-TEXT_END = 0x1b786a0                  # main .text 尾（NSO 段头） | end of main .text (NSO segment header)
+TEXT_END = 0x1b786a0                  # end of main .text (NSO segment header)
 N = TEXT_END // 4
 w = struct.unpack_from('<%dI' % N, d, 0)
 
@@ -25,7 +19,6 @@ def adrp(x, pc):
     return (pc & ~0xfff) + (imm << 12)
 def cstr(a): return d[a:d.index(b'\0', a)].decode()
 
-# 1) 加载函数：adrp/add x1 = 名字，str x0,[xn,#imm] = 槽
 # 1) Loader function: adrp/add x1 = name, str x0,[xn,#imm] = slot
 i, reg, cur, slot = LOADER // 4, {}, None, {}
 while w[i] != 0xd65f03c0:
@@ -37,11 +30,11 @@ while w[i] != 0xd65f03c0:
 offs = {a & 0xfff for a in slot}
 
 def writes(x, r):
-    """x 是否写通用寄存器 r（近似、偏保守） | Whether x writes general-purpose register r (approximate, conservative)"""
+    """Whether x writes general-purpose register r (approximate, conservative)"""
     op0 = (x >> 25) & 0xf
     if x & 0xfc000000 == 0x94000000 or x & 0xfffffc1f == 0xd63f0000: return r <= 18   # bl / blr
-    if op0 in (0b1000, 0b1001, 0b0101, 0b1101): return (x & 31) == r                    # 数据处理 | data processing
-    if op0 & 0b0101 == 0b0100:                                                          # 读写内存 | memory load/store
+    if op0 in (0b1000, 0b1001, 0b0101, 0b1101): return (x & 31) == r                    # data processing
+    if op0 & 0b0101 == 0b0100:                                                          # memory load/store
         L = (x >> 22) & 1
         if (x >> 27) & 7 == 0b101:
             wb = (x >> 23) & 3 in (1, 3)
@@ -53,7 +46,6 @@ def writes(x, r):
         if (x >> 27) & 7 == 0b011: return (x & 31) == r
     return False
 
-# 2) 回溯归属每次读槽
 # 2) Attribute each slot read by tracing backward
 uses = {a: [] for a in slot}
 for i in range(N):

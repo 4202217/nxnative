@@ -1,9 +1,7 @@
-// 固定命令链实验：生产 mtl_exec，手写常量着色器和闭式期望；不含生产重排器。
-// G 完整模板块、M 小视图+复制、U 混合、R 模板 resolve；只交换 G/M。
 // Fixed command chain experiment: production mtl_exec, hand-written constant shaders and closed-form expectations; does not include the production reorderer.
 // G full stencil block, M small view + copy, U blend, R stencil resolve; only G/M are swapped.
 #include "../nvn/nvn_mtl.m"
-int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
@@ -36,7 +34,6 @@ static void rt(chain *c, const tex_t *t, unsigned lv, const tex_t *ds) {
     emit(c,OP_SET_RT,&r,sizeof r);
     p_viewports v={.n=1}; v.v[0][2]=v.v[0][3]=MAX(t->d.width>>lv,1u); emit(c,OP_VIEWPORTS,&v,sizeof v);
     c->width=(int)v.v[0][2];
-    // clear的剪裁覆盖基尺寸，兼容现有scissor_full；每次draw再显式取实际mip尺寸。
     // The clear's scissor covers the base size, compatible with the existing scissor_full; each draw then explicitly takes the actual mip size.
     p_scissor sc={0,0,(int)t->d.width,(int)t->d.height}; emit(c,OP_SCISSOR,&sc,sizeof sc);
 }
@@ -124,7 +121,7 @@ static uint64_t query_case(int reordered, int mode) {
     if(mode!=1) emit(&c,OP_RESET_COUNTER,&type,8);
     clear(&c,&b,0,NULL,0,0,0); draw_prog(&c,1,0);
     if(reordered) { clear(&c,&a,0,NULL,0,0,0); draw_prog(&c,0,0); }
-    if(mode==2) {   // 两块计数都在任何report之前被后继reset抹去；只报告新的4x4绘制。 | both blocks' counts are wiped by the subsequent reset before any report; only the new 4x4 draw is reported.
+    if(mode==2) {   // both blocks' counts are wiped by the subsequent reset before any report; only the new 4x4 draw is reported.
         emit(&c,OP_RESET_COUNTER,&type,8); clear(&c,&b,0,NULL,0,0,0); draw_prog(&c,1,0); }
     uint64_t report[2]={type,(uint64_t)q}; emit(&c,OP_REPORT_COUNTER,report,sizeof report); emit(&c,OP_END,NULL,0);
     state_reset(); memset(&R,0,sizeof R); vis_clear(); g_vis_on=g_vis_counting=0; mtl_sub_begin(); mtl_exec(c.p);
@@ -144,7 +141,6 @@ static void uniform_case(int reordered,uint8_t pixels[256]) {
     clear(&c,&b,0,NULL,0,0,0); draw_prog(&c,4,0); result r=execute(&c,&a,&b,&out,&e,NULL); save_result("UB写",reordered,&r); memcpy(pixels,r.a,256);
     uniform_pixels("UB更新后的第二绘制始终绿色",r.b,0,255,0,255); mtl_pool_del(mem); free(mem);
 }
-// view的可访问区间不能只看base：shader读相对第二级/第二层，G写该子资源。
 // A view's accessible range cannot be judged by base alone: the shader reads relative to the second level/second layer, and G writes that subresource.
 static void slice_rt(chain *c,const tex_t *t,int lv,int sl) {
     p_set_rt r={.n=1}; r.color[0]=t; r.has_cview[0]=1;
@@ -177,7 +173,6 @@ static result range_case(int array,int reordered) {
     EXPECT("G第二子资源逐像素蓝",0,bad); save_raw(array?"整slice写目标":"整mip写目标",reordered,buf.contents,w*w*4);
     return r;
 }
-// 附件不交仍会通过继承的程序产生依赖；只演示显式补齐program，不冒充完整S/R快照。
 // Disjoint attachments can still create a dependency through an inherited program; this only demonstrates explicitly filling in the program and does not pass itself off as a full S/R snapshot.
 static result state_case(int restored,int reordered) {
     tex_t a=texture(8,1,0),b=texture(8,1,0),out=texture(8,1,0),e=texture(8,1,0); chain c=make_chain();
@@ -199,7 +194,6 @@ static result exit_state_case(int restored,int reordered) {
     p_draw d={NVN_DRAW_PRIMITIVE_TRIANGLES,0,3}; emit(&c,OP_DRAW,&d,sizeof d);
     return execute(&c,&a,&b,&out,&e,NULL);
 }
-// 写掩码不交也不够：IncrementWrap的隐含读包含低位，低位清零会改变向bit1的进位。
 // Disjoint write masks are not enough either: the implicit read of IncrementWrap includes the low bits, and clearing the low bits changes the carry into bit1.
 static result stencil_carry_case(int reordered) {
     tex_t a=texture(8,1,0),b=texture(8,1,0),out=texture(8,1,0),e=texture(8,1,0),ds=texture(8,1,1); chain c=make_chain();
@@ -211,7 +205,6 @@ static result stencil_carry_case(int reordered) {
     mask.mask=0xffffffffu; state(&c,2,&mask,sizeof mask); rt(&c,&out,0,&ds); stencil(&c,1,NVN_STENCIL_FUNC_EQUAL,1,2,0,2); draw_prog(&c,7,0);
     return execute(&c,&a,&b,&out,&e,NULL);
 }
-// G写入藏在真实CALL/JUMP目标；跳转列表用跳回地址保持原执行路径与块内顺序。
 // The G write is hidden in a real CALL/JUMP target; the jump list uses return addresses to preserve the original execution path and in-block order.
 static result control_case(int jump,int reordered) {
     tex_t a=texture(8,1,0),b=texture(8,1,0),out=texture(8,1,0),e=texture(8,1,0); int tid=bind_view(&a,0);

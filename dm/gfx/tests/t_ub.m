@@ -1,5 +1,5 @@
 #include "../nvn/nvn_mtl.m"
-int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
@@ -7,9 +7,7 @@ void svc_thread_dump(void) {}
 uint64_t now_ns(void) { return bp_now(); }
 static int fail, count;
 #define EXPECT(name, want, got) do { long long w=(want), g=(got); count++; printf("%s 期望 %lld → 真结果 %lld %s\n", name, w, g, w==g?"OK":"FAIL"); if(w!=g) fail++; } while(0)
-int g_t_ub_var = 7, g_t_ub_var2 = -3;   // 被 @set 按符号名找到的全局变量 | global variables found by @set via symbol name
-// 同进程交替测量（DM_NVN_UB）的相位逻辑单测：不起渲染，只按帧号推进。
-// 配置：两类，每相 60 帧。相序 = 基准, a, 基准, b, 基准, a, …；a = 设 g_t_ub_var=5 且丢键 abcd…；b = 设 g_t_ub_var2=9 且丢全部（*）。
+int g_t_ub_var = 7, g_t_ub_var2 = -3;   // global variables found by @set via symbol name
 // Unit tests for the phase logic of same-process alternating measurement (DM_NVN_UB): no rendering is started, it only advances by frame number.
 // Configuration: two classes, 60 frames per phase. Phase order = baseline, a, baseline, b, baseline, a, ...; a = set g_t_ub_var=5 and drop keys abcd...; b = set g_t_ub_var2=9 and drop everything (*).
 int main(void) {
@@ -33,9 +31,8 @@ int main(void) {
         snprintf(nm, sizeof nm, "%s 丢别的键", T[ti].what); EXPECT(nm, T[ti].skip_other, ub_skip("9999888877776666"));
         ti++; }
     EXPECT("走完的检查点数", n, ti);
-    // 上屏间隔按相统计：相内第 45 帧起才计；三档界线 20.8 / 29.2 ms；−1 记丢弃
     // On-screen present intervals are tallied per phase: counted only from frame 45 of the phase on; boundaries of the three bands are 20.8 / 29.2 ms; −1 is recorded as discarded
-    for (int f = 480; f < 480 + 45; f++) { mtl_set_frame((uint64_t)f); mtl_ub_present(16.7); }   // 过渡段：不计 | transition segment: not counted
+    for (int f = 480; f < 480 + 45; f++) { mtl_set_frame((uint64_t)f); mtl_ub_present(16.7); }   // transition segment: not counted
     EXPECT("过渡段不计", 0, atomic_load(&g_ubp_c[0]));
     mtl_set_frame(480 + 45); mtl_ub_present(16.7); mtl_ub_present(25.0); mtl_ub_present(25.0); mtl_ub_present(33.3); mtl_ub_present(-1); mtl_ub_present(0);
     EXPECT("16.7 ms 档", 1, atomic_load(&g_ubp_c[0])); EXPECT("25 ms 档", 2, atomic_load(&g_ubp_c[1])); EXPECT("≥33 ms 档", 1, atomic_load(&g_ubp_c[2])); EXPECT("丢弃", 1, atomic_load(&g_ubp_c[3]));

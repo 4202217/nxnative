@@ -1,8 +1,3 @@
-// NVN 贴图的存储尺寸 / 对齐 / 各级偏移（Tegra X1 块线性布局）。
-// 算法移植自 deko3d source/dk_image.cpp（zlib 许可，Copyright (C) 2018-2020 fincs）：
-//   一个 GOB = 64 字节 × 8 行 = 512 字节；块高（tileH，单位 GOB）按「高度×1.5」挑；各级按块对齐累加。
-// 游戏的预排布贴图（SetPackagedTextureLayout）带 8 字节布局参数：第 0 字节 = 块高 log2（真游戏 16 例对照得出，
-// 其中 4 例与自动算法不同），有它时以它为准。
 // Storage size / alignment / per-level offsets of NVN textures (Tegra X1 block-linear layout).
 // The algorithm is ported from deko3d source/dk_image.cpp (zlib license, Copyright (C) 2018-2020 fincs):
 //   one GOB = 64 bytes × 8 rows = 512 bytes; the block height (tileH, in GOBs) is picked by 'height×1.5'; levels are accumulated with block alignment.
@@ -10,12 +5,12 @@
 // 4 of which differ from the automatic algorithm); when present it takes precedence.
 #include "nvn_tex.h"
 
-typedef struct { uint8_t bpb, bw, bh; } fmt_t;   // 每块字节、块宽、块高（非压缩格式块宽高 = 1） | Bytes per block, block width, block height (for uncompressed formats block width and height = 1)
+typedef struct { uint8_t bpb, bw, bh; } fmt_t;   // Bytes per block, block width, block height (for uncompressed formats block width and height = 1)
 
 static fmt_t fmt_of(int f) {
     static const uint8_t astc[14][2] = {{4,4},{5,4},{5,5},{6,5},{6,6},{8,5},{8,6},{8,8},{10,5},{10,6},{10,8},{10,10},{12,10},{12,12}};
     if (f >= 0x79 && f <= 0x94) { int k = (f - 0x79) % 14; return (fmt_t){16, astc[k][0], astc[k][1]}; }
-    if (f >= 0x41 && f <= 0x50) {                         // DXT / RGTC / BPTC：4×4 块 | DXT / RGTC / BPTC: 4×4 blocks
+    if (f >= 0x41 && f <= 0x50) {                         // DXT / RGTC / BPTC: 4×4 blocks
         int b8 = (f <= 0x42) || (f == 0x45 || f == 0x46) || (f == 0x49 || f == 0x4A);
         return (fmt_t){b8 ? 8 : 16, 4, 4};
     }
@@ -44,13 +39,12 @@ static unsigned adj_tile(unsigned shift, uint32_t unit, uint32_t dim) {
     return shift;
 }
 
-// target：NVNtextureTarget；dims 维数、是否分层由 target 决定
 // target: NVNtextureTarget; the number of dims and whether it is layered are determined by target
 static void shape(const nvn_texdesc *d, unsigned *dpl, int *layered, uint32_t *w, uint32_t *h, uint32_t *z) {
     *w = d->width; *h = d->height; *z = d->depth; *layered = 0;
     switch (d->target) {
         case 0: *dpl = 1; *h = 1; *z = 1; break;                       // 1D
-        case 3: *dpl = 1; *z = d->height; *h = 1; *layered = 1; break; // 1D_ARRAY（层数在 height） | 1D_ARRAY (layer count is in height)
+        case 3: *dpl = 1; *z = d->height; *h = 1; *layered = 1; break; // 1D_ARRAY (layer count is in height)
         case 2: *dpl = 3; break;                                        // 3D
         case 4: case 6: *dpl = 2; *layered = 1; break;                  // 2D_ARRAY / MS_ARRAY
         case 8: *dpl = 2; *z = 6; *layered = 1; break;                  // CUBEMAP
@@ -93,7 +87,7 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
         o->layer_size = o->size = (uint64_t)t.bpb * d->width;
         o->align = t.bpb == 12 ? 4 : t.bpb; return;
     }
-    if (d->flags & 0x10) {                                            // LINEAR：行距 = stride 或按 32 对齐 | LINEAR: row pitch = stride or aligned to 32
+    if (d->flags & 0x10) {                                            // LINEAR: row pitch = stride or aligned to 32
         o->align = (d->flags & 0x40) ? 128 : 32;
         uint32_t stride = d->stride ? d->stride : (t.bpb * blk(w, t.bw) + o->align - 1) & ~(o->align - 1);
         o->layer_size = o->size = (uint64_t)stride * blk(h, t.bh);
@@ -105,7 +99,7 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
     o->tileH = tileH; o->tileD = tileD;
     unsigned levels = d->levels ? d->levels : 1;
     uint64_t ls = level_offset(d, levels, dpl, w, h, z, tileH, tileD, t);
-    if (layered) {                                                    // 层尺寸按块对齐 | Layer size is aligned to the block
+    if (layered) {                                                    // Layer size is aligned to the block
         uint32_t hh = blk(h, t.bh); unsigned th = tileH, td = tileD;
         while (th && hh <= (8u << (th - 1))) th--;
         while (td && z <= (1u << (td - 1))) td--;

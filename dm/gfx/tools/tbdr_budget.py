@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-# 每帧附件带宽预算表（目标 120 帧、≤ 20 GB/s → 每帧 ≤ 170 MB）：从 DM_NVN_PASSDUMP 的一帧数据流按通道列读入 / 写回 MB，
-# 按两者之和从大到小排。读入按 P 行 load 计（clear / dontcare 不计）；写回按 P 行的附件计、扣掉 Z 行判 dontcare 的（写回前瞻）。
-# 合一深度模板格式（fmt 260 = Depth32Float_Stencil8）按深度 4 + 模板 1 字节拆：d 行记深度平面，s 行（只挂模板）记模板平面。
-# 纹理采样读取（补列，粗估）：
-#   全屏类通道（绘制顶点数 ≤ 6 且绘制 ≤ 3 次；绘制次数取 PASSDUMP_ALL 的 d 行，没有就取片元程序绑定行数）：每个被采样的绑定视图按 min(绑定视图整张字节, 目标像素数 × 每纹素字节)；
-#   几何类通道：目标像素数 × 通道内片元着色器声明的贴图槽数（取最大）× 被采样贴图的平均每纹素字节（每像素每槽约采一次，材质贴图有 mip）。
-#   贴图格式与尺寸取同帧同通道每个描述符的 B 行（同一序号可绑定不同级 / 层的视图），查不到按 4 字节；槽数取 B 库反射 json。
-# 用法：tbdr_budget.py <含 PASSDUMP 的日志> [帧号（缺省取第一帧）] [预算 MB=170] [--tsv=全量表路径]
-# TSV 不截前 25 名 / 着色器键；带逐次绘制来源、未知贴图分母与合并通道备注。纹理列始终是绑定模型粗估，不是外存实测。
 # Per-frame attachment bandwidth budget table (target 120 fps, ≤ 20 GB/s → ≤ 170 MB per frame): from one frame of the DM_NVN_PASSDUMP data stream, list load / store MB per pass,
 # sorted by their sum in descending order. Load is counted from P rows with load (clear / dontcare not counted); store is counted from the P rows' attachments, minus those the Z rows judge dontcare (store lookahead).
 # Combined depth-stencil formats (fmt 260 = Depth32Float_Stencil8) are split as depth 4 + stencil 1 bytes: d rows record the depth plane, s rows (stencil-only attachment) record the stencil plane.
@@ -27,13 +18,13 @@ TBPP = {10: 1, 20: 2, 25: 2, 30: 2, 53: 4, 55: 4, 60: 4, 65: 8, 70: 4, 71: 4, 80
         130: .5, 131: .5, 132: 1, 133: 1, 134: 1, 135: 1, 140: .5, 141: .5, 142: 1, 143: 1, 150: 1, 151: 1, 152: 1, 153: 1, 250: 2, 252: 4, 255: 4, 260: 4}
 texinfo = collections.defaultdict(dict); sampled = collections.defaultdict(set); tgt = {}; maxvc = collections.defaultdict(int); ndraw = collections.defaultdict(int); fskeys = collections.defaultdict(set); fused = set(); att_desc = collections.defaultdict(list)
 import os, json; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import dmsh_chain
-DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # 工作区根目录（游戏文件、产物、运行现场都在它下面） | Workspace root (game files, build outputs and run artifacts are all under it)
+DM_ROOT = os.environ.get('DM_ROOT') or os.path.expanduser('~/dm-work')   # Workspace root (game files, build outputs and run artifacts are all under it)
 LIB = os.path.join(DM_ROOT, 'build/cache/metal_shader_cache/b-{dmsh_chain.version()}')
 def tex_slots(key):
     try: return sum(1 for b in json.load(open(f'{LIB}/{key}_b.json'))['bindings'] if b.get('kind') in ('tex', 'samp_tex'))
     except Exception: return 4
 nm = {}
-for ln in open(dmsh_chain.GAME.table('shader_map.tsv')):   # 当前游戏档案的映射表 | the current game profile's map
+for ln in open(dmsh_chain.GAME.table('shader_map.tsv')):   # the current game profile's map
     c = ln.rstrip('\n').split('\t')
     if len(c) > 4 and c[0].endswith('.bin'): nm.setdefault(c[3], c[0][:-4])
 for l in open(log, errors='replace'):
@@ -66,22 +57,22 @@ for l in open(log, errors='replace'):
     elif k == 'F' and '合并下一个通道' in r: fused.add(p)
     elif k == 'K' and ' st1 ' in f' {r} ':
         key = r.split('key=')[1].split()[0].replace('_b', ''); shader[p][nm.get(key, key[:8])] += 1; fskeys[p].add(key)
-    elif k in ('D', 'd'):   # d 行（PASSDUMP_ALL）每次绘制一行，可数绘制次数；D 行只有每通道第一次 | d rows (PASSDUMP_ALL) are one per draw, so draws can be counted; D rows only have the first of each pass
+    elif k in ('D', 'd'):   # d rows (PASSDUMP_ALL) are one per draw, so draws can be counted; D rows only have the first of each pass
         v = re.search(r'vc=(\d+)', r)
         if v: maxvc[p] = max(maxvc[p], int(v.group(1)))
         if k == 'd': ndraw[p] += 1
-ALLD = any(ndraw.values())   # 有逐次绘制行时按绘制次数分类，否则按片元程序绑定行数（只记首次时会把多次小方块误判成全屏类） | classify by draw count when per-draw rows exist, otherwise by the number of fragment program binding rows (when only the first is recorded, many small quads are misclassified as fullscreen class)
+ALLD = any(ndraw.values())   # classify by draw count when per-draw rows exist, otherwise by the number of fragment program binding rows (when only the first is recorded, many small quads are misclassified as fullscreen class)
 rows = []
 for p, e in P.items():
     ld = sum(b for *_, b, act in e['att'] if act == 'load')
     st = sum(b for slot, ser, lv, sl, b, act in e['att'] if (p, slot[0], ser, lv, sl) not in dead)
     px = tgt.get(p, 0); tx = 0
     nd = ndraw[p] if ALLD else sum(shader[p].values())
-    if maxvc[p] <= 6 and nd <= 3:   # 全屏类（绘制顶点 ≤ 6 且绘制 ≤ 3 次；UI 等多次小方块按几何类算） | fullscreen class (draw vertices ≤ 6 and ≤ 3 draws; many small quads such as UI count as geometry class)
+    if maxvc[p] <= 6 and nd <= 3:   # fullscreen class (draw vertices ≤ 6 and ≤ 3 draws; many small quads such as UI count as geometry class)
         for ser in sampled[p]:
             for tid, f, w, h, dd in texinfo[p].get(ser, {(-1, None, 0, 0, 1)}):
                 tx += min(w * h * dd * TBPP.get(f, 4), px * TBPP.get(f, 4)) if f is not None else px * 4
-    elif sampled[p]:    # 几何类 | geometry class
+    elif sampled[p]:    # geometry class
         bp = [TBPP.get(v[1], 4) for s_ in sampled[p] for v in texinfo[p].get(s_, ())] or [4]
         tx = px * max([tex_slots(k_) for k_ in fskeys[p]] or [4]) * (sum(bp) / len(bp))
     rows.append((ld + st + tx, ld, st, tx, p, ' '.join(f'{slot}:{ser}' + (f'/lv{lv}' if lv else '') for slot, ser, lv, sl, b, act in e['att']), ', '.join(shader[p])[:40]))

@@ -1,4 +1,3 @@
-# 只执行原GetStat之后的客户端STA门/规则跳板；末端用明确STOP替身，不验证原getter或真实Move速度。
 # Executes only the client STA gate/rule trampoline after the original GetStat; the end uses an explicit STOP stand-in, and neither the original getter nor the real Move speed is verified.
 import sys,struct
 from pathlib import Path

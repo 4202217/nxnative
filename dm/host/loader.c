@@ -1,5 +1,3 @@
-// 多模块装载（扮演 Horizon 的 rtld）：映射、占线程槽、门登记、跨模块重定位、按名接管、段权限。
-// 代码区（原 text 与补丁区）一拷进来就设成只读+执行，此后装载器只写 data：iOS 上这两块要作为签名代码段原样内嵌。
 // Multi-module loading (playing the role of Horizon's rtld): mapping, claiming thread slots, gate registration, cross-module relocation, take-over by name, segment permissions.
 // The code area (original text and patch area) is set to read-only+execute as soon as it is copied in, and from then on the loader only writes data: on iOS these two blocks must be embedded as is as signed code segments.
 #include "dm.h"
@@ -15,7 +13,7 @@
 module_t g_mod[MAX_MOD];
 int g_nmod;
 pthread_key_t g_key18, g_keytls, g_keytlr, g_keygate;
-pthread_key_t g_keyres[2], g_keyaspect, g_keyaspectui;   // g_keyaspect：宽高比上限参数位（KASPECT）          // 分辨率参数位（改写器 PARAMS，KRES0 掌机 / KRES1 主机）；产物没有即 0、不占 | g_keyaspect: aspect ratio upper-limit parameter slot (KASPECT)          // resolution parameter slots (rewriter PARAMS, KRES0 handheld / KRES1 docked); 0 and not allocated if the build output lacks them
+pthread_key_t g_keyres[2], g_keyaspect, g_keyaspectui;   // g_keyaspect: aspect ratio upper-limit parameter slot (KASPECT)          // resolution parameter slots (rewriter PARAMS, KRES0 handheld / KRES1 docked); 0 and not allocated if the build output lacks them
 enum { KEY_K18, KEY_KTLS, KEY_KTLR, KEY_KGATE, KEY_KRES0, KEY_KRES1, KEY_KASPECT, KEY_KASPECTUI, KEY_N };
 
 uint64_t resolve_import(module_t *m, const char *name);
@@ -31,7 +29,6 @@ static pthread_key_t key_value(unsigned i) {
 static void create_keys(void) {
     if (pthread_key_create(&g_key18, NULL) || pthread_key_create(&g_keytls, NULL) ||
         pthread_key_create(&g_keytlr, NULL) || pthread_key_create(&g_keygate, NULL)) die("创建宿主键失败");
-    // 参数位键一律建（不按产物有没有用到判断：iOS 包里没有 params.tsv，按文件判断会漏建、键页写成 0 → 游戏读到 TSD 0 号槽）
     // Parameter slot keys are always created (not decided by whether the build output uses them: an iOS app has no params.tsv, so deciding by file would miss creating them and the key page would be written as 0 → the game reads TSD slot 0)
     if (pthread_key_create(&g_keyres[0], NULL) || pthread_key_create(&g_keyres[1], NULL) ||
         pthread_key_create(&g_keyaspect, NULL) || pthread_key_create(&g_keyaspectui, NULL)) die("创建参数位键失败");
@@ -39,7 +36,6 @@ static void create_keys(void) {
         g_key18, g_keytls, g_keytlr, g_keygate, g_keyres[0], g_keyres[1], g_keyaspect, g_keyaspectui);
 }
 
-// K 槽校验：pthread TSD 布局固定，槽 = tpidrro_el0 + 8*key
 // K slot check: the pthread TSD layout is fixed, slot = tpidrro_el0 + 8*key
 static void tsd_check(void) {
     pthread_setspecific(g_key18, (void *)0x1234);
@@ -72,8 +68,6 @@ static void *module_sym_linear(module_t *m, const char *name) {
     }
     return NULL;
 }
-// 符号名哈希表：按下标升序插入、同名已在则不覆盖 ⇒ 查询结果与线性扫描（首个已定义同名符号）逐条相同。
-// ① 宿主装载 91–99 ms 里重定位 + 强制接管占 77–86 ms，主因是每条按名解析的重定位都线性扫两个模块的符号表
 // Symbol name hash table: inserted in ascending index order, not overwritten if the same name is already there ⇒ lookup results are identical, entry by entry, to a linear scan (the first defined symbol with that name).
 // Of the 91–99 ms of ① host loading, relocation + forced take-over took 77–86 ms, mainly because every by-name relocation scanned the symbol tables of two modules linearly
 static uint32_t sym_hash(const char *s) { uint32_t h = 2166136261u; while (*s) h = (h ^ (uint8_t)*s++) * 16777619u; return h; }
@@ -85,7 +79,7 @@ static void build_symhash(module_t *m) {
         const char *nm = m->strtab + s->st_name;
         for (unsigned j = sym_hash(nm) & m->symh_mask;; j = (j + 1) & m->symh_mask) {
             if (!m->symh[j]) { m->symh[j] = i; break; }
-            if (!strcmp(m->strtab + m->symtab[m->symh[j]].st_name, nm)) break;   // 同名已有更小下标：保留它 | The same name already exists with a smaller index: keep that one
+            if (!strcmp(m->strtab + m->symtab[m->symh[j]].st_name, nm)) break;   // The same name already exists with a smaller index: keep that one
         }
     }
 }
@@ -107,7 +101,6 @@ void *guest_sym(const char *name) {
     for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return p; }
     return NULL;
 }
-// 补丁区在首址前的模块（patch_off < 0）也认补丁区里的地址，与补丁区在映像后的模块一致（崩溃报告、GC 暂停判断「在客体代码里」）
 // For modules with the patch area before the base (patch_off < 0) addresses in the patch area count too, as for modules whose patch area follows the image (crash reports, the GC pause's "in guest code" test)
 module_t *module_of(const void *p) {
     for (int i = 0; i < g_nmod; i++) {
@@ -118,14 +111,12 @@ module_t *module_of(const void *p) {
     return NULL;
 }
 
-// 跨模块符号解析：先在已装模块里找定义，找不到再交给 HLE / 桩
 // Cross-module symbol resolution: first look for a definition in the loaded modules, and only if not found hand over to HLE / stubs
 static uint64_t resolve_sym(module_t *m, const char *name) {
     for (int i = 0; i < g_nmod; i++) { void *p = module_sym(&g_mod[i], name); if (p) return (uint64_t)p; }
     return resolve_import(m, name);
 }
 
-// 强制接管表（hle.h HLE_FORCE，__DATA,swforce 段）：命中即覆盖模块内定义
 // Forced take-over table (hle.h HLE_FORCE, the __DATA,swforce section): a hit overrides the definition inside the module
 static const hle_force_ent *g_force; static unsigned g_nforce; static unsigned *g_force_hits;
 static void force_init(void) {
@@ -140,11 +131,10 @@ static void *force_lookup(const char *name) {
     for (unsigned i = 0; i < g_nforce; i++)
         if (!strcmp(g_force[i].name, name)) {
             if (!g_force_hits[i]++ && g_flag.imports) LOG("force %s  （%s）", name, g_force[i].why);
-            void *hlecount_wrap(const char *, const char *, void *); return hlecount_wrap("FORCE", name, g_force[i].fn);   // DM_HLECOUNT 时为计数桩 | A counting stub when DM_HLECOUNT is set
+            void *hlecount_wrap(const char *, const char *, void *); return hlecount_wrap("FORCE", name, g_force[i].fn);   // A counting stub when DM_HLECOUNT is set
         }
     return NULL;
 }
-// 通用宿主：清单服务多个游戏，某作没引用的条目只记一笔；DM_FORCE_STRICT=1 时照旧报红中止（核对清单写错用）
 // Generic host: the list serves several games, so entries a game does not reference are only noted; with DM_FORCE_STRICT=1 it still fails loudly (for checking a mistyped list)
 static void force_check(void) {
     unsigned unused = 0; int strict = getenv("DM_FORCE_STRICT") != NULL;
@@ -154,7 +144,6 @@ static void force_check(void) {
     LOG("force: %u 条命中，%u 条本作没引用", g_nforce - unused, unused);
 }
 
-// 读改写器表头（段边界、槽号）；表头以外有任何行即旧版产物（装载期改代码），拒绝
 // Read the rewriter table header (segment boundaries, slot numbers); any row beyond the header means an old-format build output (code modified at load time), which is rejected
 static void read_layout(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.fixups.tsv", dir, m->name);
@@ -164,7 +153,7 @@ static void read_layout(module_t *m, const char *dir) {
     char line[256], key[32]; unsigned long v; unsigned seen = 0;
     while (fgets(line, sizeof line, f)) {
         if (sscanf(line, "# %31s %lx", key, &v) != 2) die("%s: 产物是旧改写器出的，换成当前代号（dm/PRODUCT）的产物", path);
-        if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // 可为负（补丁区在首址前） | may be negative (patch area before the base)
+        if (!strcmp(key, "PATCH_OFF")) m->patch_off = strtoll(line + 2 + strlen(key), NULL, 16);   // may be negative (patch area before the base)
         else if (!strcmp(key, "IMAGE_SIZE")) m->image_size = v;
         else if (!strcmp(key, "FILE_IMAGE_LEN")) m->file_image_len = v;
         else if (!strcmp(key, "KEY_PAGE_OFF")) m->key_page_off = v;
@@ -211,9 +200,6 @@ static void register_gates(module_t *m, const char *dir) {
     LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
 }
 
-// DT_RELR（SDK 20 起，塞尔达传说 旷野之息 1.9.0 的三个模块都有）：相对重定位的紧凑表，加数就在槽里（*槽 += 基址）。
-// 每项 8 字节：偶数 = 新起点偏移（重定位它，指针移到下一槽）；奇数 = 位图，第 1–63 位依次对应起点后的 63 个槽，用完指针前进 63 槽。
-// 不处理时 main 的 GOT 与虚表全是模块内偏移（main 的 RELA 里只剩符号重定位）
 // DT_RELR (from SDK 20; all three modules of The Legend of Zelda: Breath of the Wild 1.9.0 have it): a compact table of relative relocations with the addend in the slot (*slot += base).
 // Each 8-byte entry: even = a new start offset (relocate it, the pointer moves to the next slot); odd = a bitmap whose bits 1-63 stand for the 63 slots after the pointer, which then moves on by 63 slots.
 // Without it main's GOT and vtables hold module offsets (main's RELA keeps only symbol relocations)
@@ -251,9 +237,6 @@ static void relocate(module_t *m) {
             if (type == R_AARCH64_RELATIVE) { *where = (uint64_t)m->base + r->r_addend; cnt[0]++; continue; }
             const Elf64_Sym *s = &m->symtab[si];
             uint64_t v = (uint64_t)force_lookup(m->strtab + s->st_name);
-            // 本模块自己有定义的符号也按装载顺序全局查（ELF 缺省语义，Horizon 的 rtld 同样）：先装的模块的定义覆盖后装的，局部 / 非缺省可见性的才绑自己。
-            // Engage 的 main 自定义 operator new / delete（Unity 的内存管理器），sdk 也有一份（转 malloc / free）：原先 sdk 绑自己的 delete，
-            // main 的 new 出来的块被 sdk 里 libc++ 的 string 释放进 SDK 堆，CentralHeap::Free 报 NotNMallocPtr
             // Symbols the module defines itself are also looked up globally in load order (the ELF default; Horizon's rtld does the same): the definition of an earlier-loaded module overrides a later one; only local / non-default visibility binds to itself.
             // Engage's main defines its own operator new / delete (Unity's memory manager) and sdk has a copy too (forwarding to malloc / free): previously sdk bound its own delete,
             // so blocks from main's new were freed by sdk's libc++ string code into the SDK heap, and CentralHeap::Free reported NotNMallocPtr
@@ -271,9 +254,6 @@ static void relocate(module_t *m) {
     if (nint > 8) LOG("%s: 共 %d 处绑到先装模块的定义 | %d bound to an earlier module's definition in all", m->name, nint, nint);
 }
 
-// DM_LOADHASH=1（诊断）：装载完逐模块出地址无关 sha256，证「提前起跑 / 不提前」装载结果逐字节相同。
-// 模块基址与宿主 ASLR 每局不同，只有重定位槽的值随之变：复制映像，按同一张重定位表把每个槽换成与地址无关的记号——
-// RELATIVE → (0, 加数)；符号目标落在某模块 → (1 + 模块号, 模块内偏移)；否则（宿主强制接管 / 宿主符号）→ (名字 FNV, 加数)；其余字节原样。
 // DM_LOADHASH=1 (diagnostics): after loading, output an address-independent sha256 per module, to prove that the load results of "early start / no early start" are byte-identical.
 // Module base addresses and host ASLR differ every run, and only the values of the relocation slots change with them: copy the image and, using the same relocation table, replace every slot with an address-independent token --
 // RELATIVE → (0, addend); symbol target falls in some module → (1 + module number, offset within the module); otherwise (host forced take-over / host symbol) → (name FNV, addend); all other bytes as is.
@@ -289,7 +269,7 @@ void loader_hash_log(void) {
             case DT_JMPREL: jmprel = d->d_un.d_ptr; break; case DT_PLTRELSZ: pltsz = d->d_un.d_val; break;
             case DT_RELR: relr = d->d_un.d_ptr; break; case DT_RELRSZ: relrsz = d->d_un.d_val; break;
         }
-        // DT_RELR 槽：减回基址即与地址无关（在副本上做，复用 relr_apply 的走法）| DT_RELR slots: subtracting the base makes them address-independent (done on the copy, reusing relr_apply's walk)
+        // DT_RELR slots: subtracting the base makes them address-independent (done on the copy, reusing relr_apply's walk)
         if (relr) { uint8_t *b = m->base; m->base = cp; relr_apply(m, relr, relrsz, -(uint64_t)b); m->base = b; }
         const Elf64_Rela *tabs[2] = {(const Elf64_Rela *)(m->base + rela), (const Elf64_Rela *)(m->base + jmprel)};
         uint64_t sizes[2] = {relasz, pltsz}; unsigned nslot = 0;
@@ -302,11 +282,11 @@ void loader_hash_log(void) {
                     if (!hit) { const char *nm = m->strtab + m->symtab[ELF64_R_SYM(r->r_info)].st_name; uint64_t h = 0xcbf29ce484222325ull;
                                 for (; *nm; nm++) h = (h ^ (uint8_t)*nm) * 0x100000001b3ull; tok[0] = h | 1ull << 63; }
                 }
-                memcpy(cp + r->r_offset, &tok[0], 8);                // 槽 8 字节换成记号头；记号尾在下面按槽序追加 | The 8 slot bytes are replaced by the token head; the token tail is appended below in slot order
+                memcpy(cp + r->r_offset, &tok[0], 8);                // The 8 slot bytes are replaced by the token head; the token tail is appended below in slot order
                 nslot++;
             }
         CC_SHA256_CTX c; CC_SHA256_Init(&c); CC_SHA256_Update(&c, cp, (CC_LONG)m->size);
-        for (int t = 0; t < 2; t++)                                // 记号尾（加数 / 偏移）按槽序追加，与槽头一起唯一确定槽值 | Token tails (addend / offset) are appended in slot order, and together with the slot head uniquely determine the slot value
+        for (int t = 0; t < 2; t++)                                // Token tails (addend / offset) are appended in slot order, and together with the slot head uniquely determine the slot value
             for (uint64_t i = 0; i < sizes[t] / sizeof(Elf64_Rela); i++) {
                 const Elf64_Rela *r = &tabs[t][i]; uint64_t tail = (uint64_t)r->r_addend;
                 if (ELF64_R_TYPE(r->r_info) != R_AARCH64_RELATIVE) {
@@ -322,10 +302,6 @@ void loader_hash_log(void) {
 }
 
 #if TARGET_OS_IPHONE
-// iOS 不许运行时装入的代码执行，且苹果只许可执行文件有一个带执行权限的段（ITMS-90999）：映像由 dm/ios/tools/gen_embed.py 编进本可执行文件——
-// 代码两块（原 text、补丁区）是 __TEXT 里的节，W（ro 余部 + data + bss）是单独的 RW 段。三块在文件里不相邻；这里保留一块连续地址，
-// 按原相对位置 vm_remap 回去：代码页 copy=FALSE（与 __TEXT 共享同一批已签名页，r-x），W copy=TRUE（写时复制，用到才分页）。
-// 运行时布局与原映像逐字节相同。iOS 上把已签名页 remap 到新地址再执行，libffi 的跳板表（FFI_EXEC_TRAMPOLINE_TABLE）就是这么做的
 // iOS does not allow code loaded at run time to execute, and Apple allows an executable only one segment with execute permission (ITMS-90999): the image is compiled into this executable by dm/ios/tools/gen_embed.py --
 // the two code blocks (original text, patch area) are sections in __TEXT, and W (the rest of ro + data + bss) is a separate RW segment. The three blocks are not adjacent in the file; here one contiguous address range is reserved,
 // and they are vm_remap'ed back at their original relative positions: code pages with copy=FALSE (sharing the same signed pages with __TEXT, r-x), W with copy=TRUE (copy-on-write, paged only when used).
@@ -338,8 +314,6 @@ static void remap_at(module_t *m, vm_address_t to, const void *from, unsigned lo
     if ((cur & need) != need) die("%s vm_remap 后权限 %#x，缺 %#x", m->name, cur, need);
 }
 #ifdef DM_SHELL
-// 壳（ios/tools/shell_build.sh 出的、不含任何游戏内容的 App）：模块映像不在主可执行文件里，在使用者自己用游戏文件做出来的
-// Frameworks/Guest.framework/Guest 里——一个只装段的动态库（dm/tools/guest_dylib.py 写出），节名与内嵌做法相同，下面只换一个映像头去取。
 // Shell (the App built by ios/tools/shell_build.sh, containing no game content at all): the module images are not in the main executable but in the
 // Frameworks/Guest.framework/Guest that users build themselves from their game files -- a dynamic library that holds only segments (written by dm/tools/guest_dylib.py), with the same section names as the embedded approach; below only the image header to fetch from is swapped.
 #include <dlfcn.h>
@@ -363,7 +337,6 @@ static void map_image(module_t *m, const char *dir) {
     unsigned long z0, zw, z1;
     const uint8_t *x0 = getsectiondata(IMAGE_MH, "__TEXT", sx0, &z0), *w = getsectiondata(IMAGE_MH, dm, "__img", &zw), *x1 = getsectiondata(IMAGE_MH, "__TEXT", sx1, &z1);
     if (!x0 || !w || !x1) die("内嵌节 %s / %s / %s 缺失", sx0, dm, sx1);
-    // 补丁区在首址前（patch_off < 0）：W 只到 data 尾（FILE_IMAGE_LEN），bss 与键页是 vm_allocate 给的零页，不进可执行文件
     // Patch area before the base (patch_off < 0): W ends at the end of data (FILE_IMAGE_LEN); bss and the key page are zero pages from vm_allocate and are not in the executable
     int front = m->patch_off < 0;
     if (z0 + zw != (front ? m->file_image_len : (uint64_t)m->patch_off) || (z0 & 0x3FFF) || (zw & 0x3FFF) || (z1 & 0x3FFF) || ((uintptr_t)x0 & 0x3FFF) || ((uintptr_t)w & 0x3FFF) || ((uintptr_t)x1 & 0x3FFF))
@@ -389,15 +362,12 @@ static uint8_t *slurp(const char *path, size_t *n) {
     close(fd); *n = st.st_size; return p;
 }
 
-// 拷入匿名页后立即封代码区（页 16 KB）：[0, text_end) 与补丁区只读+执行，此后对代码区的任何写入都会当场崩；
-// 之间（ro 与 data 同页只能一起）可写
 // Seal the code area immediately after copying into anonymous pages (16 KB pages): [0, text_end) and the patch area are read-only+execute, and from then on any write to the code area crashes on the spot;
 // what lies between (ro and data on the same page can only go together) is writable
 static void map_image(module_t *m, const char *dir) {
     char path[1024]; snprintf(path, sizeof path, "%s/%s.patched.bin", dir, m->name);
     size_t sz; uint8_t *raw = slurp(path, &sz);
     if (m->patch_off < 0) {
-        // 补丁区在首址前：文件 = 映像前段（text + ro + data）+ 补丁区；bss 与键页是匿名零页。补丁区尾到首址之间不映射（PROT_NONE）
         // Patch area before the base: file = the first part of the image (text + ro + data) + patch area; bss and the key page are anonymous zero pages. The gap from the patch area's end to the base is left inaccessible (PROT_NONE)
         uint64_t pre = (uint64_t)-m->patch_off, fl = m->file_image_len;
         if (sz < fl) die("%s 比 FILE_IMAGE_LEN %#llx 短", path, (unsigned long long)fl);
@@ -425,8 +395,6 @@ static void map_image(module_t *m, const char *dir) {
 #endif
 
 void load_modules(const char *dir, const char **names, int n) {
-    // 先全部映射并解析符号表，再统一重定位（跨模块符号要先都在位）
-    // DM_BOOTPROF：① 宿主装载细分（毫秒），定 ③ 预重定位 / mmap 的上限
     // Map everything and parse the symbol tables first, then relocate all at once (cross-module symbols must all be in place first)
     // DM_BOOTPROF: breakdown of ① host loading (milliseconds), to set the upper bound for ③ pre-relocation / mmap
     uint64_t t0 = now_ns(), tm = 0, tp = 0, tg = 0, tr = 0, t;
@@ -438,7 +406,7 @@ void load_modules(const char *dir, const char **names, int n) {
     create_keys();
     for (int i = 0; i < n; i++) {
         module_t *m = &g_mod[i];
-        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // 返回时代码区已是只读+执行，此后装载器只写 data | On return the code area is already read-only+execute; from here on the loader only writes data
+        t = now_ns(); map_image(m, dir); tm += now_ns() - t;   // On return the code area is already read-only+execute; from here on the loader only writes data
         if (!i) tsd_check();
         t = now_ns(); parse_dynamic(m); tp += now_ns() - t;
         t = now_ns(); register_gates(m, dir); tg += now_ns() - t;
@@ -448,14 +416,12 @@ void load_modules(const char *dir, const char **names, int n) {
     force_init();
     t = now_ns(); for (int i = 0; i < g_nmod; i++) relocate(&g_mod[i]); tr = now_ns() - t;
     force_check();
-    { void hlecount_seal(void); hlecount_seal(); }   // DM_HLECOUNT：重定位完成，计数桩页封成只读可执行 | DM_HLECOUNT: relocation done, seal the counting stub pages as read-only executable
+    { void hlecount_seal(void); hlecount_seal(); }   // DM_HLECOUNT: relocation done, seal the counting stub pages as read-only executable
     if (getenv("DM_SYMCHECK")) LOG("DM_SYMCHECK：装载期共核 %lu 次符号查询，哈希与线性不一致 %lu", g_symchk_n, g_symchk_bad);
     if (g_flag.bootprof) LOG("① 细分：映射（读 + 拷 + 封页）%.1f ms、解析动态段 %.1f ms、门注册 %.1f ms、重定位 + 强制接管 %.1f ms，合计 %.1f ms",
                              tm / 1e6, tp / 1e6, tg / 1e6, tr / 1e6, (now_ns() - t0) / 1e6);
 }
 
-// 扮演 rtld 的 InitModules（rtld+0x830）：按装载链表正序调各模块 DT_INIT。
-// 时机由 nn::init::Start 决定：nninitStartup 与 _init_libc2 之后、nnMain 之前（Start 的第 4 个参数回调）。
 // Plays the role of rtld's InitModules (rtld+0x830): call each module's DT_INIT in forward order of the load list.
 // The timing is decided by nn::init::Start: after nninitStartup and _init_libc2, before nnMain (the 4th argument callback of Start).
 void run_module_inits(void) {

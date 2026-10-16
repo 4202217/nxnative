@@ -1,4 +1,3 @@
-# 通用移动分派索引点的独立规则测试；入口已经过原null/type5门，终点为明确替身，不验证真实路径。
 # Independent rule test of the generic movement dispatch index point; the entry has already passed the original null/type5 gate, the end point is an explicit stand-in, and the real path is not verified.
 import sys,struct
 from pathlib import Path

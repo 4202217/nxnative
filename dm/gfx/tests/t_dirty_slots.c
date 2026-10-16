@@ -58,13 +58,12 @@ int main(void) {
         munmap(live[i], 4096);
     }
 
-    // 相邻的池共用宿主页（池 4 KB 对齐，宿主页 16 KB）：SMBW 的 ASTC 贴图池首页与前一个小池共页，曾被判成未跟踪、每次取用都重传
     // Adjacent pools sharing a host page (pools are 4 KB aligned, host pages 16 KB): the first page of SMBW's ASTC texture pool is shared with a small preceding pool, and was judged untracked and re-uploaded on every use
     size_t pg = (size_t)getpagesize();
     uint8_t *blk = mmap(NULL, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (blk == MAP_FAILED) { perror("mmap"); exit(2); }
-    uint8_t *pa = blk, *pb = blk + pg - 0x1000;           // 池 A 占首页前部，池 B 从首页最后 4 KB 起 | pool A covers the start of page 0, pool B starts in the last 4 KB of page 0
-    size_t na = pg - 0x1000, nb = 2 * pg, tex = pg + 0x800;   // B 里的贴图跨共用页与下一页 | the texture in B spans the shared page and the next one
+    uint8_t *pa = blk, *pb = blk + pg - 0x1000;           // pool A covers the start of page 0, pool B starts in the last 4 KB of page 0
+    size_t na = pg - 0x1000, nb = 2 * pg, tex = pg + 0x800;   // the texture in B spans the shared page and the next one
     nvn_dirty_add_range(pa, na);
     nvn_dirty_add_range(pb, nb);
     EXPECT("共页的后一个池里的贴图在跟踪", 1, nvn_dirty_tracked(pb, tex));
@@ -75,11 +74,11 @@ int main(void) {
     EXPECT("游戏写共页里 B 的部分：B 的贴图脏", 1, nvn_dirty_since(pb, tex, stamp));
     nvn_dirty_protect(pb, tex);
     stamp = nvn_dirty_now();
-    pa[0x10] = 4;   // 同一物理页，A 的部分：页已只读，缺页要由 B 的区间认领，否则当成崩溃 | same physical page, A's part: the page is read-only, the fault must be claimed through B's range or it is treated as a crash
+    pa[0x10] = 4;   // same physical page, A's part: the page is read-only, the fault must be claimed through B's range or it is treated as a crash
     EXPECT("游戏写共页里 A 的部分：B 的贴图保守判脏", 1, nvn_dirty_since(pb, tex, stamp));
     nvn_dirty_protect(pb, tex);
     stamp = nvn_dirty_now();
-    dm_guest_write_prepare(pa, 0x20); pa[0x20] = 5;   // 宿主替 GPU 写 A：共页也要解开 B 的保护 | the host writes A on behalf of the GPU: the shared page must also release B's protection
+    dm_guest_write_prepare(pa, 0x20); pa[0x20] = 5;   // the host writes A on behalf of the GPU: the shared page must also release B's protection
     EXPECT("宿主写前解保护共页：B 的贴图脏", 1, nvn_dirty_since(pb, tex, stamp));
     nvn_dirty_remove_range(pb);
     EXPECT("销 B 后 A 仍在跟踪（按池起点认区间）", 1, nvn_dirty_tracked(pa, na));

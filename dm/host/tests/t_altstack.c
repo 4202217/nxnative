@@ -1,4 +1,3 @@
-// 单测（crash.c 备用栈随线程释放）：起 2000 个短命线程各调 crash_thread_init，期望堆不随线程数增长（每线程调 2 次，各 64 KiB；修前实测泄漏 250 MiB）
 // Unit test (crash.c alternate stack is freed with the thread): start 2000 short-lived threads each calling crash_thread_init, and expect the heap not to grow with the thread count (2 calls per thread, 64 KiB each; before the fix a 250 MiB leak was measured)
 #include <pthread.h>
 #include <stdio.h>

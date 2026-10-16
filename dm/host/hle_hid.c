@@ -1,6 +1,3 @@
-// nn::hid（手柄）：真机经 hid 服务读共享内存；宿主从前端写入的当前状态取（Mac 键盘 / 手柄，iOS 虚拟手柄 / 手柄）。
-// 与游戏无关的通用版：一台标准手柄。DM_OPMODE=0（掌机）→ 掌机手柄（Npad 号 0x20）；否则 → 1P 全键手柄（号 0）。
-// 震动、六轴、鼠标、键盘：宿主不提供（设备数 0 / 未连接）；手柄小程序直接报「1 人、已选当前手柄」。
 // nn::hid (controller): on the real device shared memory is read through the hid service; the host takes the current state written by the front end (Mac keyboard / controller, iOS virtual gamepad / controller).
 // Generic, game-independent version: one standard controller. DM_OPMODE=0 (handheld) → handheld controller (Npad id 0x20); otherwise → 1P full-key controller (id 0).
 // Vibration, six-axis, mouse, keyboard: not provided by the host (device count 0 / not connected); the controller applet reports "1 player, current controller selected".
@@ -15,16 +12,13 @@
 enum { NPAD_NO1 = 0, NPAD_HANDHELD = 0x20 };
 enum { STYLE_FULLKEY = 1u << 0, STYLE_HANDHELD = 1u << 1, STYLE_JOYDUAL = 1u << 2, STYLE_JOYLEFT = 1u << 3, STYLE_JOYRIGHT = 1u << 4 };
 enum { ATTR_CONNECTED = 1u << 0, ATTR_WIRED = 1u << 1, ATTR_LEFT_CONN = 1u << 2, ATTR_LEFT_WIRED = 1u << 3, ATTR_RIGHT_CONN = 1u << 4, ATTR_RIGHT_WIRED = 1u << 5 };
-// 摇杆方向伪键（NpadButton 16..23）：由摇杆值导出，阈值约半程
 // Stick direction pseudo-buttons (NpadButton 16..23): derived from the stick values, threshold about half travel
 enum { STICK_THRESH = 0x4000 };
 
-// nn::hid::NpadFullKeyState / Handheld / JoyDual / JoyLeft / JoyRight 布局相同（0x28）
 // nn::hid::NpadFullKeyState / Handheld / JoyDual / JoyLeft / JoyRight share one layout (0x28)
 typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attributes, _pad; } NpadState;
 _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 
-// 前端发布：键盘 / 触屏一路（dm_input_set）与实体手柄一路（dm_pad_set）按位或；按下沿锁存到游戏下一次取，短按不漏
 // Front-end publishing: the keyboard / touch path (dm_input_set) and the physical controller path (dm_pad_set) are ORed; press edges are latched until the game's next read so short presses are not lost
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_pad_btn, g_pad_axes, g_pad_latch;
 static _Atomic int64_t g_sampling;
@@ -38,9 +32,6 @@ void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
-// DM_KEYS 脚本输入（测试用）："秒:键[+键][~按住秒][*次数/间隔秒],…"，例 "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2"（40 s 起每 2 s 按一次 A，共 80 次）。键名 A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down，左摇杆 LLeft LUp LRight LDown；
-//   缺省按住 0.15 s，最多 1024 步（重复展开后计）。走手柄那一路（dm_pad_set），与键盘 / 触屏按位或，不互相覆盖。时间从宿主启动算起。
-//   时间前加 f 表示出图帧号（"f7600:A"，间隔也按帧计）：机器忙时秒数与游戏进度对不上，帧号对得上（塞尔达传说 旷野之息开局走位用）
 // DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown;
 //   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start.
 //   An f before the time means a presented frame number ("f7600:A", and the repeat interval counts frames too): when the machine is busy seconds drift from the game's progress, frame numbers do not (used for the Zelda BotW opening route)
@@ -69,7 +60,7 @@ void hid_keys_init(void) {
         char *h = strchr(c + 1, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
         for (char *k = c + 1; k && *k;) { char *plus = strchr(k, '+'); if (plus) *plus = 0;
             int found = 0; for (int b = 0; b < 16; b++) if (!strcasecmp(k, names[b])) { st.btn |= 1ull << b; found = 1; }
-            // 左摇杆推到底：LLeft LUp LRight LDown（地图走动只认摇杆的游戏用，如超级马力欧 3D 世界） | left stick fully pushed: LLeft LUp LRight LDown (for games that move on the map by stick only, such as Super Mario 3D World)
+            // left stick fully pushed: LLeft LUp LRight LDown (for games that move on the map by stick only, such as Super Mario 3D World)
             static const char *const sticks[4] = {"LLeft", "LUp", "LRight", "LDown"};
             static const int sx[4] = {-32767, 0, 32767, 0}, sy[4] = {0, 32767, 0, -32767};
             for (int d = 0; d < 4; d++) if (!strcasecmp(k, sticks[d])) { if (sx[d]) st.lx = sx[d]; if (sy[d]) st.ly = sy[d]; found = 1; }
@@ -81,15 +72,15 @@ void hid_keys_init(void) {
 }
 
 static uint32_t connected_id(void) { return dm_opmode() == 0 ? NPAD_HANDHELD : NPAD_NO1; }
-uint32_t hle_hid_connected_npad(void) { return connected_id(); }   // nfp 的 NFC 设备挂在这个手柄上（hle_sdk16.c） | nfp's NFC device sits on this controller (hle_sdk16.c)
+uint32_t hle_hid_connected_npad(void) { return connected_id(); }   // nfp's NFC device sits on this controller (hle_sdk16.c)
 static uint32_t style_of(uint32_t id) { return id != connected_id() ? 0 : id == NPAD_HANDHELD ? STYLE_HANDHELD : STYLE_FULLKEY; }
 static int32_t ax(uint64_t v, int i) { return (int16_t)(v >> (16 * i)); }
-static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // 两路里偏得多的那个 | whichever of the two paths is deflected more
+static int32_t pick(int32_t a, int32_t b) { return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b; }   // whichever of the two paths is deflected more
 
 static void fill(NpadState *s, uint32_t id, uint32_t style) {
     memset(s, 0, sizeof *s);
     s->sampling = atomic_fetch_add(&g_sampling, 1) + 1;
-    if (!(style_of(id) & style)) return;   // 这个号 / 样式没接手柄：attributes = 0 | no controller of this id / style: attributes = 0
+    if (!(style_of(id) & style)) return;   // no controller of this id / style: attributes = 0
     uint64_t b = atomic_load(&g_btn) | atomic_exchange(&g_latch, 0) | atomic_load(&g_pad_btn) | atomic_exchange(&g_pad_latch, 0);
     uint64_t k = atomic_load(&g_axes), p = atomic_load(&g_pad_axes);
     s->lx = pick(ax(k, 0), ax(p, 0)); s->ly = pick(ax(k, 1), ax(p, 1)); s->rx = pick(ax(k, 2), ax(p, 2)); s->ry = pick(ax(k, 3), ax(p, 3));
@@ -105,7 +96,6 @@ static void fill(NpadState *s, uint32_t id, uint32_t style) {
     s->buttons = b;
     s->attributes = ATTR_CONNECTED | (id == NPAD_HANDHELD ? ATTR_WIRED | ATTR_LEFT_CONN | ATTR_LEFT_WIRED | ATTR_RIGHT_CONN | ATTR_RIGHT_WIRED : ATTR_LEFT_CONN | ATTR_RIGHT_CONN);
 }
-// GetNpadStates(out, n, id)：返回写入条数，新的在前。宿主不保留历史：只给 1 条当前状态（调用方按返回数处理）
 // GetNpadStates(out, n, id): returns the number written, newest first. The host keeps no history: only 1 current state (callers handle the returned count)
 static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <= 0) return 0; fill(out, id, style); return 1; }
 
@@ -127,34 +117,27 @@ HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", "Joy-Con 单持；�
 HLE_FORCE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", "交换手柄号；宿主忽略", void, h_hid_Swap, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid21StartLrAssignmentModeEv", "L/R 分配模式；宿主忽略", void, h_hid_LrStart, void) {}
 HLE_FORCE("_ZN2nn3hid20StopLrAssignmentModeEv", "L/R 分配模式；宿主忽略", void, h_hid_LrStop, void) {}
-// 手柄小程序（系统 UI）：直接报「1 人、选中当前手柄」。ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
 // Controller applet (system UI): report "1 player, current controller selected" directly. ControllerSupportResultInfo = { int playerCount; uint32_t selectedId; }
 HLE_FORCE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", "手柄小程序；宿主直接报已选好",
           Result, h_hid_ShowCtrl, int32_t *info, const void *arg) { (void)arg; if (info) { info[0] = 1; info[1] = (int32_t)connected_id(); } return RES_OK; }
-// 六轴：给出句柄，但读不到状态（0 条）
 // Six-axis: handles are handed out, but no states can be read (0 entries)
 HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "六轴句柄",
           int, h_hid_SixHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) { (void)style; int k = n < 2 ? n : 2; for (int i = 0; i < k; i++) h[i] = (*id << 8) | (uint32_t)i; return k; }
 HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴；宿主不提供", void, h_hid_SixStart, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", "六轴状态；宿主不提供（0 条）",
           int, h_hid_SixStates, void *out, int n, const uint32_t *h) { (void)out; (void)n; (void)h; return 0; }
-// 震动：没有设备
 // Vibration: no devices
 HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "震动许可；宿主不支持", unsigned, h_hid_VibPermit, void) { return 0; }
 HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "震动设备：0 个",
           int, h_hid_VibHandles, void *h, int n, const uint32_t *id, uint32_t style) { (void)h; (void)n; (void)id; (void)style; return 0; }
 HLE_FORCE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", "震动；宿主不支持", void, h_hid_InitVib, const void *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", "震动；宿主不支持", void, h_hid_SendVib, const void *h, const void *v) { (void)h; (void)v; }
-// 震动图（VibrationNode::Update）攒下的值经 sdk 内部的 FlushEnqueuedVibrationValues 走 PLT 调它，进 hid 服务代理（sm 中止）。银河战士 生存恐惧
-// 宿主报 0 个设备时也给 VibrationTarget 设句柄，所以会攒值；返回成功，flush 照常清零计数
 // Values queued by the vibration graph (VibrationNode::Update) reach it from the sdk's internal FlushEnqueuedVibrationValues through the PLT, into the hid service proxy (sm abort). Metroid Dread
 // sets handles on its VibrationTargets even when the host reports 0 devices, so values get queued; return success and the flush clears its count as usual
 HLE_FORCE("_ZN2nn3hid6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", "震动（批量，震动图 flush 用）；宿主不支持", Result, h_hid_SendVibs, const void *h, const void *v, int n) { (void)h; (void)v; (void)n; return 0; }
-// 鼠标 / 键盘：未连接
 // Mouse / keyboard: not connected
 HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "鼠标；宿主不提供", void, h_hid_InitMouse, void) {}
 HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "鼠标状态：0 条", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
-// 单条（十三机兵防卫圈每帧调；没接管时 sdk 里没初始化的鼠标资源中止）：MouseState 0x28 字节 {采样号 i64, x, y, dx, dy, 滚轮 dx, dy, 按键, 属性}，属性 0 = 未连接
 // Single state (13 Sentinels calls it every frame; without the hook the sdk aborts on its uninitialized mouse resource): MouseState is 0x28 bytes {sampling number i64, x, y, dx, dy, wheel dx, dy, buttons, attributes}; attributes 0 = not connected
 HLE_FORCE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", "鼠标状态：未连接（MouseState 0x28 字节清零）", void, h_hid_MouseState, void *s) {
     memset(s, 0, 0x28); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;
@@ -164,8 +147,6 @@ HLE_FORCE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", "键盘状态：
     memset(s, 0, 0x30); ((int64_t *)s)[0] = atomic_fetch_add(&g_sampling, 1) + 1;
 }
 
-// ---------- SDK 12 的接口（Engage）：单条 GetNpadState、模式查询 / 设置、触屏、手势、六轴细项、手柄颜色等 ----------
-// 原版这些都读 hid 共享内存或走 hid 服务；宿主没有共享内存，按上面同一份前端状态作答。只改游戏自己缓冲的库函数（震动文件解析 / 生成、ControllerSupportArg 的 SetDefault / SetExplainText）留在 SDK 原样跑
 // ---------- SDK 12 interfaces (Engage): single GetNpadState, mode queries / setters, touch screen, gestures, six-axis details, controller colors, etc. ----------
 // In the original all of these read hid shared memory or go through the hid service; the host has no shared memory and answers from the same front-end state as above. Library functions that only modify the game's own buffers (vibration file parse / generate, ControllerSupportArg SetDefault / SetExplainText) keep running in the SDK
 HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", "全键手柄当前状态", void, h_hid_StateFullKey, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_FULLKEY); }
@@ -188,7 +169,7 @@ HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "合并单 Joy-Con；宿
 HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "手柄样式变化事件：绑定、永不触发", void, h_hid_BindStyleEv,
           const uint32_t *id, void *ev, int clear) { (void)id; hle_bind_system_event(ev, clear); }
 HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "玩家灯：1 号灯", uint8_t, h_hid_Led, const uint32_t *id) { (void)id; return 1; }
-// 手柄颜色 NpadControllerColor = { 主色 RGBA, 按键色 RGBA }：给灰底黑键 | NpadControllerColor = { main RGBA, button RGBA }: grey body, black buttons
+// NpadControllerColor = { main RGBA, button RGBA }: grey body, black buttons
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", "手柄颜色", Result, h_hid_Color, uint32_t *c, const uint32_t *id) { (void)id; ctrl_color(c); return RES_OK; }
 HLE_FORCE("_ZN2nn3hid22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", "左右 Joy-Con 颜色", Result, h_hid_Color2, uint32_t *l, uint32_t *r, const uint32_t *id) { (void)id; ctrl_color(l); ctrl_color(r); return RES_OK; }
@@ -196,7 +177,6 @@ HLE_FORCE("_ZN2nn3hid21ShowControllerSupportERKNS0_20ControllerSupportArgE", "�
 HLE_FORCE("_ZN2nn3hid24ShowControllerStrapGuideEv", "腕带说明小程序；宿主不显示", Result, h_hid_Strap, void) { return RES_OK; }
 HLE_FORCE("_ZN2nn3hid28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", "手柄固件更新小程序；宿主不显示", Result, h_hid_FwUpd, const void *arg) { (void)arg; return RES_OK; }
 
-// 触屏：TouchScreenState<N> = { int64 采样号; int32 点数; int32 保留; TouchState[N] }。先报 0 个触点（只写头 16 字节）
 // Touch screen: TouchScreenState<N> = { int64 sampling number; int32 count; int32 reserved; TouchState[N] }. Report 0 touch points for now (only the 16-byte header is written)
 static void touch_head(void *s) { int64_t *p = s; p[0] = atomic_fetch_add(&g_sampling, 1) + 1; ((int32_t *)s)[2] = 0; ((int32_t *)s)[3] = 0; }
 HLE_FORCE("_ZN2nn3hid21InitializeTouchScreenEv", "连 hid 触屏；宿主暂报无触点", void, h_hid_InitTouch, void) {}
@@ -207,11 +187,10 @@ TOUCH(1) TOUCH(2) TOUCH(3) TOUCH(4) TOUCH(5) TOUCH(6) TOUCH(7) TOUCH(8) TOUCH(9)
 HLE_FORCE("_ZN2nn3hid17InitializeGestureEv", "手势；宿主不提供", void, h_hid_InitGesture, void) {}
 HLE_FORCE("_ZN2nn3hid16GetGestureStatesEPNS0_12GestureStateEi", "手势状态：0 条", int, h_hid_Gestures, void *out, int n) { (void)out; (void)n; return 0; }
 
-// 六轴细项：静止、未开融合；SixAxisSensorState 0x60 字节清零（attributes = 0：未连接） | Six-axis details: at rest, fusion off; SixAxisSensorState 0x60 bytes zeroed (attributes = 0: not connected)
+// Six-axis details: at rest, fusion off; SixAxisSensorState 0x60 bytes zeroed (attributes = 0: not connected)
 HLE_FORCE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴；宿主不提供", void, h_hid_SixStop, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", "六轴当前状态：未连接", void, h_hid_SixState, void *s, const uint32_t *h) { (void)h; memset(s, 0, 0x60); }
 HLE_FORCE("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", "六轴静止：是", unsigned, h_hid_SixRest, const uint32_t *h) { (void)h; return 1; }
-// 主机自带的六轴（SevenSixAxisSensor，掌机模式下的机身姿态；塞尔达传说 旷野之息）：要工作缓冲、经 hid 服务开关。宿主不提供：开关成功、状态 0 条
 // The console's own six-axis sensor (SevenSixAxisSensor, the body's orientation in handheld mode; The Legend of Zelda: Breath of the Wild): takes a work buffer and is switched through the hid service. The host provides none: switching succeeds, 0 states
 HLE_FORCE("_ZN2nn3hid28InitializeSevenSixAxisSensorEPvm", "机身六轴初始化；宿主不提供", Result, h_hid_SevenInit, void *buf, size_t n) { (void)buf; (void)n; return RES_OK; }
 HLE_FORCE("_ZN2nn3hid26FinalizeSevenSixAxisSensorEv", "机身六轴", Result, h_hid_SevenFini, void) { return RES_OK; }
@@ -227,6 +206,6 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
 HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "六轴融合参数；宿主忽略", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "六轴融合参数；宿主忽略", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "六轴固件更新：无", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
-// 震动设备信息 / 实际值：没有设备，清零 | Vibration device info / actual value: no device, zeroed
+// Vibration device info / actual value: no device, zeroed
 HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", "震动设备信息：无", void, h_hid_VibInfo, uint32_t *info, const void *h) { (void)h; info[0] = 0; info[1] = 0; }
 HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "实际震动值：0", void, h_hid_VibActual, float *v, const void *h) { (void)h; memset(v, 0, 16); }

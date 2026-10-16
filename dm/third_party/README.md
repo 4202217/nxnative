@@ -1,7 +1,5 @@
 # dm/third_party: third-party code
 
-中文: [README.zh-CN.md](README.zh-CN.md)
-
 This is code written by others, shipped with the repository so there is nothing to download. Each component keeps its original license, and the license file sits in its own directory.
 
 | Directory | What it is | Version and changes | Where it is used | License file |

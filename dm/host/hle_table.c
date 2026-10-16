@@ -1,4 +1,3 @@
-// libc 直通表：与 AAPCS64 一致、无结构布局依赖的 C 库函数，直接接苹果 libc。进 swhle 段。
 // libc passthrough table: C library functions consistent with AAPCS64 and with no struct layout dependency, connected directly to Apple libc. Goes into the swhle section.
 #include "dm.h"
 #include <math.h>

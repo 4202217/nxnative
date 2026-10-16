@@ -1,6 +1,3 @@
-// 联网与系统周边服务（排除范围：联机、本地无线、好友、遥测、SSL）在较新 SDK 上的接口：一律做成「不可用」，游戏走离线分支。
-// 只接会走服务的入口；只读写游戏自己缓冲的库函数（prepo 的 Add / Array / Struct、err 的 ErrorResultVariant、friends 的取值函数、socket 的字节序转换）留在 SDK 原样跑。
-// 返回约定同 hle_friends.c：Result 回 RES_FAIL（「已保存 / 已提交」类回 RES_OK 免得游戏重试）；bool 回假；事件给已绑定、永不触发的 SystemEvent。
 // Networking and peripheral system services (out of scope: online play, local wireless, friends, telemetry, SSL) as seen through newer SDKs: all made "unavailable", the game takes its offline branch.
 // Only entry points that go to a service are hooked; library functions that only read and write the game's own buffers (prepo Add / Array / Struct, err ErrorResultVariant, friends getters, socket byte-order conversion) keep running in the SDK.
 // Return convention as in hle_friends.c: Result returns RES_FAIL ("saved / submitted" kinds return RES_OK so the game does not retry); bool returns false; events get a bound SystemEvent that never fires.
@@ -8,18 +5,15 @@
 
 static _Alignas(16) uint8_t g_ev_ldn[0x100];
 
-// ---------- prepo：遥测报告。存 / 提交都报成功，什么也不发 ----------
 // ---------- prepo: telemetry reports. Saving / submitting all report success; nothing is sent ----------
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", "遥测报告保存（用户）；不发送，报成功", Result, h_prepo_SaveU, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveEv", "遥测报告保存；不发送，报成功", Result, h_prepo_Save, void *self) { (void)self; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo10InitializeEv", "遥测初始化：原版连 prepo 服务（经 sm），宿主没有服务进程；空操作（Engage 显式调用）", Result, h_prepo_Init, void) { return RES_OK; }
-// 往报告里加会话号 / 联网状态：真机要先连 prepo 服务取会话（超级马力欧 3D 世界 + 狂怒世界进存档选择时调）；宿主不加，报成功
 // Add the session ID / connection status to a report: on hardware these first connect to the prepo service for the session (Super Mario 3D World + Bowser's Fury calls them entering the save select); the host adds nothing and reports success
 HLE_FORCE("_ZN2nn5prepo12AddSessionIdEPNS0_10PlayReportEPKc", "遥测会话号：不连服务，不加，报成功", Result, h_prepo_AddSess, void *rep, const char *key) { (void)rep; (void)key; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", "遥测联网状态：不连服务，不加，报成功", Result, h_prepo_AddNet, void *rep, const char *a, const char *b, const char *c) { (void)rep; (void)a; (void)b; (void)c; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "遥测立即上传；不发送，报成功", Result, h_prepo_Tx, void) { return RES_OK; }
 
-// ---------- ldn：本地无线。初始化即失败，状态恒为「无」 ----------
 // ---------- ldn: local wireless. Initialization fails, state is always "none" ----------
 HLE_FORCE("_ZN2nn3ldn10InitializeEv", "本地无线（剪）：初始化失败", Result, h_ldn_Init, void) { return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ldn8FinalizeEv", "本地无线（剪）", void, h_ldn_Fini, void) {}
@@ -50,7 +44,6 @@ HLE_FORCE("_ZN2nn3ldn20AddAcceptFilterEntryENS0_10MacAddressE", "本地无线（
 HLE_FORCE("_ZN2nn3ldn22SetStationAcceptPolicyENS0_12AcceptPolicyE", "本地无线（剪）", Result, h_ldn_Policy, int p) { (void)p; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ldn6RejectENS0_11Ipv4AddressE", "本地无线（剪）", Result, h_ldn_Reject, uint32_t a) { (void)a; return RES_FAIL; }
 
-// ---------- socket：离线。初始化成功（网络库全局初始化依赖它），之后的操作一律失败、errno = ENETDOWN ----------
 // ---------- socket: offline. Initialization succeeds (the network library's global init depends on it), every later operation fails with errno = ENETDOWN ----------
 enum { SK_ENETDOWN = 50, SK_EAI_FAIL = 4 };
 HLE_FORCE("_ZN2nn6socket10InitializeEPvmmi", "连 bsd 套接字服务；离线，不建会话（剪）", Result, h_sk_Init4, void *mem, uint64_t sz, uint64_t alloc, int conc) { (void)mem; (void)sz; (void)alloc; (void)conc; return RES_OK; }
@@ -67,7 +60,6 @@ HLE_FORCE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", "域名解析（�
 HLE_FORCE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", "与 GetAddrInfo 配对（剪）", void, h_sk_FreeAi2, void *ai) { (void)ai; }
 HLE_FORCE("_ZN2nn6socket11GAIStrErrorENS0_7AiErrnoE", "解析错误文字", const char *, h_sk_GaiStr, int e) { (void)e; return "network unavailable"; }
 
-// ---------- ssl：离线，建上下文即失败 ----------
 // ---------- ssl: offline, creating a context fails ----------
 HLE_FORCE("_ZN2nn3ssl7Context15ImportClientPkiEPmPKcS4_jj", "SSL（剪）", Result, h_ssl_ImpCli, void *self, uint64_t *id, const char *a, const char *b, unsigned x, unsigned y) { (void)self; (void)a; (void)b; (void)x; (void)y; if (id) *id = 0; return RES_FAIL; }
 HLE_FORCE("_ZN2nn3ssl7Context15ImportServerPkiEPmPKcjNS0_17CertificateFormatE", "SSL（剪）", Result, h_ssl_ImpSrv, void *self, uint64_t *id, const char *a, unsigned n, int f) { (void)self; (void)a; (void)n; (void)f; if (id) *id = 0; return RES_FAIL; }
@@ -75,24 +67,20 @@ HLE_FORCE("_ZN2nn3ssl7Context9ImportCrlEPmPKcj", "SSL（剪）", Result, h_ssl_I
 HLE_FORCE("_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS0_26BuiltInCertificateInfoBaseEPhjPNS0_15CaCertificateIdEj", "SSL（剪）", Result, h_ssl_Certs,
           void **out, uint8_t *buf, unsigned bn, void *ids, unsigned n) { (void)buf; (void)bn; (void)ids; (void)n; if (out) *out = NULL; return RES_FAIL; }
 
-// ---------- nifm / nsd：离线 ----------
 // ---------- nifm / nsd: offline ----------
 HLE_FORCE("_ZN2nn4nifm19SetLocalNetworkModeEb", "离线：本地网络模式开关忽略", void, h_nifm_LocalMode, unsigned on) { (void)on; }
 HLE_FORCE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", "离线：网络请求不提交（立即返回，IsNetworkAvailable 恒假）", void, h_nifm_SubmitWait, void) {}
 HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "离线：无 IP 配置", Result, h_nifm_IpCfg, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
     uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
 }
-// SDK 10 的同名函数参数是 socket::InAddr / in_addr，与上面和 hle_net.c 里的另一代刚好反过来（超级马力欧 3D 世界 + 狂怒世界）
 // SDK 10's functions of the same name take socket::InAddr / in_addr, exactly the other way round from the generation above and in hle_net.c (Super Mario 3D World + Bowser's Fury)
 HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_", "离线：无 IP 配置（SDK 10 重载）", Result, h_nifm_IpCfg10, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
     uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
 }
 HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "离线：无 IP（SDK 10 重载）", Result, h_nifm_GetIp10, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
-// EnvironmentIdentifier = char[8]：零售环境 "lp1"
 // EnvironmentIdentifier = char[8]: retail environment "lp1"
 HLE_FORCE("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", "服务器环境名：零售 lp1", void, h_nsd_EnvId, char *out) { memset(out, 0, 8); memcpy(out, "lp1", 3); }
 
-// ---------- friends：较新 SDK 的重载 ----------
 // ---------- friends: newer SDK overloads ----------
 HLE_FORCE("_ZN2nn7friends12SetAllocatorEPFPvmEPFvS1_mE", "好友库分配器；不建会话，忽略", void, h_fr_SetAlloc, void *a, void *f) { (void)a; (void)f; }
 HLE_FORCE("_ZN2nn7friends13GetFriendListEPiPNS0_6FriendERKNS_7account3UidEiiRKNS0_12FriendFilterE", "好友列表为空（剪）", Result, h_fr_List2,
@@ -103,25 +91,21 @@ HLE_FORCE("_ZN2nn7friends12AsyncContext7HasDoneEPb", "异步上下文：恒已�
 HLE_FORCE("_ZN2nn7friends14AddPlayHistoryERKNS_7account3UidERKNS0_26PlayHistoryRegistrationKeyERKNS0_15InAppScreenNameESA_", "游玩记录不登记（剪）",
           Result, h_fr_PlayHist2, const void *uid, const void *key, const void *a, const void *b) { (void)uid; (void)key; (void)a; (void)b; return RES_FAIL; }
 
-// ---------- ngc：较新 SDK 的重载（带 bool）。恒判无敏感词 ----------
 // ---------- ngc: newer SDK overloads (with bool). Always judged as no profanity ----------
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilter10InitializeEPvmb", "敏感词过滤初始化；宿主无词库", Result, h_ngc_Init3, void *self, void *work, uint64_t sz, unsigned check) { (void)self; (void)work; (void)sz; (void)check; return RES_OK; }
 HLE_FORCE("_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKDsm", "敏感词检查：全部无敏感词", Result, h_ngc_Check16, void *self, uint32_t *out, unsigned mask, const void **words, uint64_t n) {
     (void)self; (void)mask; (void)words; for (uint64_t i = 0; out && i < n; i++) out[i] = 0; return RES_OK;
 }
 
-// ---------- err：错误显示小程序。只记日志，不弹界面 ----------
 // ---------- err: error display applet. Only logged, no UI is shown ----------
 HLE_FORCE("_ZN2nn3err9ShowErrorENS0_9ErrorCodeE", "错误显示小程序；宿主只记日志", void, h_err_ShowCode, uint64_t code) { LOG("游戏请求显示错误：%04u-%04u", (unsigned)(code & 0xffffffff), (unsigned)(code >> 32)); }
 HLE_FORCE("_ZN2nn3err9ShowErrorERKNS0_18ErrorResultVariantE", "错误显示小程序；宿主只记日志", void, h_err_ShowVar, const void *v) { (void)v; LOG("游戏请求显示错误（ErrorResultVariant）"); }
 HLE_FORCE("_ZN2nn3err40ShowUnacceptableAddOnContentVersionErrorEv", "追加内容版本不符错误小程序；宿主只记日志", void, h_err_AocVer, void) { LOG("游戏请求显示错误：追加内容版本不符"); }
 HLE_FORCE("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "游戏版本不符错误小程序；宿主只记日志", void, h_err_AppVer, void) { LOG("游戏请求显示错误：游戏版本不符"); }
 
-// ---------- web：网页小程序（联机大厅）。不可用 ----------
 // ---------- web: web page applet (online lobby). Unavailable ----------
 HLE_FORCE("_ZN2nn3web13ShowLobbyPageEPNS0_20LobbyPageReturnValueERKNS0_16ShowLobbyPageArgE", "联机大厅网页小程序（剪）", Result, h_web_Lobby, void *rv, const void *arg) { (void)rv; (void)arg; LOG("web::ShowLobbyPage（剪）"); return RES_FAIL; }
 
-// ---------- C 接口（nnsocket* / nnssl*）：同样离线。参数都在寄存器里，宿主不看 ----------
 // ---------- C interface (nnsocket* / nnssl*): offline as well. The arguments are all in registers and the host does not look at them ----------
 HLE_FORCE("nnsocketAccept", "离线（剪）", int, h_c_sk_Accept, void) { return -1; }
 HLE_FORCE("nnsocketListen", "离线（剪）", int, h_c_sk_Listen, void) { return -1; }

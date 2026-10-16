@@ -1,7 +1,6 @@
-// CPU资格反例：真实production rt_range_same，Metal对象由明确mock提供，不启GPU/不证明像素。
 // CPU eligibility counterexample: real production rt_range_same, Metal objects supplied by explicit mocks; no GPU is started and no pixels are proven.
 #include "../nvn/nvn_mtl.m"
-int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // hle_nvn.c 的着色器键：本测不链它，给零键（原先缺这个桩，链接失败） | shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
+int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]) { (void)p; (void)stage; memset(key, 0, 8); return 0; }   // shader keys from hle_nvn.c: this test does not link it, so a zero key (the missing stub broke the link)
 void *front_metal_layer(void){return NULL;}
 module_t *module_of(const void *p){(void)p;return NULL;}
 module_t g_mod[MAX_MOD];int g_nmod;void svc_thread_dump(void){}uint64_t now_ns(void){return bp_now();}

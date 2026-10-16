@@ -1,12 +1,10 @@
-// 真实NVN录制入口→生产Metal回放；8x6各mip独立手算，未设置viewport不借显式viewport规避。
 // Real NVN recording entry → production Metal replay; each mip of 8x6 is hand-calculated independently; with no viewport set, an explicit viewport is not used to dodge it.
-// nvn_mtl.m 的 nvn_game_fps 是弱定义缺省值，hle_nvn.c 给强定义；同一编译单元里把弱的那份改名（同 t_present_crop.m）
 // nvn_mtl.m's nvn_game_fps is a weak default and hle_nvn.c gives the strong definition; in one translation unit the weak one is renamed (as in t_present_crop.m)
 #define nvn_game_fps nvn_game_fps_mtl_default
 #include "../nvn/nvn_mtl.m"
 #undef nvn_game_fps
 #include "../nvn/hle_nvn.c"
-uint64_t g_t0_ns;   // 宿主 main.c 的进程起点（hle_nvn 逐帧 @t_s 用），单测替身 | process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
+uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
 module_t g_mod[MAX_MOD]; int g_nmod;
@@ -31,7 +29,6 @@ static void target(recording *r,const tex_t *t,int lv,int slot,const tex_t *othe
     const NVNtexture *ct[2]={NULL,NULL};const NVNtextureView *cv[2]={NULL,NULL};
     if(!depth){ct[slot]=(const NVNtexture *)t;cv[slot]=&view;if(other){ct[1]=(const NVNtexture *)other;cv[1]=&ov;}}
     h_nvnCommandBufferSetRenderTargets(&r->cb,depth?0:other?2:slot+1,ct,cv,depth?(const NVNtexture *)t:NULL,depth?&view:NULL);
-    // 录制后改view不应改变已录level；源码保留原参数快照。
     // Changing the view after recording must not change the recorded level; the source keeps a snapshot of the original parameters.
     h_nvnTextureViewSetLevels(&view,0,1);
 }
@@ -65,13 +62,12 @@ static void save(const char *name,int lv,const uint8_t *out,int n) {
     FILE *f=fopen(path,"wb");if(!f||fwrite(out,1,n,f)!=n)abort();fclose(f);
 }
 static void colour_check(const char *name,const tex_t *t,int lv,int kind,int draw_w,int draw_h,int partial) {
-    // 四级尺寸是题面常数表，不调被测mip helper。
     // The four level sizes are a constant table given by the problem statement; the mip helper under test is not called.
     static const int W[]={8,4,2,1},H[]={6,3,1,1};
     for(int l=0;l<4;l++){int w=W[l],h=H[l],bad=0;uint8_t *out=read_mip(t,l,w,h,4);
         for(int y=0;y<h;y++)for(int x=0;x<w;x++){uint8_t want[4]={0,0,255,255};
             int in=l==lv&&x<draw_w&&y<draw_h&&(!partial||(x>=1&&x<3&&y==1));
-            if(in&&kind==1){want[0]=255;want[2]=0;} // 合法NVN full clear红 | valid NVN full clear: red
+            if(in&&kind==1){want[0]=255;want[2]=0;} // valid NVN full clear: red
             if(in&&kind==2){int rx=5*(2*x+1)>=4*draw_w,by=5*(2*y+1)>=4*draw_h;
                 want[0]=rx?0:255;want[1]=rx?255:0;want[2]=by?255:0;}
             bad+=memcmp(out+4*(y*w+x),want,4)!=0;}

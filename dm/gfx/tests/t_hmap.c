@@ -1,4 +1,3 @@
-// 哈希表单测：随机插入 / 覆盖 / 删除 / 清空对照朴素数组模型；键空间小、键长取 8 与 20（含非 8 倍数尾巴），逼出长探测链与回移删除。
 // Hash table unit tests: random insert / overwrite / delete / clear checked against a naive array model; small key space, key lengths 8 and 20 (including a tail that is not a multiple of 8), to force long probe chains and backward-shift deletion.
 #include "../nvn/nvn_hmap.h"
 #include <stdio.h>
@@ -19,7 +18,7 @@ static int run(uint32_t klen, int ops) {
         if (t % 50000 == 49999) { nvn_hm_clear(&m, NULL); memset(ref, 0, sizeof ref); live = 0; }
         bad |= (int)m.n != live;
     }
-    for (uint32_t x = 0; x < KS && !bad; x++) { memset(k, 0xab, sizeof k); memcpy(k, &x, 4); bad |= nvn_hm_get(&m, k) != ref[x]; }   // 终态全量对照 | full comparison of the final state
+    for (uint32_t x = 0; x < KS && !bad; x++) { memset(k, 0xab, sizeof k); memcpy(k, &x, 4); bad |= nvn_hm_get(&m, k) != ref[x]; }   // full comparison of the final state
     printf("键长 %2u：%d 次随机操作 + 终态 %d 键全量对照 期望全等 → 真结果 %s（终态 %u 项、容量 %u）\n", klen, ops, KS, bad ? "不等 ✗" : "全等 ✓", m.n, m.cap);
     free(m.keys); free(m.vals);
     return bad;

@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# 生成「任天堂扩展」共享字体的替身（nintendo_ext.ttf）：手柄按键图标放在原版的私用区码位上（A/B/X/Y、L/R/ZL/ZR/SL/SR、+/−、十字键、摇杆方向箭头）。
-# 宿主没有原版系统字体；游戏文字里的按键图标（如 Mario 的 GameMsg/Key.msbt：U+E0E0 = A 键）缺字时画成「?」。字母取自 macOS 的 Arial Rounded Bold，镂空在实心底板上。
-# 用法：make_ext_font.py 输出.ttf [字母字体.ttf]；需要 fontTools（pip install fonttools）
 # Generate a stand-in for the "Nintendo extension" shared font (nintendo_ext.ttf): controller-button icons at the original private-use code points (A/B/X/Y, L/R/ZL/ZR/SL/SR, +/−, D-pad, stick direction arrows).
 # The host has no original system fonts; button icons in game text (e.g. Mario's GameMsg/Key.msbt: U+E0E0 = A button) render as "?" when the glyph is missing. Letters come from macOS's Arial Rounded Bold, knocked out of a solid plate.
 # Usage: make_ext_font.py out.ttf [letter-font.ttf]; needs fontTools (pip install fonttools)
@@ -15,11 +12,11 @@ from fontTools.pens.boundsPen import BoundsPen
 from fontTools.pens.recordingPen import RecordingPen
 
 EM, ASC, DESC = 1000, 880, -120
-CY, R = 350, 450          # 图标中心高度与圆半径：底到 -100、顶到 800，压在基线上 | icon centre height and circle radius: -100 to 800, sitting on the baseline
+CY, R = 350, 450          # icon centre height and circle radius: -100 to 800, sitting on the baseline
 
 def area(c): return sum(c[i][0] * c[i - 1][1] - c[i - 1][0] * c[i][1] for i in range(len(c))) / 2
 def contour(pen, pts, hole=False):
-    # pts: [(x, y, on)]；实心顺时针、镂空逆时针（TrueType 惯例，非零环绕） | solid clockwise, hole counter-clockwise (TrueType convention, nonzero winding)
+    # solid clockwise, hole counter-clockwise (TrueType convention, nonzero winding)
     if (area(pts) > 0) != hole: pts = pts[::-1]
     k = next(i for i, p in enumerate(pts) if p[2]); pts = pts[k:] + pts[:k]
     pen.moveTo(pts[0][:2]); offs = []
@@ -48,14 +45,13 @@ class Letters:
     def __init__(self, path):
         self.f = TTFont(path); self.gs = self.f.getGlyphSet(); self.cmap = self.f.getBestCmap()
     def knock(self, pen, text, cx, cy, h):
-        # 把 text 按字高 h 居中镂空在 (cx, cy) | knock text out of the plate, centred at (cx, cy) with height h
+        # knock text out of the plate, centred at (cx, cy) with height h
         names = [self.cmap[ord(ch)] for ch in text]; x = 0; parts = []
         for nm in names: parts.append((nm, x)); x += self.gs[nm].width
         bp = BoundsPen(self.gs)
         for nm, dx in parts: self.gs[nm].draw(TransformPen(bp, (1, 0, 0, 1, dx, 0)))
         x0, y0, x1, y1 = bp.bounds; s = h / (y1 - y0)
         ox, oy = cx - (x0 + x1) / 2 * s, cy - (y0 + y1) / 2 * s
-        # 镂空 = 与底板反向。字体里外轮廓的方向不一（TrueType 顺时针、转换来的字体常是逆时针），按最大轮廓的方向定要不要翻
         # Knocked out = opposite direction to the plate. Fonts differ in outer-contour direction (TrueType clockwise, converted fonts often counter-clockwise); flip based on the largest contour's direction
         rec = RecordingPen()
         for nm, dx in parts: self.gs[nm].draw(TransformPen(rec, (s, 0, 0, s, ox + dx * s, oy)))
@@ -66,7 +62,7 @@ class Letters:
         big = max(rings, key=lambda c: abs(area(c)))
         rec.replay(ReverseContourPen(pen) if area(big) < 0 else pen)
 
-def cross(cx, cy, half, arm):   # 十字键外形（顺序成环） | D-pad outline (one closed ring)
+def cross(cx, cy, half, arm):   # D-pad outline (one closed ring)
     a, h = arm / 2, half
     return [(cx - a, cy + h, 1), (cx + a, cy + h, 1), (cx + a, cy + a, 1), (cx + h, cy + a, 1), (cx + h, cy - a, 1), (cx + a, cy - a, 1),
             (cx + a, cy - h, 1), (cx - a, cy - h, 1), (cx - a, cy - a, 1), (cx - h, cy - a, 1), (cx - h, cy + a, 1), (cx - a, cy + a, 1)]
@@ -88,7 +84,7 @@ def build(out, letter_font):
             if minus: contour(pen, rect(cx - l, CY - t, cx + l, CY + t), hole=True)
             else: contour(pen, cross(cx, CY, l, 2 * t), hole=True)
         return d
-    def dpad(arm_dir):   # None = 全实心；否则只填一个方向的臂 | None = all solid; otherwise only one arm filled
+    def dpad(arm_dir):   # None = all solid; otherwise only one arm filled
         def d(pen, cx):
             contour(pen, cross(cx, CY, R, 320))
             if arm_dir is None: return

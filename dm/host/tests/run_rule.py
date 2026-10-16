@@ -1,4 +1,3 @@
-# 新规则的局部原ARM契约；不代替速度/真实动作矩阵。
 # Local original-ARM contract of the new rule; does not replace the speed/real action matrix.
 import sys,struct,hashlib
 from pathlib import Path
@@ -67,11 +66,9 @@ for pref in [0,1]:
    u=b.u;u.reg_write(UC_ARM64_REG_W10,pref);u.reg_write(UC_ARM64_REG_W8,hyst);u.reg_write(UC_ARM64_REG_W9,latch)
    b.go(0x2b30e8,0x2b3108);check(f'client select {pref}/{hyst}/{latch}',u.reg_read(UC_ARM64_REG_W1),1)
 u=b.u;b.go(0x2c6208,0x2c6214);check('initial run preference',struct.unpack('<I',u.mem_read(0x2d20e50,4))[0],1)
-# 构建剪口入口转向检验不宣称完整On执行。
 # The build cut entry redirection check does not claim full On execution.
 for start,target in [(0x369a90,0x369900),(0x6dcec0,0x6dce50)]:
  u=b.u;u.reg_write(UC_ARM64_REG_SP,0x701fff0);u.emu_start(start,0x4000000,count=1);check(f'off redirect {start:x}',u.reg_read(UC_ARM64_REG_PC),target)
-# 真实On/Off函数完整执行；lookup/stat/动画切换/发包为显式外围替身。
 # The real On/Off functions are executed in full; lookup/stat/animation switch/packet send are explicit peripheral stand-ins.
 for typ in [0,1]:
  for mode in [0,1,2,3,4,5,6,7,10,17,19]:

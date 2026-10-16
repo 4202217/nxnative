@@ -1,5 +1,3 @@
-// 格式表实建核对：对 0x01–0x9C 每个 NVN 格式取映射，用本机 MTLDevice 真建一张 2D 贴图（带分量重映射），统计能建成的条数。
-// 判据：映射非 0 的格式全部建成（newTextureWithDescriptor 非 nil）；另核 sRGB 名的 NVN 格式全部落到 Metal _sRGB 格式。
 // Format table verification by actual creation: for every NVN format 0x01–0x9C take the mapping and actually create a 2D texture (with component remapping) on the local MTLDevice, counting how many can be created.
 // Criterion: every format with a non-zero mapping is created (newTextureWithDescriptor non-nil); also verify that every NVN format with sRGB in its name lands on a Metal _sRGB format.
 #import <Metal/Metal.h>
@@ -20,7 +18,7 @@ int main(void) {
             BOOL depth = m >= 250 && m <= 262;
             d.storageMode = depth ? MTLStorageModePrivate : MTLStorageModeShared;
             d.usage = MTLTextureUsageShaderRead | (depth ? MTLTextureUsageRenderTarget : 0);
-            if (depth) d.swizzle = MTLTextureSwizzleChannelsDefault;     // 深度格式不允许重映射 | remapping is not allowed for depth formats
+            if (depth) d.swizzle = MTLTextureSwizzleChannelsDefault;     // remapping is not allowed for depth formats
             id<MTLTexture> t = [dev newTextureWithDescriptor:d];
             if (t) ok++; else printf("建不成 NVN %#x → MTL %u\n", f, m);
         }

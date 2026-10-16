@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# B 路线全库干转：Switch 着色器包每个变体（按控制段哈希去重）→ Ryujinx ShaderTools 出 SPIR-V → spirv-cross 出 MSL → metal 编译。
-# 逐级记成败与报错首行，汇总成功率与失败原因分布。干转用 ShaderTools 缺省查询（贴图类型等未按真实作答），只量「能不能转」。
-# 用法：dmsh_dryrun.py <Switch 包目录> <ShaderTools 可执行> <输出目录>   环境 J=并发
 # Route B whole-library dry run: every variant in the Switch shader packages (deduplicated by control segment hash) → SPIR-V via Ryujinx ShaderTools → MSL via spirv-cross → metal compile.
 # Records pass/fail and the first error line at each stage, and summarizes the success rate and the distribution of failure reasons. The dry run uses ShaderTools' default queries (texture types etc. are not answered truthfully) and only measures "can it be converted".
 # Usage: dmsh_dryrun.py <Switch package dir> <ShaderTools executable> <output dir>   Environment J=concurrency

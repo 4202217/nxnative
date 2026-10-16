@@ -1,4 +1,3 @@
-// hle_audio.c 无锁队列压测：生产 / 出声 / 收回三线程并发 10 万块，字节流与收回顺序按序号逐一核对，事件不丢。
 // hle_audio.c lock-free queue stress test: three threads producing / playing / reclaiming 100 thousand blocks concurrently, the byte stream and reclaim order checked one by one by sequence number, no event lost.
 #include "../hle_audio.c"
 #include <sched.h>
@@ -20,7 +19,7 @@ void hle_signal_system_event(void *g) {
     if (atomic_load_explicit(&g_last_pull, memory_order_seq_cst)) atomic_store(&g_after_last, 1);
 }
 void hle_bind_system_event(void *g, int autoclear) { (void)g; (void)autoclear; }
-module_t *module_of(const void *p) { (void)p; return NULL; }   // 日志里的调用点：单测里没有客体模块 | call sites in the log: no guest modules in the unit test
+module_t *module_of(const void *p) { (void)p; return NULL; }   // call sites in the log: no guest modules in the unit test
 
 typedef struct {
     void *out;
@@ -52,7 +51,6 @@ static void *producer(void *p) {
     test_ctx *t = p;
     for (uint32_t i = 0; i < NBUF; i++) {
         t->bufs[i].ptr = t->data[i]; t->bufs[i].cap = MAX_SIZE; t->bufs[i].size = t->sizes[i];
-        // 真实缓冲池：在途（已追加未收回）不超过 QMAX，收回后才能再追加
         // Real buffer pool: buffers in flight (appended, not yet reclaimed) do not exceed QMAX, and more can be appended only after reclaiming
         while (i - (uint32_t)atomic_load_explicit(&t->released, memory_order_acquire) >= QMAX) sched_yield();
         while (!h_au_Append(t->out, &t->bufs[i])) sched_yield();

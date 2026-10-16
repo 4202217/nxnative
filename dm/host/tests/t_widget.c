@@ -1,4 +1,3 @@
-// 控件类型核对（dm_widget.h）的单测，秒级。假「主模块」是一块内存，控件第一个字 = 基址 + 虚表偏移。
 // Unit test for the widget type check (dm_widget.h), runs in seconds. The fake "main module" is a block of memory; a widget's first word = base + vtable offset.
 #include "dm_widget.h"
 #include <stdio.h>
@@ -21,7 +20,6 @@ int main(void) {
     CHECK(!dm_widget_is(NULL, tg, DM_VT_TOGGLE) && dm_widget_vt(NULL, tg) == 0, "没有基址：不认、虚表读 0");
     CHECK(dm_widget_is_slot(base, (uint64_t)(uintptr_t)w_slot) && dm_widget_is_slot(base, (uint64_t)(uintptr_t)w_slotb) && dm_widget_is_slot(base, (uint64_t)(uintptr_t)w_slotc), "三种物品格都认作物品格");
     CHECK(!dm_widget_is_slot(base, tg) && !dm_widget_is_slot(base, 0), "勾选框 / 空控件不是物品格");
-    // 各类的虚表值两两不同（抄错一个数会让两类互认）
     // Vtable values of the classes are pairwise distinct (one mistyped number would make two classes match each other)
     { const uint64_t v[] = { DM_VT_TEXT, DM_VT_INPUT, DM_VT_NUMINPUT, DM_VT_TOGGLE, DM_VT_TABBAR, DM_VT_SLOT, DM_VT_SLOT_B, DM_VT_SLOT_C, DM_VT_IMAGE, DM_VT_BUTTON }; int dup = 0;
       for (unsigned i = 0; i < sizeof v / sizeof *v; i++) for (unsigned j = i + 1; j < sizeof v / sizeof *v; j++) dup += v[i] == v[j];

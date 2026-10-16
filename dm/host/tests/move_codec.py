@@ -1,4 +1,3 @@
-# 执行原ARM编解码；只有libm调用用显式f32替身。不是速度或游戏停止判据。
 # Executes the original ARM codec; only libm calls use explicit f32 stand-ins. Not a criterion for speed or for the game stopping.
 import math, struct, hashlib, sys
 from pathlib import Path
@@ -25,7 +24,6 @@ def call(pc):
  u.emu_start(pc,STOP+4,count=3000)
  assert u.reg_read(UC_ARM64_REG_PC)==STOP
 n=0
-# 期望先写死：四轴方向10bit=512/768/0/256；幅度5bit=0/0/0/7/15/31/31。
 # Expectations hard-coded first: four-axis direction 10bit=512/768/0/256; magnitude 5bit=0/0/0/7/15/31/31.
 for dx,dy,direction in [(1,0,512),(0,1,768),(-1,0,0),(0,-1,256)]:
  packets=[]

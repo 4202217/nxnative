@@ -1,5 +1,3 @@
-// 较新 SDK（16.x）游戏用到、d2r-mobile 那一作没用到的系统服务接口：oe / time / pl（共享字体）/ vi 垂直同步 / diag。
-// 真机上都经 Horizon 系统服务（IPC）；宿主直接给值或做成「不可用」。
 // System service interfaces used by games on newer SDKs (16.x) that the d2r-mobile title did not use: oe / time / pl (shared font) / vi vsync / diag.
 // On the real device all of these go through Horizon system services (IPC); the host gives values directly or makes them "unavailable".
 #include "hle.h"
@@ -13,7 +11,6 @@
 
 // ---------- oe ----------
 HLE_FORCE("_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE", "CPU 加速档；宿主不调频", void, h_oe_CpuBoost, int m) { (void)m; }
-// DisplayVersion = char[16]（应用的显示版本号）：按 main 的构建号取该版控制数据（NACP）里的值（游戏档案的 build 行），认不出的构建给 1.0.0
 // DisplayVersion = char[16] (the application's display version): the value from that version's control data (NACP), chosen by main's build ID (the game profile's build rows); unknown builds get 1.0.0
 HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "显示版本号（按 main 构建号）", void, h_oe_DispVer, char *v) {
     static const struct { const char *build, *ver; } k[] = {DM_GAME_DISPLAY_VERSIONS};
@@ -24,7 +21,6 @@ HLE_FORCE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", "显示版本�
 }
 HLE_FORCE("_ZN2nn2oe24GetExpectedVolumeBalanceEPfS1_", "系统 / 应用音量平衡；宿主恒 1:1", void, h_oe_GetVolBal, float *sys, float *app) { *sys = 1.0f; *app = 1.0f; }
 HLE_FORCE("_ZN2nn2oe24SetExpectedVolumeBalanceEff", "音量平衡；宿主忽略", void, h_oe_SetVolBal, float sys, float app) { (void)sys; (void)app; }
-// 程序累计运行时长（nn::TimeSpan，纳秒）：取宿主启动以来的单调时间
 // Program total active time (nn::TimeSpan, nanoseconds): the host's monotonic time since startup
 HLE_FORCE("_ZN2nn2oe25GetProgramTotalActiveTimeEv", "累计运行时长 → 宿主启动以来", int64_t, h_oe_ActiveTime, void) { return (int64_t)(now_ns() - g_t0_ns); }
 HLE_FORCE("_ZN2nn2oe31EnterExitRequestHandlingSectionEv", "退出请求临界区；宿主的退出走 SIGTERM / 生命周期", void, h_oe_EnterExit, void) {}
@@ -32,21 +28,18 @@ HLE_FORCE("_ZN2nn2oe31LeaveExitRequestHandlingSectionEv", "退出请求临界区
 HLE_FORCE("_ZN2nn2oe38SetUserInactivityDetectionTimeExtendedEb", "自动休眠延长；宿主忽略", void, h_oe_Inactivity, unsigned on) { (void)on; }
 
 // ---------- time ----------
-// CalendarTime = { int16 年; int8 月, 日, 时, 分, 秒 }，按值返回（8 字节内，走 x0）
 // CalendarTime = { int16 year; int8 month, day, hour, minute, second }, returned by value (within 8 bytes, in x0)
 HLE_FORCE("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", "绝对秒 → UTC 日历（宿主 gmtime_r）", uint64_t, h_time_ToCalUtc, const int64_t *t) {
     time_t v = (time_t)*t; struct tm tm; gmtime_r(&v, &tm);
     return (uint64_t)(uint16_t)(tm.tm_year + 1900) | (uint64_t)(uint8_t)(tm.tm_mon + 1) << 16 | (uint64_t)(uint8_t)tm.tm_mday << 24 |
            (uint64_t)(uint8_t)tm.tm_hour << 32 | (uint64_t)(uint8_t)tm.tm_min << 40 | (uint64_t)(uint8_t)tm.tm_sec << 48;
 }
-// LocationName = char[0x24]（时区名）：跟宿主系统时区
 // LocationName = char[0x24] (time zone name): follows the host's system time zone
 HLE_FORCE("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", "设备时区名 → 宿主时区", Result, h_time_LocName, char *out) {
     memset(out, 0, 0x24); tzset(); strlcpy(out, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24); return RES_OK;
 }
 HLE_FORCE("_ZN2nn4time26StandardNetworkSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", "网络时钟（离线，不可用）", Result, h_time_NetNow, int64_t *out) { (void)out; return RES_FAIL; }
 HLE_FORCE("_ZN2nn4time8FinalizeEv", "与 Initialize 配对；宿主无会话", Result, h_time_Finalize, void) { return RES_OK; }
-// 「确保网络时钟可用」异步任务：不发请求，完成事件立即触发、结果失败。对象本身不动（构造 / 析构空操作），事件放宿主静态区
 // "Ensure network clock availability" async task: no request is sent; the finish event fires immediately and the result is failure. The object itself is untouched (constructor / destructor no-ops), the event lives in host static storage
 static _Alignas(16) uint8_t g_ev_netclock[0x100];
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTaskC1Ev", "网络时钟任务构造；宿主不建会话", void, h_time_NcCtor, void *self) { (void)self; }
@@ -56,16 +49,6 @@ HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9StartTaskEv", "�
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask14GetFinishEventEv", "网络时钟任务完成事件：已触发", void *, h_time_NcEvent, void *self) { (void)self; hle_signal_system_event(g_ev_netclock); return g_ev_netclock; }
 HLE_FORCE("_ZN2nn4time39AsyncEnsureNetworkClockAvailabilityTask9GetResultEv", "网络时钟任务结果：离线，失败", Result, h_time_NcResult, void *self) { (void)self; return RES_FAIL; }
 
-// ---------- pl：共享字体 ----------
-// 系统共享字体（0 标准 / 1 简中 / 2 简中扩展 / 3 繁中 / 4 韩文 / 5 任天堂扩展）宿主没有原版，用替身：
-//   任天堂扩展 = DM_SHARED_FONT_EXT 或 $DM_FONT_DIR/nintendo_ext.ttf（dm/tools/make_ext_font.py 生成：按键图标在原版私用区码位，如 U+E0E0 = A 键）；
-//   其余类型共用一份 = DM_SHARED_FONT 或 $DM_FONT_DIR/standard.ttf，再缺省 macOS 的 Arial Unicode（iOS 没有这个路径，App 里自带 dm/font/）。
-//   扩展字体打不开时退回标准字体（按键图标画成「?」，其余照常）。
-// 游戏自己的文字用 RomFS 里的字体，共享字体只在系统名字、按键图标等少数地方用。
-// 格式：原版共享内存里是 BFTTF——8 字节头 + 按字异或混淆的 TTF；游戏拿到地址后先调 nn::fontll::ScalableFontEngineHelper::Decode(地址, 大小)
-//   （SMBW sdk +0x3093c0）就地解混淆并返回地址 + 8。Decode 先看头一个字：已是「解过」标记（小端 0x18029a7f）就直接返回地址 + 8、不动数据。
-//   所以宿主给「解过」标记 + 原样 TTF；第二个字照原版写混淆后的长度（键 0x49621806：存的是 bswap(长度 ^ 键)）。给裸 TTF 会被当密文异或成乱码，
-//   字体引擎随后用野指针崩（SMBW main +0x107dbc0）。
 // The host has none of the original system shared fonts (0 standard / 1 Simplified Chinese / 2 Simplified Chinese extension / 3 Traditional Chinese / 4 Korean / 5 Nintendo extension) and uses stand-ins:
 //   Nintendo extension = DM_SHARED_FONT_EXT or $DM_FONT_DIR/nintendo_ext.ttf (generated by dm/tools/make_ext_font.py: button icons at the original private-use code points, e.g. U+E0E0 = A button);
 //   all other types share one = DM_SHARED_FONT or $DM_FONT_DIR/standard.ttf, then macOS's Arial Unicode (that path does not exist on iOS; the App ships dm/font/).
@@ -109,43 +92,32 @@ static font_t font_get(int type) {
     pthread_mutex_unlock(&mu);
     return f;
 }
-// 游戏档案 shared_font ttf（超级马力欧 3D 世界 + 狂怒世界，SDK 10）：地址处直接是 TTF（跳过 8 字节头），大小不含头。该作把共享字体记作类型 0（main+0x975658），
-//   不调 Decode、把地址原样交给 ScalableFontEngine::LoadFont；带头时 LoadFont 报错 403、SetFont 报 301，之后查「?」字形处处落空，main+0x6c73c0 空指针崩溃
 // The profile's shared_font ttf (Super Mario 3D World + Bowser's Fury, SDK 10): the address points straight at the TTF (past the 8-byte header) and the size excludes the header. That game records shared fonts as type 0 (main+0x975658),
 //   calls no Decode and hands the address as is to ScalableFontEngine::LoadFont; with the header LoadFont fails with error 403 and SetFont with 301, every lookup of the "?" glyph then misses, and main+0x6c73c0 crashes on a null pointer
 static const size_t k_font_skip = DM_GAME_SHARED_FONT_TTF ? 8 : 0;
 HLE_FORCE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", "共享字体装载状态：已装（1）", int, h_pl_LoadState, int type) { return font_get(type).p ? 1 : 0; }
 HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "共享字体地址 → BFTTF 头（档案 shared_font ttf：TTF 本身）", const void *, h_pl_Addr, int type) { const uint8_t *p = font_get(type).p; return p ? p + k_font_skip : NULL; }
 HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "共享字体大小 → 头 8 字节 + 替身字体文件大小（档案 shared_font ttf：不含头）", size_t, h_pl_Size, int type) { font_t f = font_get(type); return f.p ? f.n - k_font_skip : 0; }
-// 是否跑在 Switch 2（代号 Ounce）上（返回 bool）：宿主按 Switch 1 报假。马力欧 1.2.1 据此决定要不要数追加内容（升级包）、提示升级到 Switch 2 版
 // Whether running on a Switch 2 (codename Ounce) (returns bool): the host reports false, as a Switch 1. Mario 1.2.1 uses it to decide whether to count add-on content (the upgrade pack) and suggest the Switch 2 Edition
 HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "是否 Switch 2：否", unsigned, h_pl_IsOunce, void) { return 0; }
-// 塞尔达传说 旷野之息（SDK 20）：先请求装载共享字体再查状态；宿主的替身字体随取随有。VR 模式（Labo VR 眼镜）：宿主不进 VR，查询恒否，进出空操作
 // The Legend of Zelda: Breath of the Wild (SDK 20): asks for the shared fonts to be loaded before querying their state; the host's stand-in fonts are there on demand. VR mode (the Labo VR goggles): the host never enters VR; the query is always false, entering / leaving is a no-op
 HLE_FORCE("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "请求装载共享字体；替身字体随取随有，空操作", void, h_pl_ReqLoad, int type) { (void)type; }
 HLE_FORCE("_ZN2nn2pl8IsVrModeEv", "VR 模式：否", unsigned, h_pl_IsVr, void) { return 0; }
 HLE_FORCE("_ZN2nn2pl11BeginVrModeEv", "进 VR 模式（经 am）；宿主不进", void, h_pl_BeginVr, void) { LOG("pl::BeginVrMode（宿主不进 VR）"); }
 HLE_FORCE("_ZN2nn2pl9EndVrModeEv", "出 VR 模式（经 am）", void, h_pl_EndVr, void) {}
 
-// ---------- ec：商店小程序（升级到 Switch 2 版的页面）----------
-// 商店属排除范围：空操作。游戏不看返回值（两个重载都按无返回值处理）
 // ---------- ec: shop applet (the upgrade-to-Switch-2-Edition page) ----------
 // The shop is out of scope: no-op. The game does not look at the return value (both overloads are handled as returning nothing)
 HLE_FORCE("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionE", "商店升级页，排除范围；空操作", void, h_ec_ShowUpg, int ed) { LOG("ec::ShowShopApplicationInformationForUpgrade(%d)（剪）", ed); }
 HLE_FORCE("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionERKNS_7account10UserHandleE", "商店升级页（指定用户），排除范围；空操作", void, h_ec_ShowUpgU, int ed, const void *user) { (void)user; LOG("ec::ShowShopApplicationInformationForUpgrade(%d, 用户)（剪）", ed); }
 
-// ---------- nfp：amiibo ----------
-// 马力欧 1.2.1 起启动即初始化 nfp（v0 不用）。真 SDK 要连 sm: 服务，宿主没有 → 中止，所以这一族全部接管。
-// 宿主没有 NFC 读卡器：报一台 NFC 设备，挂在当前接着的手柄上（同 hle_hid.c），但找标签永远找不到——与真机手边没有 amiibo 时一样：
-// 游戏的「请碰 amiibo」界面照常出现，取消即退出。要标签才能做的操作（挂载、读写应用区、amiibo 设置小程序）一律回「没找到标签」。
-// 游戏不挂激活 / 失活事件，靠轮询 GetDeviceState 看有没有标签。
 // ---------- nfp: amiibo ----------
 // From Mario 1.2.1 the game initializes nfp at boot (v0 did not use it). The real SDK would connect to the sm: service, which the host lacks → abort, so the whole family is taken over.
 // The host has no NFC reader: it reports one NFC device on the currently connected controller (same as hle_hid.c) whose detection never finds a tag -- the same as real hardware with no amiibo at hand:
 // the game's "touch an amiibo" screen appears as usual and cancelling leaves it. Operations that need a tag (mount, application area read / write, amiibo settings applets) all return "tag not found".
 // The game attaches no activate / deactivate events; it polls GetDeviceState to see whether a tag is there.
-#define NFP_RES_TAG_NOT_FOUND (115u | 97u << 9)   // 模块 115（nfp）描述 97 | module 115 (nfp), description 97
-enum { NFP_STATE_INIT = 0, NFP_STATE_SEARCH = 1 };   // nn::nfp::DeviceState：0 初始、1 找标签中（2 有标签，宿主不会出现） | 0 initialized, 1 searching for a tag (2 = tag found, never on the host)
+#define NFP_RES_TAG_NOT_FOUND (115u | 97u << 9)   // module 115 (nfp), description 97
+enum { NFP_STATE_INIT = 0, NFP_STATE_SEARCH = 1 };   // 0 initialized, 1 searching for a tag (2 = tag found, never on the host)
 typedef struct { uint32_t id; uint8_t reserved[4]; } NfpDeviceHandle;
 #define NFP_DEVICE_ID 0x4e465030u   // 'NFP0'
 static _Atomic int g_nfp_state;
@@ -167,8 +139,6 @@ HLE_FORCE("_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE", "设备状态：�
 HLE_FORCE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", "标签信息：没有标签", Result, h_nfp_TagInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetTagInfo"); }
 HLE_FORCE("_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", "型号信息：没有标签", Result, h_nfp_ModelInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetModelInfo"); }
 HLE_FORCE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", "挂载标签：没有标签", Result, h_nfp_Mount, const NfpDeviceHandle *h, int model, int target) { (void)h; (void)model; (void)target; return nfp_no_tag("Mount"); }
-// 塞尔达传说 旷野之息（SDK 20）另用的一组：标签进出事件（绑内核事件、恒不触发；不接管时 SDK 的实现在 sdk+0x3f2a78 读空指针）、两参数的 Mount、
-//   Unmount、读通用 / 登记信息（都按没有标签答）、库状态（1 = 已初始化）与 Finalize
 // Another group The Legend of Zelda: Breath of the Wild (SDK 20) uses: tag activate / deactivate events (bound to a kernel event that never fires; without the take-over the SDK's code reads a null pointer at sdk+0x3f2a78), the two-argument Mount,
 //   Unmount, reading common / register info (all answered as no tag), the library state (1 = initialized) and Finalize
 HLE_FORCE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", "标签放上事件；绑内核事件、恒不触发", Result, h_nfp_AttachAct, void *ev, const NfpDeviceHandle *h) { (void)h; hle_bind_system_event(ev, 0); return RES_OK; }
@@ -190,8 +160,6 @@ HLE_FORCE("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24AmiiboSet
 HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "amiibo 昵称与主人设置小程序：没有标签", Result, h_nfp_Nick, NfpDeviceHandle *h, uint8_t *changed, void *reg, const void *p, const void *tag) { (void)h; (void)reg; (void)p; (void)tag; if (changed) *changed = 0; return nfp_no_tag("StartNicknameAndOwnerSettings"); }
 HLE_FORCE("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoERKS4_", "amiibo 昵称与主人设置小程序（带原登记信息）：没有标签", Result, h_nfp_Nick2, NfpDeviceHandle *h, uint8_t *changed, void *reg, const void *p, const void *tag, const void *old) { (void)h; (void)reg; (void)p; (void)tag; (void)old; if (changed) *changed = 0; return nfp_no_tag("StartNicknameAndOwnerSettings"); }
 
-// ---------- vi：垂直同步事件 ----------
-// 游戏给一个 SystemEventType，宿主绑定后由一条宿主线程按 60 Hz 触发（DM_VSYNC_HZ 可改）
 // ---------- vi: vsync event ----------
 // The game passes a SystemEventType; after binding, a host thread fires it at 60 Hz (DM_VSYNC_HZ can change it)
 static void *vsync_thread(void *ev) {
@@ -199,11 +167,10 @@ static void *vsync_thread(void *ev) {
     uint64_t period = (uint64_t)(1e9 / hz), next = now_ns() + period;
     for (;;) {
         uint64_t t = now_ns(); if (next > t) { struct timespec ts = {(time_t)((next - t) / 1000000000ull), (long)((next - t) % 1000000000ull)}; nanosleep(&ts, NULL); }
-        hle_signal_system_event(ev); next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // 落后太多不追帧 | do not try to catch up when far behind
+        hle_signal_system_event(ev); next += period; if (now_ns() > next + 4 * period) next = now_ns() + period;   // do not try to catch up when far behind
     }
     return NULL;
 }
-// 间接图层（小程序画面交给游戏去画，如内嵌键盘）的图像内存需求：真机问 vi 服务。按 RGBA8 线性算、4 KB 对齐（超级马力欧 3D 世界 + 狂怒世界的内嵌键盘问 1280×720）
 // Image memory needed for an indirect layer (an applet's picture handed to the game to draw, such as the inline keyboard): on hardware it asks the vi service. Computed as linear RGBA8, 4 KB aligned (Super Mario 3D World + Bowser's Fury's inline keyboard asks for 1280x720)
 HLE_FORCE("_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii", "间接图层图像内存：RGBA8 线性、4 KB 对齐", Result, h_vi_IndirectReq, size_t *size, size_t *align, int w, int h) {
     *size = ((size_t)(w > 0 ? w : 0) * (size_t)(h > 0 ? h : 0) * 4 + 0xfff) & ~(size_t)0xfff; *align = 0x1000; return RES_OK;
@@ -215,12 +182,10 @@ HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7Displa
 }
 
 // ---------- diag ----------
-// LogMetaData 之后的文本（NN_LOG）直接进宿主日志；中止打出调用点后报红退出
 // The text after LogMetaData (NN_LOG) goes straight into the host log; an abort prints the call site and exits with a failure
 HLE_FORCE("_ZN2nn4diag6detail7PutImplERKNS0_11LogMetaDataEPKcm", "游戏日志 → 宿主日志", void, h_diag_Put, const void *meta, const char *s, size_t n) {
     (void)meta; while (n && (s[n - 1] == '\n' || s[n - 1] == '\0')) n--; if (n) LOG("[game] %.*s", (int)n, s);
 }
-// 中止：报出调用点（模块 + 偏移）与客体回溯再退出
 // Abort: report the call site (module + offset) and the guest backtrace, then exit
 static void diag_abort(uint32_t res, void *lr) {
     module_t *m = module_of(lr);
@@ -233,8 +198,6 @@ HLE_FORCE("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "游戏中止（带 Resu
 HLE_FORCE("_ZN2nn4diag12GetBacktraceEPmi", "回溯；宿主不提供（0 帧）", int, h_diag_Bt, uint64_t *out, int n) { (void)out; (void)n; return 0; }
 HLE_FORCE("_ZN2nn4diag13GetSymbolNameEPcmm", "符号名；宿主不提供（空串）", uint64_t, h_diag_SymName, char *buf, size_t n, uint64_t addr) { (void)addr; if (buf && n) buf[0] = 0; return 0; }
 
-// ---------- settings：语言枚举 ↔ 语言代码 ----------
-// 真机 MakeLanguageCode 问 settings 服务；表是公开固定的（nn::settings::Language 顺序）。LanguageCode = char[8]
 // ---------- settings: language enum <-> language code ----------
 // On the real device MakeLanguageCode asks the settings service; the table is public and fixed (nn::settings::Language order). LanguageCode = char[8]
 static const char *const k_lang_code[] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
@@ -242,7 +205,6 @@ HLE_FORCE("_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE", "语言枚�
     if ((unsigned)*lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
     return strncmp(k_lang_code[*lang], code, 8) == 0;
 }
-// 反过来的比较与按枚举造代码（超级马力欧 3D 世界 + 狂怒世界，SDK 10：nnMain 里第一次比较就去连 settings 服务）
 // The reversed comparison and making a code from the enum (Super Mario 3D World + Bowser's Fury, SDK 10: its first comparison in nnMain connected to the settings service)
 HLE_FORCE("_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE", "语言代码与语言枚举比较（返回 bool）", unsigned, h_set_LangEq2, const char *code, const int32_t *lang) {
     if ((unsigned)*lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;

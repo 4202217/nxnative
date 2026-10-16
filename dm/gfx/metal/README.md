@@ -1,7 +1,5 @@
 # dm/gfx/metal — minimal Metal offscreen example
 
-中文：[README.zh-CN.md](README.zh-CN.md)
-
 A standalone small module: it wraps Metal in a pure C interface, renders the picture to an offscreen texture and reads it back to the CPU, without putting anything on screen. It is not compiled into the host (`dm/host/Makefile` does not include this directory); the Metal replay layer the game actually uses is in `../nvn/nvn_mtl.m`. This is kept as a reference that compiles on its own and can be understood in a few dozen lines, and as a small probe for verifying Metal behavior.
 
 ## Interface (`mtl_backend.h`)

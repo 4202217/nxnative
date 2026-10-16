@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-# Switch 着色器 → PC 着色器（DXBC）→ PC 链 MSL（metallib）映射表。
-# 依据：两侧 data/hd/shaders 都是 162 个同名 SHAD 包，每个变体一条 BTCD 记录，记录数逐包相等（共 10847 条）；
-#   记录头除尺寸外只差平台号（PC 3 / Switch 5），没有排列键 ⇒ 按包内序号一一对应。
-#   顺序对齐的证据：计算着色器线程组大小逐条 22/22 相等；记录数 ≥16 的 22 个包代码量秩相关，对齐 0.81–1.00、错位一条全部更低。
-# Switch 记录：头之后 = GPU 代码段（0x12345678 开头），其后 = 控制段（0x98761234 开头，长度见记录头）。
-#   运行期 nvnProgramSetShaders 拿到的是控制段指针 ⇒ 键 = sha256(控制段)[:16]。
-# PC 记录：内含一个 DXBC；PC 链缓存文件名 = sha256(DXBC)[:16].metallib（platform/shell/mtl12/shaders/build_cache.py）。
-# 绑定映射（maxwell_refs.py 头注释）：NVN 槽号 = D3D 寄存器号，按 Switch 机器码实际引用逐条核「Switch 用到的 ⊆ PC 声明的」。
-# 键冲突（Switch 二进制相同、PC DXBC 不同）时选一份：与 Switch 实际用到的输出数 / cb / t / s 差异最小者；
-#   并列取最简（输出少、资源少），再并列取 DXBC 哈希最小（确定性）。选择与理由写进 <输出>.conflicts.tsv。
-# 程序本体内嵌的着色器（不在包里）：Switch main 原映像里有 10 个控制段，前 6 个是图形着色器，与 PC D2R.exe 内嵌的 6 个 DXBC 同序一一对应
-#   （两边同位置各有一对完全相同的重复项）；后 4 个是计算着色器，PC 无对应，另行处理。
-# 用法：shader_map.py <PC 包目录> <Switch 包目录> <PC metallib 缓存目录> <输出 tsv> [<main 原映像> <PC D2R.exe>]
 # Mapping table: Switch shader → PC shader (DXBC) → PC-chain MSL (metallib).
 # Basis: data/hd/shaders on both sides holds 162 SHAD packages with the same names, one BTCD record per variant, and record counts are equal package by package (10847 in total);
 #   apart from sizes, record headers differ only in the platform number (PC 3 / Switch 5), and there is no permutation key ⇒ map one-to-one by index within the package.
@@ -46,8 +33,8 @@ def dx_outputs(dx):
     return sum(1 for q in range(n) if struct.unpack_from('<I', dx, j + 16 + q * 24 + 8)[0] == 0)
 
 def dm_parts(rec):
-    i = rec.find(bytes.fromhex('34127698'))            # 控制段魔数（小端 0x98761234） | control segment magic (little-endian 0x98761234)
-    csz = struct.unpack_from('<I', rec, 0x28)[0]        # 记录头：平台号 5、控制段长度… | record header: platform number 5, control segment length...
+    i = rec.find(bytes.fromhex('34127698'))            # control segment magic (little-endian 0x98761234)
+    csz = struct.unpack_from('<I', rec, 0x28)[0]        # record header: platform number 5, control segment length...
     return rec[i:i + csz], i
 
 STAGE = {'vs': '顶点', 'ps': '像素', 'cs': '计算', 'hs': '外壳', 'ds': '域'}
@@ -86,7 +73,6 @@ if len(sys.argv) > 6:
         o = m.start(); sz = struct.unpack_from('<I', pe, o + 24)[0] if o + 32 <= len(pe) else 0
         if 64 < sz < 1 << 20 and o + sz <= len(pe) and struct.unpack_from('<I', pe, o + 20)[0] == 1: pc_dx.append(pe[o:o + sz])
     gfx = [o for o in dm_ctl if mi.rfind(bytes.fromhex('78563412'), o - 0x1000, o) > 0]
-    # 按特征配对（不靠顺序：反汇编发现两边内嵌顺序不同）：阶段取 SPH；集合差异 = cb/t/s 与（顶点）输入槽的对称差，取唯一最小
     # Pair by features (not by order: disassembly showed the embedded order differs between the two sides): stage is taken from SPH; set difference = symmetric difference of cb/t/s and (vertex) input slots, take the unique minimum
     def pc_feat(dx):
         h = hashlib.sha256(dx).hexdigest()[:16]
@@ -121,7 +107,6 @@ with open(out, 'w') as f:
     f.write('package\tindex\tstage\tdm_ctl_sha16\tpc_dxbc_sha16\tmetallib\tpc_outputs\tdm_outputs\tdm_ubo\tdm_tex\tdm_samp\tdm_ssbo\tsubset_ok(cb|t<<1|s<<2|ssbo全等<<3)\n')
     for r in rows: f.write('\t'.join(map(str, r)) + '\n')
 
-# 键冲突裁定
 # Key conflict resolution
 def dx_chunks(d):
     out = {}
