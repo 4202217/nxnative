@@ -105,7 +105,11 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "关渲
     orig(obj, state);
 }
 
-// 取 DeviceSink 的输入混音缓冲 → int16 立体声 | DeviceSink input mix buffers → int16 stereo
+// 取 DeviceSink 的输入混音缓冲 → int16 立体声。命令号 SDK 16 是 0x13；SDK 20 在它前面插了一个命令，成了 0x14（sdk+0x233f44 写命令处，布局不变：0x148 字节，
+//   +0x128 上采样缓冲、+0x130 输入数、+0x134 输入下标）。render_once 按布局设
+// DeviceSink input mix buffers → int16 stereo. The command ID is 0x13 in SDK 16; SDK 20 inserted a command before it, making it 0x14 (written at sdk+0x233f44, same layout: 0x148 bytes,
+//   +0x128 upsample buffer, +0x130 input count, +0x134 input indices). render_once sets it by layout
+static int g_sink_id = 0x13;
 static int capture(const uint8_t *cl, int16_t *dst) {
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
     const int32_t *mix = *(const int32_t *const *)(cl + 8);
@@ -120,7 +124,7 @@ static int capture(const uint8_t *cl, int16_t *dst) {
     for (uint32_t i = 0; i < ncmd; i++) {
         uint32_t magic = *(const uint32_t *)c; int16_t size = *(const int16_t *)(c + 6);
         if (magic != 0xcafebabeu || size <= 0) { if (!logged++) LOG("【红】audren：命令表第 %u 条格式不对（魔数 %#x 大小 %d）", i, magic, size); return 0; }
-        if (c[5] == 0x13 && c[4]) {
+        if (c[5] == g_sink_id && c[4]) {
             uint32_t nin = *(const uint32_t *)(c + 0x130); const int16_t *in = (const int16_t *)(c + 0x134);
             const int32_t *up = *(const int32_t *const *)(c + 0x128);
             if (!logged++) LOG("audren：DeviceSink 输入 %u 个（%d %d …）采样率 %u 每帧 %u 混音缓冲 %p 上采样缓冲 %p", nin, nin ? in[0] : -1, nin > 1 ? in[1] : -1, rate, samples, (void *)mix, (void *)up);
@@ -153,24 +157,41 @@ static int capture(const uint8_t *cl, int16_t *dst) {
 // Render one frame (generate commands + CPU processing); dst = output (stereo int16, *nout samples). The two callers (render thread, catch-up) are serialized by a host lock: they share one command buffer
 static pthread_mutex_t g_render_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_updates, g_renders, g_catchups;
+// SDK 20（塞尔达传说 旷野之息 1.9.0）的 AudioRenderSystem 换了布局：取模式 / 设备 / 命令缓冲的成员函数都内联掉了（sdk+0x22a70c ExecuteAudioRendererRendering：
+//   +0x48 渲染设备、+0x4c 执行模式，都要是 1；+0xf8 / +0x100 命令缓冲起址 / 长），GenerateCommand 改收 Span<std::byte> 并回 Span（x0 起址、x1 长，就是生成出的命令表），
+//   UpdateImpl 持的互斥锁在 +0x2d0（SDK 16 是 +0x1f0）。按有没有 Span 版 GenerateCommand 认布局
+// SDK 20's AudioRenderSystem (The Legend of Zelda: Breath of the Wild 1.9.0) has another layout: the member functions for mode / device / command buffer are inlined (sdk+0x22a70c ExecuteAudioRendererRendering:
+//   +0x48 rendering device and +0x4c execution mode, both must be 1; +0xf8 / +0x100 command buffer start / length), GenerateCommand takes a Span<std::byte> and returns a Span (x0 start, x1 length: the generated command list),
+//   and the mutex UpdateImpl holds is at +0x2d0 (+0x1f0 in SDK 16). The layout is recognized by the presence of the Span version of GenerateCommand
+typedef struct { uint8_t *p; size_t n; } span_t;
 static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
     static int (*mode)(void *), (*device)(void *); static uint8_t *(*cbuf)(void *); static size_t (*cbsz)(void *), (*gen)(void *, void *, size_t);
+    static span_t (*gen20)(void *, void *, size_t); static size_t mu_off;
     static void (*tmax)(void *, uint32_t), (*setup)(void *, const void *, size_t), (*process)(void *), (*lock)(void *), (*unlock)(void *);
     if (!process) {
         lock = gsym("_ZN2nn2os12SdkMutexType4LockEv"); unlock = gsym("_ZN2nn2os12SdkMutexType6UnlockEv");
-        mode = gsym("_ZNK2nn5audio6server17AudioRenderSystem16GetExecutionModeEv"); device = gsym("_ZNK2nn5audio6server17AudioRenderSystem18GetRenderingDeviceEv");
-        cbuf = gsym("_ZNK2nn5audio6server17AudioRenderSystem26GetCommandBufferWorkBufferEv"); cbsz = gsym("_ZNK2nn5audio6server17AudioRenderSystem30GetCommandBufferWorkBufferSizeEv");
-        gen = gsym("_ZN2nn5audio6server17AudioRenderSystem15GenerateCommandEPvm");
+        gen20 = guest_sym("_ZN2nn5audio6server17AudioRenderSystem15GenerateCommandENS_4SpanISt4byteEE");
+        if (!gen20) {
+            mode = gsym("_ZNK2nn5audio6server17AudioRenderSystem16GetExecutionModeEv"); device = gsym("_ZNK2nn5audio6server17AudioRenderSystem18GetRenderingDeviceEv");
+            cbuf = gsym("_ZNK2nn5audio6server17AudioRenderSystem26GetCommandBufferWorkBufferEv"); cbsz = gsym("_ZNK2nn5audio6server17AudioRenderSystem30GetCommandBufferWorkBufferSizeEv");
+            gen = gsym("_ZN2nn5audio6server17AudioRenderSystem15GenerateCommandEPvm");
+        }
+        mu_off = gen20 ? 0x2d0 : 0x1f0; g_sink_id = gen20 ? 0x14 : 0x13;
+        LOG("audren：AudioRenderSystem 按 SDK %s 布局（更新锁 +%#zx）", gen20 ? "20" : "16", mu_off);
         tmax = gsym("_ZN2nn5audio3dsp20CommandListProcessor17SetProcessTimeMaxEj"); setup = gsym("_ZN2nn5audio3dsp20CommandListProcessor5SetupEPKvm");
         process = gsym("_ZN2nn5audio3dsp20CommandListProcessor7ProcessEv");
     }
-    if (mode(sys) != 1 || device(sys) != 1) return 0x40299;   // 同原函数：非 CPU 手动模式不能手动渲染 | same as the original: manual rendering needs CPU + manual mode
+    int md = gen20 ? *(int32_t *)(sys + 0x4c) : mode(sys), dv = gen20 ? *(int32_t *)(sys + 0x48) : device(sys);
+    if (md != 1 || dv != 1) return 0x40299;   // 同原函数：非 CPU 手动模式不能手动渲染 | same as the original: manual rendering needs CPU + manual mode
     pthread_mutex_lock(&g_render_mu);
     uint64_t t0 = now_ns();
-    // 生成命令要与游戏线程的 RequestUpdate（AudioRenderSystem::Update，持 +0x1f0 的互斥锁）互斥：原版的系统线程（SendCommandToDsp）也是持同一把锁生成。处理（CPU 版 DSP）照原版在锁外。
-    // Command generation must exclude the game thread's RequestUpdate (AudioRenderSystem::Update, which holds the mutex at +0x1f0): the original system thread (SendCommandToDsp) generates under the same lock. Processing (the CPU DSP) stays outside the lock, as in the original.
-    uint8_t *cl = cbuf(sys);
-    lock(sys + 0x1f0); size_t n = gen(sys, cl, cbsz(sys)); unlock(sys + 0x1f0);
+    // 生成命令要与游戏线程的 RequestUpdate（AudioRenderSystem::Update，持 mu_off 处的互斥锁）互斥：原版的系统线程（SendCommandToDsp）也是持同一把锁生成。处理（CPU 版 DSP）照原版在锁外。
+    // Command generation must exclude the game thread's RequestUpdate (AudioRenderSystem::Update, which holds the mutex at mu_off): the original system thread (SendCommandToDsp) generates under the same lock. Processing (the CPU DSP) stays outside the lock, as in the original.
+    uint8_t *cl; size_t n;
+    lock(sys + mu_off);
+    if (gen20) { span_t sp = gen20(sys, *(uint8_t **)(sys + 0xf8), *(size_t *)(sys + 0x100)); cl = sp.p; n = sp.n; }
+    else { cl = cbuf(sys); n = gen(sys, cl, cbsz(sys)); }
+    unlock(sys + mu_off);
     atomic_fetch_add(&g_renders, 1);
     uint64_t proc[16] __attribute__((aligned(16))) = {0};   // CommandListProcessor（0x58 字节）| CommandListProcessor (0x58 bytes)
     tmax(proc, 0xffffffffu); setup(proc, cl, n); process(proc);

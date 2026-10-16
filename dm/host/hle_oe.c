@@ -80,6 +80,13 @@ static int opmode(void) { return dm_opmode(); }
 HLE_FORCE("_ZN2nn2oe17FinishStartupLogoEv", "收起系统启动画面（经 am 应用代理）；宿主没有启动画面", void, h_oe_FinishLogo, void) {}   // 银河战士 生存恐惧在 main+0xadfed0 调 | Metroid Dread calls it at main+0xadfed0
 HLE_FORCE("_ZN2nn2oe44SetUserInactivityDetectionTimeExtendedUnsafeEb", "无操作自动熄屏时长（经 am）；宿主不熄屏", void, h_oe_InactivityExt, int on) { (void)on; }
 HLE_FORCE("_ZN2nn2oe15EnableRecordingEv", "录像开关；宿主无系统录像", void, h_oe_EnableRec, void) {}
+// 小程序资源用户号（ARUID，am 分给本进程的号）：宿主没有 am，SDK 自己的取法回 0。SDK 20 的 OpenAudioRenderer（CPU 渲染 + 手动执行那条路，sdk+0x221730）
+//   取到 0 即中止（塞尔达传说 旷野之息 1.9.0）；SDK 16 不查。报一个固定的非 0 号，只当标识用
+// Applet resource user ID (ARUID, the number am assigns to this process): the host has no am, and the SDK's own getter returns 0. SDK 20's OpenAudioRenderer (the CPU rendering + manual execution path, sdk+0x221730)
+//   aborts when it gets 0 (The Legend of Zelda: Breath of the Wild 1.9.0); SDK 16 did not check. Report a fixed non-zero ID, used only as an identifier
+HLE_FORCE("_ZN2nn6applet23GetAppletResourceUserIdEv", "小程序资源用户号；宿主固定非 0", uint64_t, h_applet_Aruid, void) { return 0x80; }
+// 启动参数（别的程序带着参数启动本作时才有；返回 bool）：宿主从来不带 | Launch parameter (present only when another program launched this one with one; returns bool): the host never passes one
+HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "启动参数：没有", unsigned, h_oe_PopLaunchParam, size_t *out, void *buf, size_t n) { (void)buf; (void)n; if (out) *out = 0; return 0; }
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "录像开关；宿主无系统录像", void, h_oe_DisableRec, void) {}
 HLE_FORCE("_ZN2nn2oe16EnableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_EnableShot, void) {}
 HLE_FORCE("_ZN2nn2oe17DisableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_DisableShot, void) {}

@@ -120,6 +120,12 @@ HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "共享字体大
 // 是否跑在 Switch 2（代号 Ounce）上（返回 bool）：宿主按 Switch 1 报假。马力欧 1.2.1 据此决定要不要数追加内容（升级包）、提示升级到 Switch 2 版
 // Whether running on a Switch 2 (codename Ounce) (returns bool): the host reports false, as a Switch 1. Mario 1.2.1 uses it to decide whether to count add-on content (the upgrade pack) and suggest the Switch 2 Edition
 HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "是否 Switch 2：否", unsigned, h_pl_IsOunce, void) { return 0; }
+// 塞尔达传说 旷野之息（SDK 20）：先请求装载共享字体再查状态；宿主的替身字体随取随有。VR 模式（Labo VR 眼镜）：宿主不进 VR，查询恒否，进出空操作
+// The Legend of Zelda: Breath of the Wild (SDK 20): asks for the shared fonts to be loaded before querying their state; the host's stand-in fonts are there on demand. VR mode (the Labo VR goggles): the host never enters VR; the query is always false, entering / leaving is a no-op
+HLE_FORCE("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "请求装载共享字体；替身字体随取随有，空操作", void, h_pl_ReqLoad, int type) { (void)type; }
+HLE_FORCE("_ZN2nn2pl8IsVrModeEv", "VR 模式：否", unsigned, h_pl_IsVr, void) { return 0; }
+HLE_FORCE("_ZN2nn2pl11BeginVrModeEv", "进 VR 模式（经 am）；宿主不进", void, h_pl_BeginVr, void) { LOG("pl::BeginVrMode（宿主不进 VR）"); }
+HLE_FORCE("_ZN2nn2pl9EndVrModeEv", "出 VR 模式（经 am）", void, h_pl_EndVr, void) {}
 
 // ---------- ec：商店小程序（升级到 Switch 2 版的页面）----------
 // 商店属排除范围：空操作。游戏不看返回值（两个重载都按无返回值处理）
@@ -161,6 +167,18 @@ HLE_FORCE("_ZN2nn3nfp14GetDeviceStateERKNS0_12DeviceHandleE", "设备状态：�
 HLE_FORCE("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", "标签信息：没有标签", Result, h_nfp_TagInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetTagInfo"); }
 HLE_FORCE("_ZN2nn3nfp12GetModelInfoEPNS0_9ModelInfoERKNS0_12DeviceHandleE", "型号信息：没有标签", Result, h_nfp_ModelInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetModelInfo"); }
 HLE_FORCE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", "挂载标签：没有标签", Result, h_nfp_Mount, const NfpDeviceHandle *h, int model, int target) { (void)h; (void)model; (void)target; return nfp_no_tag("Mount"); }
+// 塞尔达传说 旷野之息（SDK 20）另用的一组：标签进出事件（绑内核事件、恒不触发；不接管时 SDK 的实现在 sdk+0x3f2a78 读空指针）、两参数的 Mount、
+//   Unmount、读通用 / 登记信息（都按没有标签答）、库状态（1 = 已初始化）与 Finalize
+// Another group The Legend of Zelda: Breath of the Wild (SDK 20) uses: tag activate / deactivate events (bound to a kernel event that never fires; without the take-over the SDK's code reads a null pointer at sdk+0x3f2a78), the two-argument Mount,
+//   Unmount, reading common / register info (all answered as no tag), the library state (1 = initialized) and Finalize
+HLE_FORCE("_ZN2nn3nfp19AttachActivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", "标签放上事件；绑内核事件、恒不触发", Result, h_nfp_AttachAct, void *ev, const NfpDeviceHandle *h) { (void)h; hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn3nfp21AttachDeactivateEventEPNS_2os15SystemEventTypeERKNS0_12DeviceHandleE", "标签拿走事件；绑内核事件、恒不触发", Result, h_nfp_AttachDeact, void *ev, const NfpDeviceHandle *h) { (void)h; hle_bind_system_event(ev, 0); return RES_OK; }
+HLE_FORCE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeE", "挂载标签（两参数）：没有标签", Result, h_nfp_Mount2, const NfpDeviceHandle *h, int model) { (void)h; (void)model; return nfp_no_tag("Mount"); }
+HLE_FORCE("_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE", "卸载标签：没有标签", Result, h_nfp_Unmount, const NfpDeviceHandle *h) { (void)h; return nfp_no_tag("Unmount"); }
+HLE_FORCE("_ZN2nn3nfp13GetCommonInfoEPNS0_10CommonInfoERKNS0_12DeviceHandleE", "通用信息：没有标签", Result, h_nfp_CommonInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetCommonInfo"); }
+HLE_FORCE("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE", "登记信息：没有标签", Result, h_nfp_RegInfo, void *out, const NfpDeviceHandle *h) { (void)out; (void)h; return nfp_no_tag("GetRegisterInfo"); }
+HLE_FORCE("_ZN2nn3nfp8GetStateEv", "amiibo 库状态：已初始化（1）", int, h_nfp_LibState, void) { return 1; }
+HLE_FORCE("_ZN2nn3nfp8FinalizeEv", "amiibo 库收尾；宿主无会话", void, h_nfp_Fini, void) {}
 HLE_FORCE("_ZN2nn3nfp5FlushERKNS0_12DeviceHandleE", "写回标签：没有标签", Result, h_nfp_Flush, const NfpDeviceHandle *h) { (void)h; return nfp_no_tag("Flush"); }
 HLE_FORCE("_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj", "打开应用区：没有标签", Result, h_nfp_OpenArea, const NfpDeviceHandle *h, uint32_t id) { (void)h; (void)id; return nfp_no_tag("OpenApplicationArea"); }
 HLE_FORCE("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "读应用区：没有标签", Result, h_nfp_GetArea, void *buf, uint64_t *n, const NfpDeviceHandle *h, uint64_t sz) { (void)buf; (void)h; (void)sz; if (n) *n = 0; return nfp_no_tag("GetApplicationArea"); }

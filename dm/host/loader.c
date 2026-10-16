@@ -211,15 +211,36 @@ static void register_gates(module_t *m, const char *dir) {
     LOG("%s: gates %d patch_off %#llx keys %lu/%lu/%lu/%lu", m->name, ng, m->patch_off, g_key18, g_keytls, g_keytlr, g_keygate);
 }
 
+// DT_RELR（SDK 20 起，塞尔达传说 旷野之息 1.9.0 的三个模块都有）：相对重定位的紧凑表，加数就在槽里（*槽 += 基址）。
+// 每项 8 字节：偶数 = 新起点偏移（重定位它，指针移到下一槽）；奇数 = 位图，第 1–63 位依次对应起点后的 63 个槽，用完指针前进 63 槽。
+// 不处理时 main 的 GOT 与虚表全是模块内偏移（main 的 RELA 里只剩符号重定位）
+// DT_RELR (from SDK 20; all three modules of The Legend of Zelda: Breath of the Wild 1.9.0 have it): a compact table of relative relocations with the addend in the slot (*slot += base).
+// Each 8-byte entry: even = a new start offset (relocate it, the pointer moves to the next slot); odd = a bitmap whose bits 1-63 stand for the 63 slots after the pointer, which then moves on by 63 slots.
+// Without it main's GOT and vtables hold module offsets (main's RELA keeps only symbol relocations)
+static unsigned relr_apply(module_t *m, uint64_t relr, uint64_t relrsz, uint64_t delta) {
+    const uint64_t *e = (const uint64_t *)(m->base + relr); uint64_t *where = NULL; unsigned n = 0;
+    for (uint64_t i = 0; i < relrsz / 8; i++) {
+        uint64_t v = e[i];
+        if (!(v & 1)) { where = (uint64_t *)(m->base + v); *where++ += delta; n++; continue; }
+        if (!where) die("%s: DT_RELR 位图项前没有起点", m->name);
+        for (unsigned b = 0; (v >>= 1); b++) if (v & 1) { where[b] += delta; n++; }
+        where += 63;
+    }
+    return n;
+}
+
 static void relocate(module_t *m) {
-    uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0;
+    uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0, relr = 0, relrsz = 0;
     for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
         case DT_RELA: rela = d->d_un.d_ptr; break;
         case DT_RELASZ: relasz = d->d_un.d_val; break;
         case DT_JMPREL: jmprel = d->d_un.d_ptr; break;
         case DT_PLTRELSZ: pltsz = d->d_un.d_val; break;
+        case DT_RELR: relr = d->d_un.d_ptr; break;
+        case DT_RELRSZ: relrsz = d->d_un.d_val; break;
     }
     int cnt[3] = {0}, nint = 0;
+    unsigned nrelr = relr ? relr_apply(m, relr, relrsz, (uint64_t)m->base) : 0;
     const Elf64_Rela *tabs[2] = {(const Elf64_Rela *)(m->base + rela), (const Elf64_Rela *)(m->base + jmprel)};
     uint64_t sizes[2] = {relasz, pltsz};
     for (int t = 0; t < 2; t++)
@@ -246,7 +267,7 @@ static void relocate(module_t *m) {
             if (type == R_AARCH64_JUMP_SLOT) { *where = v; cnt[2]++; }
             else { *where = v + r->r_addend; cnt[1]++; }       // ABS64 / GLOB_DAT
         }
-    LOG("%s: reloc relative=%d abs/glob=%d jump=%d%s", m->name, cnt[0], cnt[1], cnt[2], nint ? "（含绑到先装模块的定义） | (some bound to an earlier module's definition)" : "");
+    LOG("%s: reloc relative=%d relr=%u abs/glob=%d jump=%d%s", m->name, cnt[0], nrelr, cnt[1], cnt[2], nint ? "（含绑到先装模块的定义） | (some bound to an earlier module's definition)" : "");
     if (nint > 8) LOG("%s: 共 %d 处绑到先装模块的定义 | %d bound to an earlier module's definition in all", m->name, nint, nint);
 }
 
@@ -262,11 +283,14 @@ void loader_hash_log(void) {
     for (int k = 0; k < g_nmod; k++) {
         module_t *m = &g_mod[k];
         uint8_t *cp = malloc(m->size); memcpy(cp, m->base, m->size);
-        uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0;
+        uint64_t rela = 0, relasz = 0, jmprel = 0, pltsz = 0, relr = 0, relrsz = 0;
         for (const Elf64_Dyn *d = m->dyn; d->d_tag; d++) switch (d->d_tag) {
             case DT_RELA: rela = d->d_un.d_ptr; break; case DT_RELASZ: relasz = d->d_un.d_val; break;
             case DT_JMPREL: jmprel = d->d_un.d_ptr; break; case DT_PLTRELSZ: pltsz = d->d_un.d_val; break;
+            case DT_RELR: relr = d->d_un.d_ptr; break; case DT_RELRSZ: relrsz = d->d_un.d_val; break;
         }
+        // DT_RELR 槽：减回基址即与地址无关（在副本上做，复用 relr_apply 的走法）| DT_RELR slots: subtracting the base makes them address-independent (done on the copy, reusing relr_apply's walk)
+        if (relr) { uint8_t *b = m->base; m->base = cp; relr_apply(m, relr, relrsz, -(uint64_t)b); m->base = b; }
         const Elf64_Rela *tabs[2] = {(const Elf64_Rela *)(m->base + rela), (const Elf64_Rela *)(m->base + jmprel)};
         uint64_t sizes[2] = {relasz, pltsz}; unsigned nslot = 0;
         for (int t = 0; t < 2; t++)

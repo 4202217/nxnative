@@ -115,6 +115,9 @@ HLE_FORCE("_ZN2nn4pctl25TryBeginFreeCommunicationEb", "家长控制·与他人�
 HLE_FORCE("_ZN2nn4pctl20EndFreeCommunicationEv", "家长控制·与他人通信", void, h_pctl_End, void) {}
 // Engage 进战斗地图时查询（不弹界面）；不接管时 SDK 经 sm 连 pctl 服务，宿主没有，中止 | Engage asks on entering a battle map (no UI); without this the SDK connects to the pctl service through sm, which the host does not have, and aborts
 HLE_FORCE("_ZN2nn4pctl28IsFreeCommunicationAvailableEv", "家长控制·与他人通信可用否，联网排除；恒否", unsigned, h_pctl_IsFree, void) { return 0; }
+// 塞尔达传说 旷野之息：进 VR 相关画面前查家长控制的 3D 立体显示许可（返回 bool，参数 = 是否弹界面，游戏传 0）。宿主没有家长控制：允许
+// The Legend of Zelda: Breath of the Wild: checks the parental-control permission for stereoscopic 3D before VR-related screens (returns bool; the argument = whether to show UI, the game passes 0). The host has no parental controls: permitted
+HLE_FORCE("_ZN2nn4pctl27CheckStereoVisionPermissionEb", "家长控制·3D 立体显示许可；宿主无家长控制，允许", unsigned, h_pctl_Stereo, unsigned show_ui) { (void)show_ui; return 1; }
 
 // swkbd 软键盘：见 hle_swkbd.c
 // swkbd software keyboard: see hle_swkbd.c

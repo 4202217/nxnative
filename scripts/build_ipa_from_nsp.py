@@ -141,6 +141,8 @@ def scan_nsps(nsp_dir):
     Group by game: {application title ID: {'base': path, 'updates': [(version, path)], 'dlc': [(title ID, version, path)]}}"""
     fams, unknown = {}, []
     for p in sorted(nsp_dir.glob('*.nsp')):
+        if p.stat().st_size == 0:   # 下载不全留下的空文件（塞尔达传说 旷野之息的文件夹里有一个 0 字节的 DLC NSP，旁边是完整的 (1).nsp）| an empty file left by an incomplete download (the Zelda BotW folder holds a 0-byte DLC NSP next to the complete (1).nsp)
+            say(f'跳过空文件 | skipping an empty file: {p.name}'); continue
         tid = title_of(p)
         if tid is None: unknown.append(p); continue
         low = tid & 0xFFF   # 基础版 …000，更新 …800，DLC = 基础版 + 0x1000 + 序号 | base …000, update …800, DLC = base + 0x1000 + index
@@ -322,7 +324,11 @@ def extract_aoc(nx, keys, work, app, fam, logs):
     Returns None without DLC. DLC packages are small (121 KB each for Engage, the content itself is in the update), so they are extracted again every time"""
     if not fam['dlc']: return None
     tmp = work / 'aoc.partial'; rmtree(tmp)
-    for tid, _, p in sorted(fam['dlc']):
+    best = {}   # 同一 DLC 有几份时取版本最高、同版本取最大的那份 | when one DLC comes in several copies, take the highest version, and the largest of equal versions
+    for tid, ver, p in fam['dlc']:
+        k = (ver or 0, p.stat().st_size)
+        if tid not in best or k > best[tid][0]: best[tid] = (k, p)
+    for tid, (_, p) in sorted(best.items()):
         idx = tid - app - 0x1000
         say(f'DLC 序号 {idx} | DLC index {idx}: {p.name}')
         run([nx, keys, '--aoc', p, tmp / str(idx)], logs / f'aoc_{idx}.log')

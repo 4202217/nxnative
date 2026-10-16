@@ -19,7 +19,7 @@ typedef struct { uint8_t *d; size_t n; } dm_blob;   // 整份读进内存的一�
 #define ELF64_R_SYM(i) ((i) >> 32)
 #define ELF64_R_TYPE(i) ((i) & 0xffffffff)
 enum { DT_INIT = 12, DT_RELA = 7, DT_RELASZ = 8, DT_JMPREL = 23, DT_PLTRELSZ = 2, DT_SYMTAB = 6, DT_STRTAB = 5,
-       DT_INIT_ARRAY = 25, DT_INIT_ARRAYSZ = 27 };
+       DT_INIT_ARRAY = 25, DT_INIT_ARRAYSZ = 27, DT_RELRSZ = 35, DT_RELR = 36 };
 enum { R_AARCH64_ABS64 = 257, R_AARCH64_GLOB_DAT = 1025, R_AARCH64_JUMP_SLOT = 1026, R_AARCH64_RELATIVE = 1027 };
 #define ELF64_ST_BIND(i) ((i) >> 4)            // 符号绑定：0 = STB_LOCAL | symbol binding: 0 = STB_LOCAL
 #define ELF64_ST_VISIBILITY(o) ((o) & 3)       // 可见性：0 = STV_DEFAULT | visibility: 0 = STV_DEFAULT

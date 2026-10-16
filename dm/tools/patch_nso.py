@@ -205,6 +205,27 @@ CUTS = {
   '8c08b9719e085f91847b5e0f935d9488': [
     (0x32f92d4, 'f303002a', '33008052', 'QualitySettings.set_vSyncCount 包装：参数 mov w19,w0 → mov w19,#1（游戏自己的 60 帧路径）', '仅宿主'),
   ],
+  # 塞尔达传说 旷野之息 1.9.0（v1114112）main：60 帧。sead::GameFrameworkNx 的主循环（main+0x112660c）开着动态间隔（框架 +0x267 = 1）：
+  # 每帧按上一帧耗时算要几个垂直同步（向上取整），夹在 [2, 最大 3]（最大值取自间隔控制器 +0xc，构造 main+0x1126c04），超时连续 3 帧才升档，
+  # 降档每 6 帧降一级、降到 2 为止，结果经 setWaitVsyncInterval（vtable +0x130，main+0x11269b8）交给出图（nvnWindowSetPresentInterval）。
+  # 游戏逻辑的时间步跟着走：ksys::VFR 以基础间隔 2 初始化（main+0x127e740 常数 2 → VFR::init main+0x151d2d0），每帧 VFR::updateInterval（main+0x151d3d0，
+  # 两处调用 main+0xcf9ad4 / main+0x1281044）取框架当前间隔（vtable +0x138），帧比 = 当前间隔 / 2——间隔 1 时每帧推进半个 30 帧拍，游戏速度不变；
+  # 卡了升回 2 / 3 时帧比 1 / 1.5，同样不变速。所以只把下限从 2 改成 1：候选间隔的下限（两处）、升档时记的降档目标 max(候选, 3) − 1 → max(候选, 2) − 1、
+  # 降档停在 < 3 → < 2。真机上同样逻辑按 1 起步即 60 帧（GPU 跟不上时自己退回 30）
+  # The Legend of Zelda: Breath of the Wild 1.9.0 (v1114112) main: 60 fps. The main loop of sead::GameFrameworkNx (main+0x112660c) runs a dynamic interval (framework +0x267 = 1):
+  # every frame it computes how many vsyncs the last frame needed (rounded up), clamped to [2, max 3] (the max comes from the interval controller +0xc, constructed at main+0x1126c04); it steps up after 3 overrunning frames in a row,
+  # steps down one level every 6 frames until 2, and hands the result through setWaitVsyncInterval (vtable +0x130, main+0x11269b8) to presentation (nvnWindowSetPresentInterval).
+  # The game logic time step follows it: ksys::VFR is initialized with a base interval of 2 (constant 2 at main+0x127e740 → VFR::init main+0x151d2d0), and every frame VFR::updateInterval (main+0x151d3d0,
+  # called at main+0xcf9ad4 / main+0x1281044) takes the framework's current interval (vtable +0x138); the frame ratio = current interval / 2 -- at interval 1 each frame advances half a 30 fps tick and the game speed stays the same;
+  # when it struggles and steps back to 2 / 3 the ratio is 1 / 1.5, again at the same speed. So only the floor changes from 2 to 1: the lower bound of the candidate interval (two places), the step-down target recorded when stepping up, max(candidate, 3) - 1 → max(candidate, 2) - 1,
+  # and stepping down stops at < 3 → < 2. On hardware the same logic starting from 1 would also be 60 fps (falling back to 30 by itself when the GPU cannot keep up)
+  'cd57b23fa4bbad65803d9788c01821ee': [
+    (0x112670c, '6041201e', '4041201e', '动态间隔候选下限：fmov s0,s11（2.0）→ fmov s0,s10（1.0）', '仅宿主'),
+    (0x1126710, '7f0b0071', '7f070071', '动态间隔候选下限：cmp w27,#2 → cmp w27,#1', '仅宿主'),
+    (0x112665c, '78008052', '58008052', '升档时记的降档目标 max(候选, w24) − 1：mov w24,#3 → mov w24,#2', '仅宿主'),
+    (0x1126748, '1f0d0071', '1f090071', '升档时记的降档目标：cmp w8,#3 → cmp w8,#2', '仅宿主'),
+    (0x1126794, '3f0d0071', '3f090071', '降档到 < 3 停 → 到 < 2 停：cmp w9,#3 → cmp w9,#2', '仅宿主'),
+  ],
   '56ec24747ec9e7f19b3efb062483a19d': [
     (0x346430, '08fca752', '087ca052', 'AddressRegionManager 构造：节点区上限 mov w8,#0x3fe00000 → mov w8,#0x3e00000', '仅宿主'),
     (0x3464cc, '09fca752', '097ca052', 'AddressRegionManager 构造：节点区登记为已占区域的长度 mov w9,#0x3fe00000 → mov w9,#0x3e00000', '仅宿主'),
