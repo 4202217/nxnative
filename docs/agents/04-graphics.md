@@ -139,6 +139,7 @@ Consequence: any optimization that infers "which textures a draw reads" from bou
 | `DM_NVN_T2T_TRACE=WxH:file` (+ `DM_NVN_T2T_FROM=f`) | After each texture copy into an RGBA16F texture of that size, a GPU-timeline copy of the result into a trace buffer; 240 entries written to `file` (header line, 240 frame numbers, then the texels) |
 | `DM_TEST_PRESENT_LAG=n,ms` | Sleep `ms` before every `n`th present: a slow frame on demand (Mario then switches to present interval 2) |
 | `DM_NVN_BLIT_ORDER=0` | No barriers between dependent operations in the copy encoder (reproduces the fountain bug) |
+| `DM_NVN_KEYDUMP=<fs key>[:n[:every]]` | For up to n draws of that fragment shader (default 6; at most one every `every` frames), the `PASSDUMP` binding lines plus `[kd]` lines: vertex attribute formats, each vertex stream's data (all instances of per-instance streams) and every value of both stages' uniform buffers. Meant for devices: no frame number to guess; compare with the same switch on the Mac |
 | `DM_NVN_CUT=<draws>` | Commit the replay's command buffer every that many draws, between passes (default 64; 0 = one command buffer per submission) |
 | `MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog` | Metal validation without aborting |
 
