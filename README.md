@@ -4,20 +4,34 @@ Play your own Nintendo Switch games natively on iPhone and iPad. Bring your game
 
 It is not an emulator: the game's own code runs directly on the Apple chip, with Switch graphics rebuilt on Metal. Nothing from any game is in this repository, and the project is not affiliated with Nintendo or any game publisher.
 
+## Acknowledgements
+
+This project is built on other people's work:
+
+- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this native-execution approach, for Diablo II: Resurrected. nxnative (first called smbw-mobile) started as a copy of its generic parts: the NSO rewriter, the host that stands in for Horizon, the NVN-on-Metal layer and the iOS app shell. Fixes go both ways.
+- **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, unmodified in `dm/third_party/ryujinx`) turns the games' Maxwell shaders into SPIR-V. Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.
+- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: its kernel, mesosphère, is the reference for Horizon's synchronization semantics (address arbiter, condition variables).
+- **yuzu**: Maxwell instruction encodings for the shader reference tool, and a cross-check for kernel behaviour.
+- **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`. **hactool** did the first extractions.
+- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
+- **deko3d** (zlib): its texture layout size algorithm is ported in `dm/gfx/nvn/nvn_tex.c`.
+- **libvpx** (VP9 movies), **libdeflate**, **bcdec** and **NVIDIA FLIP** ship in `dm/third_party` with their licenses ([list](dm/third_party/README.md)).
+- **Capstone**, **lz4**, **fontTools** and **XcodeGen** are used by the build.
+
 ## Games
 
 All of these are tested on an iPhone and playable:
 
-| Game | NSPs to put in the folder | IPA |
-|---|---|---|
-| Super Mario Bros. Wonder | base game + update 1.2.1 | ~4 GB |
-| Fire Emblem Engage | base game + update 2.0.0 (+ Expansion Pass DLC) | ~15 GB |
-| Metroid Dread | base game + update 2.1.0 | ~5 GB |
-| 13 Sentinels: Aegis Rim | base game + update 1.10 | ~5 GB |
-| Super Mario 3D World + Bowser's Fury | base game + update 1.2.2 | ~3 GB |
-| The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB |
+| Game | NSPs to put in the folder | IPA | Notes |
+|---|---|---|---|
+| Super Mario Bros. Wonder | base game + update 1.2.1 | ~4 GB | 60 fps, as on the Switch. `-p v0` packs 1.0.0 instead |
+| Fire Emblem Engage | base game + update 2.0.0 (+ Expansion Pass DLC) | ~15 GB | **Upgraded to 60 fps** (30 on the Switch), game speed unchanged. The DLC is packed in when its NSP is in the folder |
+| Metroid Dread | base game + update 2.1.0 | ~5 GB | 60 fps gameplay and 30 fps cutscenes, as on the Switch |
+| 13 Sentinels: Aegis Rim | base game + update 1.10 | ~5 GB | |
+| Super Mario 3D World + Bowser's Fury | base game + update 1.2.2 | ~3 GB | Both games in one app. Starts with the 3D touch layout (right stick, D-pad) |
+| The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | **Upgraded to 60 fps** (30 on the Switch), game speed unchanged; it drops back to 30 by itself in heavy scenes. Starts with the 3D touch layout. The DLC is packed in when its NSP is in the folder |
 
-Needs iOS / iPadOS 26 or later. Engage and Breath of the Wild run at 60 fps (30 on the Switch), and Metroid Dread plays at 60 with 30 fps cutscenes. Other games aren't supported yet: for them the script writes a survey instead of an IPA.
+Needs iOS / iPadOS 26 or later. Other games aren't supported yet: for them the script writes a survey instead of an IPA.
 
 ## Pack an IPA
 
@@ -77,20 +91,6 @@ A connected game controller hides the touch controls and keeps every button.
 ## For developers
 
 How it works, the script's options, running games on the Mac, adding a game, and per-game notes: [docs/development.md](docs/development.md). In-depth bring-up and debugging notes: [docs/agents](docs/agents/README.md).
-
-## Acknowledgements
-
-This project is built on other people's work:
-
-- **[d2r-mobile](https://github.com/jhaizhou-ops/d2r-mobile)** (MIT) developed this native-execution approach, for Diablo II: Resurrected. nxnative (first called smbw-mobile) started as a copy of its generic parts: the NSO rewriter, the host that stands in for Horizon, the NVN-on-Metal layer and the iOS app shell. Fixes go both ways.
-- **Ryujinx** (MIT): its shader translator (`Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator` 1.3.2, unmodified in `dm/third_party/ryujinx`) turns the games' Maxwell shaders into SPIR-V. Its emulation of the kernel and system services is also a reference when the host's behaviour is in doubt.
-- **[Atmosphère](https://github.com/Atmosphere-NX/Atmosphere)**: its kernel, mesosphère, is the reference for Horizon's synchronization semantics (address arbiter, condition variables).
-- **yuzu**: Maxwell instruction encodings for the shader reference tool, and a cross-check for kernel behaviour.
-- **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`. **hactool** did the first extractions.
-- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
-- **deko3d** (zlib): its texture layout size algorithm is ported in `dm/gfx/nvn/nvn_tex.c`.
-- **libvpx** (VP9 movies), **libdeflate**, **bcdec** and **NVIDIA FLIP** ship in `dm/third_party` with their licenses ([list](dm/third_party/README.md)).
-- **Capstone**, **lz4**, **fontTools** and **XcodeGen** are used by the build.
 
 ## License
 
