@@ -16,6 +16,8 @@ program_id	010028600EBDA000
 name	Super Mario 3D World + Bowser's Fury
 ipa	Mario3DWorld.ipa
 app_category	public.app-category.action-games
+# 虚拟手柄首次用 3D 布局（十字键、右摇杆、L3 / R3）：右摇杆转视角 | the virtual gamepad starts in the 3D layout (D-pad, right stick, L3 / R3): the right stick turns the camera
+pad_layout	full
 
 # ---- 版本 | Versions ----
 # 只解了合并 1.2.2 的那份；基础版单独的构建号用到时再补 | only the merged 1.2.2 copy is extracted; the base game's own build IDs are added when needed

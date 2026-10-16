@@ -90,10 +90,10 @@ Sign and install the IPA with your own tool (AltStore, Sideloadly, LiveContainer
 
 - **Controls:** a translucent touch gamepad over the picture:
   - ZL above L in the top-left corner, ZR above R in the top-right;
-  - − and + side by side at the top centre;
+  - − and + at the top centre, with the layout button (**2D** / **3D**) between them;
   - the left stick in the bottom-left corner, and A/B/X/Y (Nintendo positions) in the bottom-right, the same size and mirrored.
 
-  There is no on-screen D-pad or right stick. A connected physical controller hides the touch gamepad and keeps every button, mapped by position.
+  The **3D** layout adds a D-pad inward of the left stick, a right stick inward of A/B/X/Y, and L3 / R3 next to ZL / ZR. Tap the layout button to switch; the app remembers your choice. 3D World + Bowser's Fury and Breath of the Wild start in 3D, the other games in 2D (`pad_layout` in the game profile). A connected physical controller hides the touch gamepad and keeps every button, mapped by position.
 - **Saves and logs** live in the app's Documents, visible in the Files app: `save/`, `log.txt` (the previous run in `log.prev.txt`) and `pso_user.tsv`. When reporting a problem, send `log.txt`.
 - **Reinstalling:** sideloading tools may give a reinstalled app a new data folder; LiveContainer did, under its `Data/Application/<UUID>/Documents`. To keep your saves and prewarm list, copy them from the old folder while the app is closed.
 - **Switches without rebuilding:** environment switches can go in `Documents/env.txt` (one `KEY=VALUE` per line). Game files are also accepted at `Documents/romfs`.
