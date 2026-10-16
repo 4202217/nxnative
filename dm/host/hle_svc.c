@@ -30,6 +30,9 @@ int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintp
 static uint8_t *g_alias; static size_t g_alias_cap;
 static _Atomic uint64_t *g_alias_bits;   // 别名区页位图（alias_pages） | alias region page bitmap (alias_pages)
 static uint8_t *g_stack; static size_t g_stack_cap;
+// 地址在客体地址块里（客体线程的栈都在这里：游戏自己的堆或栈区）；大栈入口（hle_bigstack.c）据此判断要不要换栈
+// The address lies in the guest address block (every guest thread stack is here: the game's own heap or the stack region); the big-stack entry (hle_bigstack.c) uses it to decide whether to switch stacks
+int dm_guest_as_contains(uintptr_t a) { uintptr_t b = (uintptr_t)g_as; return g_as && a >= b && a - b < RESERVE; }
 
 static void mem_init(void) {
     if (g_as) return;

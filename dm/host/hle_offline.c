@@ -13,6 +13,10 @@ static _Alignas(16) uint8_t g_ev_ldn[0x100];
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", "遥测报告保存（用户）；不发送，报成功", Result, h_prepo_SaveU, void *self, const void *uid) { (void)self; (void)uid; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo10PlayReport4SaveEv", "遥测报告保存；不发送，报成功", Result, h_prepo_Save, void *self) { (void)self; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo10InitializeEv", "遥测初始化：原版连 prepo 服务（经 sm），宿主没有服务进程；空操作（Engage 显式调用）", Result, h_prepo_Init, void) { return RES_OK; }
+// 往报告里加会话号 / 联网状态：真机要先连 prepo 服务取会话（超级马力欧 3D 世界 + 狂怒世界进存档选择时调）；宿主不加，报成功
+// Add the session ID / connection status to a report: on hardware these first connect to the prepo service for the session (Super Mario 3D World + Bowser's Fury calls them entering the save select); the host adds nothing and reports success
+HLE_FORCE("_ZN2nn5prepo12AddSessionIdEPNS0_10PlayReportEPKc", "遥测会话号：不连服务，不加，报成功", Result, h_prepo_AddSess, void *rep, const char *key) { (void)rep; (void)key; return RES_OK; }
+HLE_FORCE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", "遥测联网状态：不连服务，不加，报成功", Result, h_prepo_AddNet, void *rep, const char *a, const char *b, const char *c) { (void)rep; (void)a; (void)b; (void)c; return RES_OK; }
 HLE_FORCE("_ZN2nn5prepo28RequestImmediateTransmissionEv", "遥测立即上传；不发送，报成功", Result, h_prepo_Tx, void) { return RES_OK; }
 
 // ---------- ldn：本地无线。初始化即失败，状态恒为「无」 ----------
@@ -78,6 +82,12 @@ HLE_FORCE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", "离线：网络请求�
 HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEP7in_addrS2_S2_S2_S2_", "离线：无 IP 配置", Result, h_nifm_IpCfg, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
     uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
 }
+// SDK 10 的同名函数参数是 socket::InAddr / in_addr，与上面和 hle_net.c 里的另一代刚好反过来（超级马力欧 3D 世界 + 狂怒世界）
+// SDK 10's functions of the same name take socket::InAddr / in_addr, exactly the other way round from the generation above and in hle_net.c (Super Mario 3D World + Bowser's Fury)
+HLE_FORCE("_ZN2nn4nifm22GetCurrentIpConfigInfoEPNS_6socket6InAddrES3_S3_S3_S3_", "离线：无 IP 配置（SDK 10 重载）", Result, h_nifm_IpCfg10, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d, uint32_t *e) {
+    uint32_t *p[5] = {a, b, c, d, e}; for (int i = 0; i < 5; i++) if (p[i]) *p[i] = 0; return RES_FAIL;
+}
+HLE_FORCE("_ZN2nn4nifm26GetCurrentPrimaryIpAddressEP7in_addr", "离线：无 IP（SDK 10 重载）", Result, h_nifm_GetIp10, uint32_t *a) { if (a) *a = 0; return RES_FAIL; }
 // EnvironmentIdentifier = char[8]：零售环境 "lp1"
 // EnvironmentIdentifier = char[8]: retail environment "lp1"
 HLE_FORCE("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", "服务器环境名：零售 lp1", void, h_nsd_EnvId, char *out) { memset(out, 0, 8); memcpy(out, "lp1", 3); }

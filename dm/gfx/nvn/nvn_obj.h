@@ -199,9 +199,9 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 void mtl_reg_tex(int id, const tex_t *t, const view_t *v);
 // WriteTexels 写过的贴图（按序号记）：回放层当作预排布贴图，从客体内存上传、脏页重传 | textures written by WriteTexels (recorded by serial): the replay layer treats them like packaged textures, uploaded from guest memory and re-uploaded on dirty pages
 void mtl_tex_cpu_written(const tex_t *t);
-// 程序各阶段的着色器键（hle_nvn.c）：sha256(控制段前 0x880 字节 + 代码区) 前 8 字节。SetShaders 时就算好（NVN 允许返回后释放控制段，Unity 即如此）；
+// 程序各阶段的着色器键（hle_nvn.c）：sha256(控制段前 0x880 字节（自报更短时取其长度）+ 代码区) 前 8 字节。SetShaders 时就算好（NVN 允许返回后释放控制段，Unity 即如此）；
 // 那时代码区还不在任何内存池里的阶段，第一次取时再算。返回 0 = 没有该阶段
-// A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
+// A program's per-stage shader key (hle_nvn.c): the first 8 bytes of sha256(first 0x880 bytes of the control section (its own length when shorter) + code area). Computed at SetShaders (NVN lets the caller free the control section once it returns, and Unity does);
 // a stage whose code area was not yet in any memory pool then is computed the first time it is asked for. Returns 0 = no such stage
 int prog_key(const prog_t *p, unsigned stage, uint8_t key[8]);
 void mtl_reg_samp(int id, const samp_par *p);

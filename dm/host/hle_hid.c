@@ -38,11 +38,11 @@ void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry
     uint64_t old = atomic_exchange(&g_pad_btn, buttons); atomic_fetch_or(&g_pad_latch, buttons & ~old); atomic_store(&g_pad_axes, pack(lx, ly, rx, ry));
 }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
-// DM_KEYS 脚本输入（测试用）："秒:键[+键][~按住秒][*次数/间隔秒],…"，例 "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2"（40 s 起每 2 s 按一次 A，共 80 次）。键名 A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down；
+// DM_KEYS 脚本输入（测试用）："秒:键[+键][~按住秒][*次数/间隔秒],…"，例 "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2"（40 s 起每 2 s 按一次 A，共 80 次）。键名 A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down，左摇杆 LLeft LUp LRight LDown；
 //   缺省按住 0.15 s，最多 1024 步（重复展开后计）。走手柄那一路（dm_pad_set），与键盘 / 触屏按位或，不互相覆盖。时间从宿主启动算起
-// DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down;
+// DM_KEYS scripted input (for tests): "seconds:key[+key][~hold seconds][*count/interval seconds],...", e.g. "8:A,12:A,15:Down~0.5,16:A+B,40:A*80/2" (A every 2 s from 40 s on, 80 times). Key names A B X Y LS RS L R ZL ZR Plus Minus Left Up Right Down, left stick LLeft LUp LRight LDown;
 //   held 0.15 s by default, at most 1024 steps (counted after repeats are expanded). Goes through the controller path (dm_pad_set), ORed with keyboard / touch, neither overrides the other. Times are counted from host start
-typedef struct { double at, hold; uint64_t btn; } key_step;
+typedef struct { double at, hold; uint64_t btn; int32_t lx, ly; } key_step;
 #define KEY_STEPS 1024
 static key_step g_steps[KEY_STEPS]; static int g_nsteps;
 static void *keys_main(void *arg) {
@@ -50,7 +50,7 @@ static void *keys_main(void *arg) {
     for (int i = 0; i < g_nsteps; i++) {
         for (;;) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); double el = (t.tv_sec - t0.tv_sec) + (t.tv_nsec - t0.tv_nsec) / 1e9; if (el >= g_steps[i].at) break; usleep(10000); }
         LOG("DM_KEYS：%.2f s 按 %#llx（按住 %.2f s）", g_steps[i].at, (unsigned long long)g_steps[i].btn, g_steps[i].hold);
-        dm_pad_set(g_steps[i].btn, 0, 0, 0, 0); usleep((useconds_t)(g_steps[i].hold * 1e6)); dm_pad_set(0, 0, 0, 0, 0);
+        dm_pad_set(g_steps[i].btn, g_steps[i].lx, g_steps[i].ly, 0, 0); usleep((useconds_t)(g_steps[i].hold * 1e6)); dm_pad_set(0, 0, 0, 0, 0);
     }
     return NULL;
 }
@@ -66,6 +66,10 @@ void hid_keys_init(void) {
         char *h = strchr(c + 1, '~'); if (h) { *h = 0; st.hold = atof(h + 1); }
         for (char *k = c + 1; k && *k;) { char *plus = strchr(k, '+'); if (plus) *plus = 0;
             int found = 0; for (int b = 0; b < 16; b++) if (!strcasecmp(k, names[b])) { st.btn |= 1ull << b; found = 1; }
+            // 左摇杆推到底：LLeft LUp LRight LDown（地图走动只认摇杆的游戏用，如超级马力欧 3D 世界） | left stick fully pushed: LLeft LUp LRight LDown (for games that move on the map by stick only, such as Super Mario 3D World)
+            static const char *const sticks[4] = {"LLeft", "LUp", "LRight", "LDown"};
+            static const int sx[4] = {-32767, 0, 32767, 0}, sy[4] = {0, 32767, 0, -32767};
+            for (int d = 0; d < 4; d++) if (!strcasecmp(k, sticks[d])) { if (sx[d]) st.lx = sx[d]; if (sy[d]) st.ly = sy[d]; found = 1; }
             if (!found) LOG("【红】DM_KEYS 不认识的键名：%s", k);
             k = plus ? plus + 1 : NULL; }
         for (int i = 0; i < rep && g_nsteps < KEY_STEPS; i++) { g_steps[g_nsteps] = st; g_steps[g_nsteps++].at = st.at + i * every; }

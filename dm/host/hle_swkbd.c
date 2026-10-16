@@ -112,3 +112,57 @@ HLE_FORCE("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", "�
           Result, h_swkbd_Show, void *out, const void *arg) {
     return swkbd_show(out, arg, front_text_input);
 }
+
+// ---------- 内嵌键盘 InlineKeyboard（超级马力欧 3D 世界 + 狂怒世界）----------
+// 真机上 Initialize 起一个常驻的键盘小程序（swkbd::detail::InlineKeyboardImpl::Launch → applet::CreateLibraryApplet），之后 Calc 每帧收它的结果、按情况调游戏登记的回调，
+// Appear / Disappear / SetInputText / SetCursorPos 经小程序存储发请求，GetImage 从共享内存取键盘画面。宿主没有小程序代理：选完角色进存档选择时，Initialize 在 CreateLibraryApplet 里空指针崩溃。
+// 这里接管所有碰小程序的入口，表现成「玩家每次都直接取消」的键盘：Appear 记下一次取消，下一次 Calc（真机上回调也在 Calc 里调）调游戏的取消回调；不出画面（GetImage 报无）。
+// 构造、GetRequiredWorkBufferSize / GetImageMemoryRequirement / GetRequiredStringBufferSize、InputText::Set 是纯计算，留在 SDK 原样跑
+// ---------- InlineKeyboard (Super Mario 3D World + Bowser's Fury) ----------
+// On hardware Initialize starts a resident keyboard applet (swkbd::detail::InlineKeyboardImpl::Launch -> applet::CreateLibraryApplet); after that Calc collects its results every frame and calls the callbacks the game registered,
+// Appear / Disappear / SetInputText / SetCursorPos send requests through applet storage, and GetImage takes the keyboard picture from shared memory. The host has no applet proxy: entering the save select after the character select, Initialize crashed on a null pointer in CreateLibraryApplet.
+// Every entry that touches the applet is taken over here and behaves as a keyboard the player always cancels right away: Appear arms one cancel, and the next Calc (on hardware the callbacks are called from Calc too) calls the game's cancel callback; no picture (GetImage reports none).
+// The constructor, GetRequiredWorkBufferSize / GetImageMemoryRequirement / GetRequiredStringBufferSize and InputText::Set are pure computations and keep running in the SDK
+typedef void (*ikb_cb0)(void);
+static struct { const void *kb; ikb_cb0 cancel; int pending; } g_ikb[4];
+static pthread_mutex_t g_ikb_mu = PTHREAD_MUTEX_INITIALIZER;
+static int ikb_slot(const void *kb) {   // 调用方持锁 | the caller holds the lock
+    for (int i = 0; i < 4; i++) if (g_ikb[i].kb == kb) return i;
+    for (int i = 0; i < 4; i++) if (!g_ikb[i].kb) { g_ikb[i].kb = kb; return i; }
+    return -1;
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard10InitializeEPv", "内嵌键盘：不起小程序（宿主无小程序代理），报成功", unsigned, h_ikb_Init, void *kb, void *work) {
+    (void)work; pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); pthread_mutex_unlock(&g_ikb_mu);
+    LOG("swkbd：内嵌键盘 Initialize %p（宿主不起小程序；Appear 一律按玩家取消）%s", kb, i < 0 ? "【红】登记表满" : "");
+    return 1;
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard8FinalizeEv", "内嵌键盘：没起小程序，无可关", void, h_ikb_Fin, void *kb) {
+    pthread_mutex_lock(&g_ikb_mu); for (int i = 0; i < 4; i++) if (g_ikb[i].kb == kb) memset(&g_ikb[i], 0, sizeof g_ikb[i]); pthread_mutex_unlock(&g_ikb_mu);
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboardD1Ev", "内嵌键盘析构：没起小程序，只清登记", void, h_ikb_Dtor, void *kb) { h_ikb_Fin(kb); }
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard24SetDecidedCancelCallbackEPFvvE", "内嵌键盘：记下取消回调", void, h_ikb_SetCancel, void *kb, ikb_cb0 fn) {
+    pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) g_ikb[i].cancel = fn; pthread_mutex_unlock(&g_ikb_mu);
+}
+#define IKB_IGNORE_CB(mangled, cname) \
+    HLE_FORCE(mangled, "内嵌键盘：回调只记不调（键盘从不确定 / 改字 / 移光标）", void, cname, void *kb, void *fn) { (void)kb; (void)fn; }
+IKB_IGNORE_CB("_ZN2nn5swkbd14InlineKeyboard22SetMovedCursorCallbackEPFvPKNS0_14MovedCursorArgEE", h_ikb_SetMoved)
+IKB_IGNORE_CB("_ZN2nn5swkbd14InlineKeyboard23SetDecidedEnterCallbackEPFvPKNS0_15DecidedEnterArgEE", h_ikb_SetEnter)
+IKB_IGNORE_CB("_ZN2nn5swkbd14InlineKeyboard24SetChangedStringCallbackEPFvPKNS0_16ChangedStringArgEE", h_ikb_SetChanged)
+IKB_IGNORE_CB("_ZN2nn5swkbd14InlineKeyboard27SetFinishedKeyboardCallbackEPFvvE", h_ikb_SetFinished)
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard6AppearERKNS0_9AppearArgE", "内嵌键盘出现：宿主不显示，下一次 Calc 按玩家取消", void, h_ikb_Appear, void *kb, const void *arg) {
+    (void)arg; pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) g_ikb[i].pending = 1; pthread_mutex_unlock(&g_ikb_mu);
+    LOG("swkbd：内嵌键盘 Appear %p → 下一拍按取消", kb);
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard9DisappearEv", "内嵌键盘收起：宿主本就不显示", void, h_ikb_Disappear, void *kb) {
+    pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb); if (i >= 0) g_ikb[i].pending = 0; pthread_mutex_unlock(&g_ikb_mu);
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard4CalcEv", "内嵌键盘每帧更新：有待取消的就调游戏的取消回调", void, h_ikb_Calc, void *kb) {
+    ikb_cb0 fn = NULL; pthread_mutex_lock(&g_ikb_mu); int i = ikb_slot(kb);
+    if (i >= 0 && g_ikb[i].pending) { g_ikb[i].pending = 0; fn = g_ikb[i].cancel; }
+    pthread_mutex_unlock(&g_ikb_mu);
+    if (fn) fn();   // 客体代码，就在调 Calc 的客体线程上调（同真机） | guest code, called on the guest thread that called Calc (as on hardware)
+}
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard12SetInputTextERKNS0_9InputTextE", "内嵌键盘：设文本（宿主不显示，忽略）", void, h_ikb_SetText, void *kb, const void *t) { (void)kb; (void)t; }
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard12SetCursorPosEi", "内嵌键盘：设光标（宿主不显示，忽略）", void, h_ikb_SetCursor, void *kb, int pos) { (void)kb; (void)pos; }
+HLE_FORCE("_ZN2nn5swkbd14InlineKeyboard8GetImageEPvm", "内嵌键盘画面：无（返回 false）", unsigned, h_ikb_GetImage, void *kb, void *buf, size_t n) { (void)kb; (void)buf; (void)n; return 0; }
+HLE_FORCE("_ZNK2nn5swkbd14InlineKeyboard13GetWindowSizeEPiS2_", "内嵌键盘窗口尺寸：0 × 0", void, h_ikb_WinSize, const void *kb, int *w, int *h) { (void)kb; if (w) *w = 0; if (h) *h = 0; }

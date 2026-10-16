@@ -17,7 +17,7 @@
 # Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), aoc/ (each DLC's RomFS by index), tools/, patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes to the NSP folder by default.
 # The shader translator is the in-repo dm/gfx/tools/dmsh_xlate_bin (the build whose fingerprints match dmsh_chain.lock; a rebuilt dll has different fingerprints and dmsh_build refuses it).
 # The Python running this file needs lz4, capstone and fonttools; also needed: Xcode, xcodegen, .NET SDK 10, zstd, spirv-cross. For Mario the first run takes about 35 minutes (mostly the shader libraries); later runs take about 10 (the shader libraries come from the cache). Key values are never printed.
-import collections, ctypes, getpass, os, re, shutil, struct, subprocess, sys, threading, time, zlib
+import collections, ctypes, getpass, os, re, shutil, struct, subprocess, sys, tempfile, threading, time, zlib
 from pathlib import Path
 
 # ---- 设置 | Settings ----
@@ -89,6 +89,19 @@ def build_id(nso):
 def rmtree(p):
     if p.is_symlink() or p.is_file(): p.unlink()
     elif p.exists(): shutil.rmtree(p)
+
+
+def build_nx_extract(repo, work, logs, env):
+    """编译 nx_extract 到 <work>/tools/nx_extract/。先编到临时目录再拷过去：输出路径带撇号（如「Bowser's Fury」）时 MSBuild 的条件式被截断，
+    LibHac.dll 与可执行文件都不拷出来，编译却报成功
+    Build nx_extract into <work>/tools/nx_extract/. It is built in a temporary folder and copied over: with an apostrophe in the output path (e.g. "Bowser's Fury") MSBuild's conditions break,
+    LibHac.dll and the executable are not copied, and the build still reports success"""
+    nx = work / 'tools/nx_extract/nx_extract'
+    with tempfile.TemporaryDirectory(prefix='nx_extract_') as t:
+        run(['dotnet', 'build', repo / 'dm/tools/nx_extract', '-c', 'Release', '-o', t, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
+        if not (Path(t) / 'nx_extract').exists(): raise BuildError(f'nx_extract 编译后没有可执行文件（见 {logs / "nx_extract_build.log"}）| nx_extract built without an executable (see {logs / "nx_extract_build.log"})')
+        rmtree(nx.parent); shutil.copytree(t, nx.parent)
+    return nx
 
 
 def swap_in(tmp, dst):   # 新产物整个换上（失败时旧的不受影响） | swap the new output in as a whole (the old one is untouched on failure)
@@ -190,8 +203,7 @@ def nso_image(path):   # 解出 NSO 的三段 | decompress an NSO's three segmen
 def survey(nsp_dir, app, fam, keys, repo, py, env):
     work = nsp_dir / f'{app:016X}_survey'; logs, ex = work / 'logs', work / 'extract'
     say(f'没有 {app:016X} 的游戏档案：只做粗查，不出 IPA | no game profile for {app:016X}: survey only, no IPA')
-    nx = work / 'tools/nx_extract/nx_extract'
-    run(['dotnet', 'build', repo / 'dm/tools/nx_extract', '-c', 'Release', '-o', nx.parent, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
+    nx = build_nx_extract(repo, work, logs, env)
     ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
     upd = ups[-1][1] if ups else None
     tmp = work / 'extract.partial'; rmtree(tmp)
@@ -425,9 +437,8 @@ def main(args=None):
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
     gb = sum({p.stat().st_size for b, u in picks.values() for p in (b, u) if p}) / 2**30 + 6   # 解包 + 着色器缓存 + 余量 | extraction + shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'{work} 所在的卷剩余不足 {gb:.0f} GB | less than {gb:.0f} GB free on the volume of {work}')
-    nx = work / 'tools/nx_extract/nx_extract'
     say('编译 nx_extract | building nx_extract')
-    run(['dotnet', 'build', repo / 'dm/tools/nx_extract', '-c', 'Release', '-o', nx.parent, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
+    nx = build_nx_extract(repo, work, logs, env)
     dirs, clone = {}, None
     for ver in versions:   # 基础版先单独解，后面的更新拿它的 RomFS 做克隆比对 | the base game is extracted alone first; later updates clone against its RomFS
         b, u = picks[ver]

@@ -109,9 +109,14 @@ static font_t font_get(int type) {
     pthread_mutex_unlock(&mu);
     return f;
 }
+// 游戏档案 shared_font ttf（超级马力欧 3D 世界 + 狂怒世界，SDK 10）：地址处直接是 TTF（跳过 8 字节头），大小不含头。该作把共享字体记作类型 0（main+0x975658），
+//   不调 Decode、把地址原样交给 ScalableFontEngine::LoadFont；带头时 LoadFont 报错 403、SetFont 报 301，之后查「?」字形处处落空，main+0x6c73c0 空指针崩溃
+// The profile's shared_font ttf (Super Mario 3D World + Bowser's Fury, SDK 10): the address points straight at the TTF (past the 8-byte header) and the size excludes the header. That game records shared fonts as type 0 (main+0x975658),
+//   calls no Decode and hands the address as is to ScalableFontEngine::LoadFont; with the header LoadFont fails with error 403 and SetFont with 301, every lookup of the "?" glyph then misses, and main+0x6c73c0 crashes on a null pointer
+static const size_t k_font_skip = DM_GAME_SHARED_FONT_TTF ? 8 : 0;
 HLE_FORCE("_ZN2nn2pl22GetSharedFontLoadStateENS0_14SharedFontTypeE", "共享字体装载状态：已装（1）", int, h_pl_LoadState, int type) { return font_get(type).p ? 1 : 0; }
-HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "共享字体地址 → BFTTF 头（宿主替身字体）", const void *, h_pl_Addr, int type) { return font_get(type).p; }
-HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "共享字体大小 → 头 8 字节 + 替身字体文件大小", size_t, h_pl_Size, int type) { return font_get(type).n; }
+HLE_FORCE("_ZN2nn2pl20GetSharedFontAddressENS0_14SharedFontTypeE", "共享字体地址 → BFTTF 头（档案 shared_font ttf：TTF 本身）", const void *, h_pl_Addr, int type) { const uint8_t *p = font_get(type).p; return p ? p + k_font_skip : NULL; }
+HLE_FORCE("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "共享字体大小 → 头 8 字节 + 替身字体文件大小（档案 shared_font ttf：不含头）", size_t, h_pl_Size, int type) { font_t f = font_get(type); return f.p ? f.n - k_font_skip : 0; }
 // 是否跑在 Switch 2（代号 Ounce）上（返回 bool）：宿主按 Switch 1 报假。马力欧 1.2.1 据此决定要不要数追加内容（升级包）、提示升级到 Switch 2 版
 // Whether running on a Switch 2 (codename Ounce) (returns bool): the host reports false, as a Switch 1. Mario 1.2.1 uses it to decide whether to count add-on content (the upgrade pack) and suggest the Switch 2 Edition
 HLE_FORCE("_ZN2nn2pl16IsRunningOnOunceEv", "是否 Switch 2：否", unsigned, h_pl_IsOunce, void) { return 0; }
@@ -180,6 +185,11 @@ static void *vsync_thread(void *ev) {
     }
     return NULL;
 }
+// 间接图层（小程序画面交给游戏去画，如内嵌键盘）的图像内存需求：真机问 vi 服务。按 RGBA8 线性算、4 KB 对齐（超级马力欧 3D 世界 + 狂怒世界的内嵌键盘问 1280×720）
+// Image memory needed for an indirect layer (an applet's picture handed to the game to draw, such as the inline keyboard): on hardware it asks the vi service. Computed as linear RGBA8, 4 KB aligned (Super Mario 3D World + Bowser's Fury's inline keyboard asks for 1280x720)
+HLE_FORCE("_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii", "间接图层图像内存：RGBA8 线性、4 KB 对齐", Result, h_vi_IndirectReq, size_t *size, size_t *align, int w, int h) {
+    *size = ((size_t)(w > 0 ? w : 0) * (size_t)(h > 0 ? h : 0) * 4 + 0xfff) & ~(size_t)0xfff; *align = 0x1000; return RES_OK;
+}
 HLE_FORCE("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", "垂直同步事件：宿主线程按 60 Hz 触发", Result, h_vi_VsyncEvent, void *ev, void *disp) {
     (void)disp; hle_bind_system_event(ev, 1);
     pthread_t th; if (pthread_create(&th, NULL, vsync_thread, ev)) die("垂直同步线程起不来"); pthread_detach(th);
@@ -213,4 +223,15 @@ static const char *const k_lang_code[] = {"ja", "en-US", "fr", "de", "it", "es",
 HLE_FORCE("_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE", "语言枚举与语言代码比较（返回 bool）", unsigned, h_set_LangEq, const int32_t *lang, const char *code) {
     if ((unsigned)*lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
     return strncmp(k_lang_code[*lang], code, 8) == 0;
+}
+// 反过来的比较与按枚举造代码（超级马力欧 3D 世界 + 狂怒世界，SDK 10：nnMain 里第一次比较就去连 settings 服务）
+// The reversed comparison and making a code from the enum (Super Mario 3D World + Bowser's Fury, SDK 10: its first comparison in nnMain connected to the settings service)
+HLE_FORCE("_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE", "语言代码与语言枚举比较（返回 bool）", unsigned, h_set_LangEq2, const char *code, const int32_t *lang) {
+    if ((unsigned)*lang >= sizeof k_lang_code / sizeof *k_lang_code) return 0;
+    return strncmp(k_lang_code[*lang], code, 8) == 0;
+}
+HLE_FORCE("_ZN2nn8settings12LanguageCode4MakeENS0_8LanguageE", "语言枚举 → 语言代码（按值返回 8 字节）", uint64_t, h_set_LangMake, int lang) {
+    char code[8] = {0};
+    if ((unsigned)lang < sizeof k_lang_code / sizeof *k_lang_code) strncpy(code, k_lang_code[lang], sizeof code);
+    uint64_t v; memcpy(&v, code, 8); return v;
 }

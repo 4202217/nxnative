@@ -44,6 +44,17 @@ typedef struct { const char *name; void *fn; const char *why; } hle_force_ent;
     static ret cname(__VA_ARGS__);                                                                \
     __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (void *)cname, why}; \
     static ret cname(__VA_ARGS__)
+// 同上，但实现跑在本线程的宿主大栈上（hle_bigstack.c）：登记的是编译期生成的一段桩（实现地址进 x16，跳 dm_bigstack_enter）。
+// 用于栈用量大的接管（文件系统按 PATH_MAX 开缓冲）：游戏线程的栈可以只有 8 KB。只转寄存器参数（≤ 8 个整数、≤ 8 个浮点），不能用于可变参数函数
+// Same as above, but the implementation runs on this thread's big host stack (hle_bigstack.c): what is registered is a stub generated at compile time (the implementation's address goes into x16, then a jump to dm_bigstack_enter).
+// For take-overs with large stack use (the file system sizes its buffers by PATH_MAX): a game thread's stack can be as small as 8 KB. Only register arguments are carried over (<= 8 integer, <= 8 floating point); not for variadic functions
+#define HLE_FORCE_BIG(mangled, why, ret, cname, ...)                                               \
+    static ret cname(__VA_ARGS__) __attribute__((used));                                          \
+    extern const char cname##_bs[];                                                               \
+    __asm__(".text\n.p2align 2\n.globl _" #cname "_bs\n.private_extern _" #cname "_bs\n_" #cname "_bs:\n" \
+            "    adrp x16, _" #cname "@PAGE\n    add x16, x16, _" #cname "@PAGEOFF\n    b _dm_bigstack_enter\n"); \
+    __attribute__((used, section("__DATA,swforce"))) static const hle_force_ent hle_force_##cname = {mangled, (const void *)cname##_bs, why}; \
+    static ret cname(__VA_ARGS__)
 
 // 运行模式（0 掌机 / 1 主机）：hle_oe.c 持有，hid 的手柄样式跟它走；前端可在运行中切换
 // Operation mode (0 handheld / 1 docked): owned by hle_oe.c, and the hid controller style follows it; the front end can switch it at runtime

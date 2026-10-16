@@ -38,6 +38,8 @@
 | `mem_reserve`、`mem_alias`、`mem_stack`、`app_pool` | 客体地址空间分区与应用内存池（`hle_svc.c`） |
 | `present_interval` | `game`（缺省）：按游戏设的出图间隔出帧，同 Switch（按间隔 2 出的一帧在屏上留两个显示节拍；游戏连续一秒都要 2 才换 30 帧目标，iOS 上显示节拍随之 30 Hz；马力欧 1.2.1 在慢一帧之后只给下一帧设 2；Engage 在 Switch 上设 2，2.0.0 `main` 的改写剪口让它设 1，见 `0100A6301214E000/game.tsv`）。`display`：不管游戏设多少，每个显示节拍一帧——只适合逻辑不按帧计数的游戏（D2R 的逻辑按自己的 25 Hz 走）。`DM_PRESENT_INTERVAL=game` / `display` 可覆盖，也可写在 `Documents/env.txt` |
 | `core_preempt` | `on` / `off`（缺省）：近似 Horizon 的按核抢占。一次 SVC 叫醒了钉在调用线程本核、优先级更高的线程，调用线程就等这些线程再次阻塞（最多 5 ms，`hle_thread.c`）。银河战士 生存恐惧的影片播放器靠它；马力欧开了读盘变慢（首帧 0.6 → 2.9 s），所以只有需要的游戏才开。`DM_PREEMPT=0` / `1` 可覆盖 |
+| `shared_font` | 共享字体地址处放什么：`bfttf`（缺省）= 8 字节 BFTTF 头（「已解」标记）+ TTF，马力欧拿去调 `ScalableFontEngineHelper::Decode`；`ttf` = TTF 本身，超级马力欧 3D 世界 + 狂怒世界（SDK 10）直接交给 `ScalableFontEngine::LoadFont`（带头时引擎报错 403，游戏查字形时崩溃） |
+| `device_api` | `nvnDeviceGetInteger` 报的 NVN API 版本 `主.次`（缺省 `55.15`，马力欧要求的）。游戏会核对，不符就不建设备：超级马力欧 3D 世界 + 狂怒世界（SDK 10）要求主版本 53、次版本 ≥ 313。`DM_NVN_API` 可改。不进着色器翻译链版本（只有 `nvn_*` / `shader_*` 键进） |
 | `nvn_tex_base`、`nvn_tex_slots`、`nvn_samp_base`、`nvn_img_base`、`nvn_img_slots`、`nvn_ssbo_bases` | NVN 驱动常量段，按全库着色器实测 |
 | `shader_groups`、`shader_note` | `shader_split.py` 的来源组与映射表表头说明 |
 | `shader_main_glslc` | `on` / `off`（缺省）：`shader_split.py` 另读 `main` 里的 GLSLC 编译输出（魔数 `0x19866891`）。十三机兵防卫圈的着色器全在那里；Engage 的 `main` 里有 11 份用不到的，所以别的游戏不开 |

@@ -22,6 +22,11 @@
 #include <sys/clonefile.h>
 #include <sys/xattr.h>
 
+// 本文件的接管都跑在宿主大栈上（hle_bigstack.c）：路径缓冲按 PATH_MAX 开，一次打开文件要 6–7 KB 栈，而游戏的存档线程可以只有 8 KB（超级马力欧 3D 世界 + 狂怒世界）
+// Every take-over in this file runs on the big host stack (hle_bigstack.c): path buffers are sized by PATH_MAX and one file open takes 6-7 KB of stack, while a game's save thread can have as little as 8 KB (Super Mario 3D World + Bowser's Fury)
+#undef HLE_FORCE
+#define HLE_FORCE HLE_FORCE_BIG
+
 #define RES_PATH_NOT_FOUND 0x202u      // fs 模块 2，描述 1 | fs module 2, description 1
 #define RES_PATH_EXISTS    0x402u      // fs 模块 2，描述 2 | fs module 2, description 2
 enum { MODE_READ = 1, MODE_WRITE = 2, MODE_APPEND = 4 };

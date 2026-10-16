@@ -77,7 +77,7 @@ Patterns that worked: print every call of one function with its arguments; stop 
 
 ## Scripted input and thread scheduling
 
-- `DM_KEYS="<seconds>:<button>[+button][~hold],…"` presses buttons from host start (`hle_hid.c`). `<seconds>:<button>*<count>/<interval>` repeats a press, e.g. `42:A*170/2` presses A every 2 s from 42 s on, 170 times; at most 1,024 steps after expansion. A long run through a game's story is then a single switch, such as Metroid Dread's title, new game and story recap.
+- `DM_KEYS="<seconds>:<button>[+button][~hold],…"` presses buttons from host start (`hle_hid.c`). `<seconds>:<button>*<count>/<interval>` repeats a press, e.g. `42:A*170/2` presses A every 2 s from 42 s on, 170 times; at most 1,024 steps after expansion. A long run through a game's story is then a single switch, such as Metroid Dread's title, new game and story recap. `LLeft` / `LUp` / `LRight` / `LDown` push the left stick fully (Super Mario 3D World moves on its map by stick only); combos such as `L+R~0.5` press buttons together.
 - Frame numbers are a stable way to aim dumps (`DM_NVN_PASSDUMP=<frame>`, `DM_NVN_SHOT=…`) at the same scene in another run: the per-frame NVN call counts (`[nvn] 帧 N：… 次调用`) matched between runs of the same script. Times in seconds drift with load.
 - `DM_PREEMPT=0` / `1` turns the same-core preemption approximation off / on whatever the profile's `core_preempt` says (`hle_thread.c`). The thread dump at exit reports `同核抢占让步 N 次，共 T ms，到上限 K 次` (yields, total wait, 5 ms cap hits). A higher-priority thread that keeps a core busy shows up in the first eight `同核抢占让步到上限` lines, with its last SVC and call site.
 
