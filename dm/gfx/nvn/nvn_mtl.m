@@ -5675,6 +5675,37 @@ static int frz_op(unsigned op, const void *a) {   // 返回 1 = 这条操作不�
     return 0;
 }
 
+// 提交中途分段交给 GPU（DM_NVN_CUT=绘制数，0 关；缺省 64）：游戏等本帧 GPU 做完才放下一帧提交时（塞尔达传说 旷野之息：主线程 nvnSyncWait 等刚提交那帧的围栏），
+// 宿主在提交里翻译的几毫秒 GPU 全闲着（神庙里每帧 GPU 13 ms + 翻译 7 ms 首尾相接）。每攒够这么多次绘制，就在两个通道之间把已编好的命令缓冲先交出去：GPU 跑前面的通道，CPU 接着翻后面的。
+// 只在没有打开的编码器、没有推迟 / 合并 / 前提中的通道时切；先交本批上传（后面的绘制要用）。围栏信号与完成回调仍只挂在最后一段上：同一队列按提交顺序执行，每个编码器开头有队列屏障
+// Hand a submission to the GPU in segments (DM_NVN_CUT=draw count, 0 = off; default 64): when the game holds back the next frame's submit until this frame's GPU work is done (The Legend of Zelda: Breath of the Wild: the main thread's nvnSyncWait on the fence of the frame just submitted),
+// the GPU sits idle for the milliseconds the host spends translating inside the submit (in the shrine each frame is GPU 13 ms + translation 7 ms back to back). Each time this many draws have accumulated, the command buffer encoded so far is committed between two passes: the GPU runs the earlier passes while the CPU translates the later ones.
+// Cut only when no encoder is open and no pass is deferred / merged / hoisted; commit this batch's uploads first (later draws use them). The fence signal and completion work stay on the last segment only: the queue executes in commit order and every encoder starts with a queue barrier
+static int cut_draws(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_NVN_CUT"); v = e ? atoi(e) : 64; MLOG("分段提交：每 %d 次绘制在通道之间先交一段（DM_NVN_CUT，0 关）", v); } return v; }
+static uint64_t g_cut_draw0, g_cut_sub, g_cuts;
+static void sub_cut(void) {
+    int n = cut_draws();
+    if (n <= 0 || !g_cb || g_enc) return;
+    if (g_cut_sub != g_sub_serial) { g_cut_sub = g_sub_serial; g_cut_draw0 = g_stat_draw; }   // 每次提交从头计 | count from the start of each submission
+    if (g_stat_draw - g_cut_draw0 < (uint64_t)n || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
+    if (g_blit) { enc_b_end(g_blit); g_blit = nil; }
+    up_flush();
+    uint64_t f = atomic_load(&g_cur_frame); gpu_tag_begin(f);
+    MTL4CommitOptions *o = [MTL4CommitOptions new];
+    [o addFeedbackHandler:^(id<MTL4CommitFeedback> cb) {
+        gpu_tag_done(f, cb.GPUStartTime, cb.GPUEndTime);
+        if (cb.error) { atomic_store(&g_last_commit_error, 1); static int k; if (k++ < 8) MLOG("【红】分段命令缓冲执行出错：%s", cb.error.description.UTF8String); }
+    }];
+    res_commit();
+    [g_cb endCommandBuffer];
+    id<MTL4CommandBuffer> buffers[] = {g_cb};
+    [g_q4 commit:buffers count:1 options:o];
+    g_cb = [g_dev newCommandBuffer];
+    [g_cb beginCommandBufferWithAllocator:g_alloc4[g_alloc_cur]];   // 同一分配器顺序编多条命令缓冲；下次提交开工时它的围栏（最后一段）过了才重置 | one allocator encodes several command buffers in sequence; it is reset only once its fence (the last segment) has passed, when a later submission starts
+    g_cut_draw0 = g_stat_draw;
+    if (!g_cuts++) MLOG("分段提交：首段在帧 %llu 通道 %llu 交出", (unsigned long long)f, (unsigned long long)g_stat_pass);
+}
+
 void mtl_exec(const uint8_t *p) {
     static int inited; if (!inited) { inited = 1; state_reset(); }
     static int dump_all = -1; if (dump_all < 0) dump_all = getenv("DM_NVN_PASSDUMP_ALL") != NULL;
@@ -5736,7 +5767,7 @@ void mtl_exec(const uint8_t *p) {
                 // 不续用只为清除开的通道；少挂深度 / 模板的可续用（绘制前核平面）
                 // Do not continue a render pass opened only for a clear; one with fewer depth / stencil attachments can be continued (check the planes before drawing)
                 if (g_enc && g_enc_mode != 1 && !pend && R.has_rt && tbdr_on() && rt_same(&R.rt, r)) { g_rt_merged = 1; if (!g_rt_merge_n++) MLOG("同目标续用：首例 通道 %llu", g_stat_pass); PD("M %llu 同目标续用通道", g_stat_pass); R.rt = *r; break; }
-                rp_flush(); R.rt = *r; R.has_rt = 1; break;
+                rp_flush(); sub_cut(); R.rt = *r; R.has_rt = 1; break;
             }
             case OP_CLEAR_COLOR: {
                 const p_clear_color *c = a;

@@ -204,6 +204,14 @@ static Result render_once(uint8_t *sys, int16_t *dst, int *nout) {
 }
 HLE_FORCE("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv", "手动渲染一帧：SDK 生成命令 + CPU 处理，宿主取 DeviceSink 输出",
           Result, h_ar_ImplExec, uint8_t *impl) { return render_once(impl + 0x60, g_frame, &g_frame_n); }   // AudioRendererImpl 里的 AudioRenderSystem 在 +0x60 | the AudioRenderSystem sits at +0x60 inside AudioRendererImpl
+// SDK 20（塞尔达传说 旷野之息 1.9.0）：公开的 ExecuteAudioRendererRendering（sdk+0x221e90）经虚表直接调 AudioRendererImpl 那一版（sdk+0x22ca88，只有 x0 += 0x60 再经 PLT 跳到这里），
+// 上面那条接管碰不到。原版这里生成命令不持更新锁，渲染线程走原版、游戏线程的 RequestUpdate 又因「上次更新后没渲过」追渲，两边同时写同一块命令缓冲，
+// CommandListProcessor::Process 偶发读到写了一半的命令表崩溃（神庙里 60 秒、134 秒各一次）。这里接管，渲染照样走宿主的加锁渲染
+// SDK 20 (The Legend of Zelda: Breath of the Wild 1.9.0): the public ExecuteAudioRendererRendering (sdk+0x221e90) calls the AudioRendererImpl version through the vtable (sdk+0x22ca88, just x0 += 0x60 and a jump through the PLT to here),
+// so the takeover above is never reached. The original generates commands here without the update lock; with the render thread on the original and the game thread's RequestUpdate rendering catch-up frames ("nothing rendered since the last update"),
+// both sides wrote the same command buffer at once and CommandListProcessor::Process sometimes read a half-written command list and crashed (once at 60 s and once at 134 s in the shrine). Taken over here, so rendering goes through the host's locked render as well
+HLE_FORCE("_ZN2nn5audio6server17AudioRenderSystem29ExecuteAudioRendererRenderingEv", "手动渲染一帧（SDK 20 经 PLT 调到）：同上，走宿主的加锁渲染",
+          Result, h_ars_Exec, uint8_t *sys) { return render_once(sys, g_frame, &g_frame_n); }
 
 // 两次 RequestUpdate 之间至少渲一帧。效果的「待初始化」只在游戏标「新加」的那次更新里置上（如 LightLimiterInfo::Update：isNew → 参数状态 0），
 // 下一次更新照游戏的值覆盖；中间没生成过命令，DSP 就永远收不到初始化，之后 ApplyLightLimiterEffect 读空指针。真机渲染器每 5 ms 自己出一帧、
