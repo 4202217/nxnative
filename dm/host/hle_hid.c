@@ -102,7 +102,8 @@ static int states(NpadState *out, int n, uint32_t id, uint32_t style) { if (n <=
 HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "连 hid 服务；宿主从前端状态取输入", void, h_hid_InitNpad, void) {}
 HLE_FORCE("_ZN2nn3hid22SetSupportedNpadIdTypeEPKjm", "支持的手柄号；宿主固定", void, h_hid_SetIds, const uint32_t *ids, uint64_t n) { (void)ids; (void)n; }
 static uint32_t g_styles_supported = 0xffffffffu;
-HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "支持的手柄样式；宿主只记下", void, h_hid_SetStyles, uint32_t styles) { g_styles_supported = styles; }
+HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "支持的手柄样式；宿主记下，按它选报的样式", void, h_hid_SetStyles, uint32_t styles) {
+    if (styles != g_styles_supported) LOG("hid 支持的手柄样式 %#x", styles); g_styles_supported = styles; }
 HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "手柄样式查询；跟 DM_OPMODE 走", uint32_t, h_hid_GetStyle, const uint32_t *id) { return style_of(*id); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", "全键手柄状态", int, h_hid_StatesFullKey, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_FULLKEY); }
 HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", "掌机手柄状态", int, h_hid_StatesHandheld, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_HANDHELD); }
@@ -166,8 +167,10 @@ HLE_FORCE("_ZN2nn3hid28SetNpadJoyAssignmentModeDualERKj", "Joy-Con 双持；宿�
 HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKjNS0_17NpadJoyDeviceTypeE", "Joy-Con 单持（指定左右）；宿主忽略", void, h_hid_JoySingleT, const uint32_t *id, int t) { (void)id; (void)t; }
 HLE_FORCE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleEPjRKjNS0_17NpadJoyDeviceTypeE", "Joy-Con 单持（取回另一半）；宿主忽略，没有另一半", int, h_hid_JoySingleOut, uint32_t *out, const uint32_t *id, int t) { (void)out; (void)id; (void)t; return 0; }
 HLE_FORCE("_ZN2nn3hid23MergeSingleJoyAsDualJoyERKjS2_", "合并单 Joy-Con；宿主忽略，报成功", Result, h_hid_Merge, const uint32_t *a, const uint32_t *b) { (void)a; (void)b; return RES_OK; }
-HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "手柄样式变化事件：绑定、永不触发", void, h_hid_BindStyleEv,
-          const uint32_t *id, void *ev, int clear) { (void)id; hle_bind_system_event(ev, clear); }
+// Bound and signalled once for the controller that is connected (the hid service reports the controller already attached at start the same way). Link's Awakening reads no controller state
+// until this event has fired: without it GetNpadState was never called and the title's "Press L+R" never saw a press
+HLE_FORCE("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", "手柄样式变化事件：绑定，连着的手柄触发一次", void, h_hid_BindStyleEv,
+          const uint32_t *id, void *ev, int clear) { hle_bind_system_event(ev, clear); if (*id == connected_id()) hle_signal_system_event(ev); }
 HLE_FORCE("_ZN2nn3hid19GetPlayerLedPatternERKj", "玩家灯：1 号灯", uint8_t, h_hid_Led, const uint32_t *id) { (void)id; return 1; }
 // NpadControllerColor = { main RGBA, button RGBA }: grey body, black buttons
 static void ctrl_color(uint32_t *c) { c[0] = 0xff828282u; c[1] = 0xff0f0f0fu; }

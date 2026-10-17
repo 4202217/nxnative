@@ -578,14 +578,40 @@ def func_of(a):
 done = set(); windows = []; jumps = {}; tabjumps = {}
 def jump_offsets(insl, j):
     """The br x18 is preceded by the offset-table form (Engage main+0x12eec94): cmp w18,#N; b.hi; ldrsw x18,[xB,x18,lsl #2]; add x18,x18,xB.
+    The index may be another register, and the bounds check may be on a register copied into it: Link's Awakening's GLSLC (subsdk0+0x1be6e8) has
+    sub w0,w18,#0xd1; cmp w0,#0x31; b.hi; ldrsw x18,[x17,x0,lsl #2], its movie module (subsdk1+0xae9a4) cmp w21,#7; b.hi; ...; mov w18,w21; ldrsw x18,[x4,x18,lsl #2].
     For the table base xB, search back for the nearest writer: it must be add xB,xB,#lo, and the writer before it must be adrp xB. Returns all targets, or None if not recognized"""
     ctx = insl[max(0, j - 16):j]
     add = next((p for p in reversed(ctx) if p.mnemonic == 'add' and re.fullmatch(r'x18, x18, x\d+', p.op_str)), None)
     if not add: return None
     rb = add.op_str.split(', ')[2]
-    ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and p.op_str == f'x18, [{rb}, x18, lsl #2]'), None)
-    cmp = next((p for p in reversed(ctx) if p.mnemonic == 'cmp' and re.fullmatch(r'w18, #(0x[0-9a-f]+|\d+)', p.op_str)), None)
-    if not ld or not cmp: return None
+    ld = next((p for p in reversed(ctx) if p.mnemonic == 'ldrsw' and re.fullmatch(rf'x18, \[{rb}, x(\d+), lsl #2\]', p.op_str)), None)
+    if not ld: return None
+    # GLSLC subsdk0+0x2f403c checks a masked copy instead: and w16,w18,#0x3f; cmp w16,#0xe; b.hi; ...; and x18,x18,#0x3f; ldrsw x18,[x15,x18,lsl #2]
+    idx = {'w' + re.fullmatch(rf'x18, \[{rb}, x(\d+), lsl #2\]', ld.op_str).group(1)}
+    masked = None   # (source, mask, position) when the index is "source & mask"
+    k0 = ctx.index(ld); cmp = None
+    def wname(r): return 'w' + r[1:]
+    for i in range(k0 - 1, -1, -1):   # walk back from the load: follow register copies into the index, stop at the bounds check
+        p = ctx[i]
+        m = re.fullmatch(r'(w\d+), (w\d+)', p.op_str) if p.mnemonic == 'mov' else None
+        if m and m.group(1) in idx: idx.add(m.group(2)); continue
+        m = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'and' else None
+        if m and wname(m.group(1)) in idx and masked is None: masked = (wname(m.group(2)), int(m.group(3), 0), i); continue
+        m = re.fullmatch(r'(w\d+), #(0x[0-9a-f]+|\d+)', p.op_str) if p.mnemonic == 'cmp' else None
+        if not m: continue
+        if m.group(1) in idx: cmp = p; break
+        if masked:   # the checked register must be "the same source & the same mask", with the source unchanged up to the index's and
+            for q in range(i - 1, -1, -1):
+                w = [wname(ctx[q].reg_name(r)) for r in ctx[q].regs_access()[1]]
+                if m.group(1) not in w: continue
+                mm = re.fullmatch(r'([wx]\d+), ([wx]\d+), #(0x[0-9a-f]+|\d+)', ctx[q].op_str) if ctx[q].mnemonic == 'and' else None
+                if mm and wname(mm.group(2)) == masked[0] and int(mm.group(3), 0) == masked[1] and \
+                   not any(masked[0] in [wname(ctx[z].reg_name(r)) for r in ctx[z].regs_access()[1]] for z in range(q + 1, masked[2])):
+                    cmp = p
+                break
+            if cmp: break
+    if not cmp: return None
     n = int(cmp.op_str.split('#')[1], 0) + 1
     k = insl.index(ld); lo = page = None
     for p in reversed(insl[max(0, k - 256):k]):   # the writer chain of the table base

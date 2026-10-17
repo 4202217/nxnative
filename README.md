@@ -17,7 +17,7 @@ This project is built on other people's work:
 - **[LibHac](https://github.com/Thealexbarney/LibHac)**: reads NSPs and layers updates over the base game in `dm/tools/nx_extract`. **hactool** did the first extractions.
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**: SPIR-V to Metal Shading Language.
 - **deko3d** (zlib): its texture layout size algorithm is ported in `dm/gfx/nvn/nvn_tex.c`.
-- **libvpx** (VP9 movies), **libdeflate**, **bcdec** and **NVIDIA FLIP** ship in `dm/third_party` with their licenses ([list](dm/third_party/README.md)).
+- **libvpx** (VP9 movies), **stb_vorbis** (movie sound), **libdeflate**, **bcdec** and **NVIDIA FLIP** ship in `dm/third_party` with their licenses ([list](dm/third_party/README.md)).
 - **Capstone**, **lz4**, **fontTools** and **XcodeGen** are used by the build.
 
 ## Games
@@ -32,6 +32,8 @@ All of these are tested on an iPhone and playable:
 | 13 Sentinels: Aegis Rim | base game + update 1.10 | ~5 GB | |
 | Super Mario 3D World + Bowser's Fury | base game + update 1.2.2 | ~3 GB | |
 | The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | Upgraded to 60 fps (30 fps on Switch) |
+
+New, runs on the Mac, not yet tested on an iPhone: The Legend of Zelda: Link's Awakening (base game + update 1.1.0, ~6 GB).
 
 Needs iOS / iPadOS 26 or later. Other games aren't supported yet: for them the script writes a survey instead of an IPA.
 
@@ -118,7 +120,7 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license; see [dm/th
 - **[LibHac](https://github.com/Thealexbarney/LibHac)**：在 `dm/tools/nx_extract` 里读取 NSP、把更新叠到本体上。最早的解包用的是 **hactool**。
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**：SPIR-V 转 Metal 着色语言。
 - **deko3d**（zlib）：`dm/gfx/nvn/nvn_tex.c` 移植了它的贴图布局尺寸算法。
-- **libvpx**（VP9 影片）、**libdeflate**、**bcdec** 和 **NVIDIA FLIP** 连同许可证放在 `dm/third_party`（[清单](dm/third_party/README.md)）。
+- **libvpx**（VP9 影片）、**stb_vorbis**（影片声音）、**libdeflate**、**bcdec** 和 **NVIDIA FLIP** 连同许可证放在 `dm/third_party`（[清单](dm/third_party/README.md)）。
 - 构建时用到 **Capstone**、**lz4**、**fontTools** 和 **XcodeGen**。
 
 ## 游戏
@@ -133,6 +135,8 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license; see [dm/th
 | 十三机兵防卫圈 | 本体 + 1.10 更新 | 约 5 GB | |
 | 超级马力欧 3D 世界 + 狂怒世界 | 本体 + 1.2.2 更新 | 约 3 GB | |
 | 塞尔达传说 旷野之息 | 本体 + 1.9.0 更新（+ DLC） | 约 16 GB | 升级到 60 fps（Switch 上 30 fps） |
+
+新加入、已在 Mac 上运行、还没在 iPhone 上测试：塞尔达传说 织梦岛（本体 + 1.1.0 更新，约 6 GB）。
 
 需要 iOS / iPadOS 26 或更高版本。其他游戏暂不支持：脚本会为它们写一份分析报告，而不是出 IPA。
 

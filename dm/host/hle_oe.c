@@ -16,7 +16,7 @@ int dm_opmode(void) {
 // Message numbers (those actually handled by the game at main 0xe10d30): 15 focus change, 30 operation mode change, 31 performance mode change
 enum { MSG_FOCUS = 15, MSG_OPMODE = 30, MSG_PERFMODE = 31 };
 #define MQ 32
-static pthread_mutex_t g_mq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_mq_lock = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_mq_cond = PTHREAD_COND_INITIALIZER;   // cond: wakes the blocking PopNotificationMessage
 static uint32_t g_mq[MQ]; static int g_mqh, g_mqn;
 static _Atomic int g_ntf_opmode, g_ntf_perfmode;          // only pushed after the game turns it on with Set*NotificationEnabled
 static void mq_push(uint32_t m) {
@@ -30,6 +30,7 @@ static void mq_push(uint32_t m) {
             if (g_mq[(g_mqh + i) % MQ] == m) { pthread_mutex_unlock(&g_mq_lock); return; }
     if (g_mqn == MQ) die("oe 通知队列溢出（游戏没在取？）");
     g_mq[(g_mqh + g_mqn++) % MQ] = m;
+    pthread_cond_broadcast(&g_mq_cond);
     pthread_mutex_unlock(&g_mq_lock);
 }
 void dm_oe_res_changed(void) { if (getenv("DM_TEST_OE_FOCUS_FIRST")) mq_push(MSG_FOCUS);   /* Test: queue 31 behind a focus notification (the order at iOS app startup) */
@@ -233,6 +234,17 @@ HLE_FORCE("_ZN2nn2oe25TryPopNotificationMessageEPj", "系统通知队列；前�
     if (ok && *msg == MSG_PERFMODE) dm_uiscreen_res_reread();
     if (ok) LOG("oe 通知被游戏取走：%u", *msg);   // state changes are rare, printing each one does not flood the log
     return ok;
+}
+// The blocking form (Link's Awakening pops on a thread of its own, main+0xfa1ff8): the SDK's version waits on the system event oe::Initialize would have created,
+// and the host's oe::Initialize is a no-op, so it aborted on an uninitialized event. Wait for the host queue instead, then take the message the Try path's way
+HLE_FORCE("_ZN2nn2oe22PopNotificationMessageEv", "系统通知队列（阻塞版）；等宿主队列", uint32_t, h_oe_PopMsg, void) {
+    uint32_t m = 0;
+    for (;;) {
+        pthread_mutex_lock(&g_mq_lock);
+        while (!g_mqn) pthread_cond_wait(&g_mq_cond, &g_mq_lock);
+        pthread_mutex_unlock(&g_mq_lock);
+        if (h_oe_TryPopMsg(&m)) return m;   // another thread may have taken it in between: wait again
+    }
 }
 // bool arguments: Switch callers do not extend them, declared as unsigned and only the low 8 bits are looked at
 HLE_FORCE("_ZN2nn2oe28SetResumeNotificationEnabledEb", "恢复通知开关；宿主的恢复以焦点通知 15 表达", void, h_oe_SetResumeNtf, unsigned on) { (void)on; }

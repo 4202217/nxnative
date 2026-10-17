@@ -15,3 +15,10 @@ HLE_FORCE("_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE", "建图层；宿
 HLE_FORCE("_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE", "原生窗口句柄，交给 NVN 窗口 builder；宿主给静态对象", Result, h_vi_GetNative, void **out, void *layer) {
     (void)layer; *out = &g_native; return RES_OK;
 }
+// Link's Awakening also crops its layer and tears the display down on exit; the SDK's versions dereference the vi service objects the host never made (SetLayerCrop: SIGSEGV at +0x64)
+HLE_FORCE("_ZN2nn2vi12SetLayerCropEPNS0_5LayerEiiii", "图层裁切；宿主出图不裁", Result, h_vi_SetCrop, void *layer, int x, int y, int w, int h) {
+    (void)layer; LOG("vi::SetLayerCrop %d,%d %dx%d（忽略）", x, y, w, h); return RES_OK;
+}
+HLE_FORCE("_ZN2nn2vi12DestroyLayerEPNS0_5LayerE", "销毁图层；宿主静态对象", void, h_vi_DestroyLayer, void *layer) { (void)layer; }
+HLE_FORCE("_ZN2nn2vi12CloseDisplayEPNS0_7DisplayE", "关显示；宿主静态对象", void, h_vi_CloseDisp, void *disp) { (void)disp; }
+HLE_FORCE("_ZN2nn2vi8FinalizeEv", "显示服务收尾；宿主无 vi 服务", void, h_vi_Fini, void) {}

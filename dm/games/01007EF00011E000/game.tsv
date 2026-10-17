@@ -19,6 +19,10 @@ app_category	public.app-category.adventure-games
 # 虚拟手柄首次用 3D 布局（十字键、右摇杆、L3 / R3）：右摇杆转视角 | the virtual gamepad starts in the 3D layout (D-pad, right stick, L3 / R3): the right stick turns the camera
 pad_layout	full
 
+# ---- Graphics ----
+# The HUD text-shadow pane reads its 99x20 R8 mask (blurred text alpha in red, mapped R 0 0 1) with alpha = red: soft shadows instead of hard-edged boxes behind every prompt
+alpha_from_red	e6a88e12dbae9743
+
 # ---- 版本 | Versions ----
 # 只解了合并 1.9.0 的那份；基础版单独的构建号用到时再补 | only the merged 1.9.0 copy is extracted; the base game's own build IDs are added when needed
 build	v1114112	1.9.0	main=cd57b23fa4bbad65803d9788c01821ee	subsdk0=f39f4c431234c72eb520cfdd1001bbcf	sdk=574284b40c06cf1821a44857939083be
