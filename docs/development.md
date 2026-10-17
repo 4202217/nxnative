@@ -64,11 +64,11 @@ To add a game:
 
 You need the same tools as the script. The shader translator is the prebuilt `dm/gfx/tools/dmsh_xlate_bin`, the build that matches `dmsh_chain.lock`; a fresh `dotnet publish` gives different fingerprints. The commands use three variables:
 - `G`, the profile;
-- `W`, the game's workspace outside this repository;
+- `W`, the game's work folder: `<title ID>-work` inside the game's NSP folder, outside this repository and off the home folder (it grows to the size of the game files);
 - `VER`, a version folder named after the NSP version.
 
 ```
-G=010015100B514000; W=~/$G-work; VER=v327680
+G=010015100B514000; W="<NSP folder>/$G-work"; VER=v327680
 # 1. extract: the base game alone (update -), or an update layered over it (the last argument lets unchanged files become clones)
 dotnet build dm/tools/nx_extract -c Release -o $W/build/nx_extract
 $W/build/nx_extract/nx_extract <prod.keys> <base NSP> - $W/data/v0
@@ -85,9 +85,9 @@ make -C dm/host GAME=$G dmhost
 python3 dm/tools/make_ext_font.py $W/build/font/nintendo_ext.ttf
 # 5. run on the Mac
 DM_ROOT=$W DM_ROMFS=$W/data/$VER/RomFS DM_SAVE=$W/run/save DM_TEMP=$W/run/temp DM_MSL_DIR=$W/build/cache/metal_shader_cache DM_FONT_DIR=$W/build/font dm/host/dmhost $W/build/patched_$VER
-# 6. iOS shader libraries (about 15 min for Mario), then the IPA (default ~/Desktop/<the profile's ipa>)
+# 6. iOS shader libraries (about 15 min for Mario), then the IPA (default <NSP folder>/<the profile's ipa>)
 IOSOUT=$W/build/ios/dmsh_b DM_GAME=$G python3 dm/gfx/tools/dmsh_build.py $W/shader/pkg $W/build/cache/metal_shader_cache
-GAME=$G dm/ios/tools/build_ipa.sh [out.ipa]
+GAME=$G W=$W dm/ios/tools/build_ipa.sh [out.ipa]
 ```
 
 Notes on these steps:
@@ -130,7 +130,7 @@ Record on the game version you ship. At launch the log names each list it read a
 **The Legend of Zelda: Breath of the Wild (`01007EF00011E000`)**
 - A patch to the game's frame-interval logic lifts its 30 fps limit to 60 without changing the game speed (it falls back to 30 by itself when a frame takes too long).
 - The game waits for each frame's GPU work before submitting the next, so the host hands its translated commands to the GPU in segments ([04](agents/04-graphics.md)).
-- **HUD text shadows:** each prompt's soft shadow is a blurred mask the game keeps in the red channel of an R8 texture whose channel mapping says alpha = 1; the profile's `alpha_from_red` key makes the shadow shader read alpha from red, otherwise every prompt sits on a hard-edged dark box ([04](agents/04-graphics.md)).
+- **HUD prompt shadows and glows:** each prompt bar captures itself into a blurred mask the game keeps in the red channel of an R8 texture whose channel mapping says alpha = 1; the profile's `alpha_from_red` key makes every layout shader read alpha from red for such render targets, otherwise prompts sit on hard-edged dark boxes or cream cloud rectangles ([04](agents/04-graphics.md)).
 
 **The Legend of Zelda: Link's Awakening (`01006BB00C6F0000`)**
 - **Engine:** Grezzo's engine on NintendoWare, SDK 8.2.0 (the oldest so far), NVN 53. Modules main + subsdk0 (GLSLC, NVN's runtime shader compiler) + subsdk1 (movie) + sdk; 9,698 shaders from the bfsha archives, effects and layouts.

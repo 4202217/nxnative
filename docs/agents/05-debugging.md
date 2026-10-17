@@ -20,11 +20,11 @@ x0=… x28=…
 ```bash
 # decompile the functions containing these module offsets
 JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
-  /opt/homebrew/opt/ghidra/libexec/support/analyzeHeadless ~/<title>-work/ghidra/proj <proj> -process <module>.elf \
+  /opt/homebrew/opt/ghidra/libexec/support/analyzeHeadless $W/ghidra/proj <proj> -process <module>.elf \
   -noanalysis -readOnly -scriptPath <repo>/dm/tools/ghidra -postScript Decompile.java 0x373e04,0x2ea2ac
 
 # raw disassembly (works where Ghidra defined no function)
-objdump -d --start-address=0x2ea1c0 --stop-address=0x2ea2b0 ~/<title>-work/elf/<module>.elf
+objdump -d --start-address=0x2ea1c0 --stop-address=0x2ea2b0 $W/elf/<module>.elf
 ```
 
 Prefix an offset with `@` (`... Decompile.java @0x49740`) to (re)create the function at exactly that address. Code reached only through vtables has no function, and Ghidra's analysis marked some `nn::os` imports (`LockMutex`) as non-returning, which cut many functions short right after the first lock. The script clears that flag and the call-return overrides on such calls before decompiling.
@@ -49,7 +49,7 @@ Use it when lldb is unavailable: after macOS revokes the debugger authorization 
 
 ## lldb
 
-The host uses SIGSEGV for dirty-page tracking, so lldb must pass it through without stopping. Address randomization is off under lldb, so guest addresses repeat across runs. Template (`~/<title>-work/dbg/*.py`, run with `perl -e 'alarm 240; exec @ARGV' lldb -b -o "command script import x.py"`):
+The host uses SIGSEGV for dirty-page tracking, so lldb must pass it through without stopping. Address randomization is off under lldb, so guest addresses repeat across runs. Template (`$W/dbg/*.py`, run with `perl -e 'alarm 240; exec @ARGV' lldb -b -o "command script import x.py"`):
 
 ```python
 import lldb

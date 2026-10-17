@@ -2,10 +2,10 @@
 
 ## Keys
 
-- Needs the user's own `prod.keys` and the title key from the NSP's ticket. Keep both under the workspace, e.g. `~/dm-work/build/keys/.switch/{prod,title}.keys`, and run hactool with `HOME` pointed there so it never reads anything else:
+- Needs the user's own `prod.keys` and the title key from the NSP's ticket. Keep both under the work folder, e.g. `$W/build/keys/.switch/{prod,title}.keys`, and run hactool with `HOME` pointed there so it never reads anything else:
 
   ```bash
-  # ~/dm-work/build/keys/ht — hactool with a private key home
+  # $W/build/keys/ht — hactool with a private key home
   HOME="$(cd "$(dirname "$0")" && pwd)" exec "$(dirname "$0")/../../tools/hactool/hactool" --disablekeywarns "$@"
   ```
 
@@ -29,8 +29,10 @@ ht -t nca --exefsdir=$W/data/v0/ExeFS --romfsdir=$W/data/v0/RomFS $W/build/nsp/<
 
 ## Workspace layout used so far
 
+The work folder `$W` sits in the game's NSP folder, beside the NSP script's `<title>_build/`, never in the home folder:
+
 ```
-~/<title>-work/
+<NSP folder>/<title>-work/
   build/nsp/            NCAs + tik/cert + nsp.log
   data/v0/{ExeFS,RomFS} extracted base game (v<ver> for updates)
   probe/                decompressed images (main.orig.bin, sdk.orig.bin), small experiments

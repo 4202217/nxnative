@@ -68,7 +68,7 @@ Archives the game reads itself need nothing from the host but plain file access.
 - Decompile on demand in seconds with a script (`ghidra/scripts/Decompile.java` in the workspace):
 
   ```bash
-  JAVA_HOME=<jdk21> $GHIDRA/support/analyzeHeadless ~/<title>-work/ghidra/proj <name> -process <module>.elf \
+  JAVA_HOME=<jdk21> $GHIDRA/support/analyzeHeadless $W/ghidra/proj <name> -process <module>.elf \
       -noanalysis -readOnly -scriptPath <repo>/dm/tools/ghidra -postScript Decompile.java 0x107dbc0,0x3707b0
   ```
 
