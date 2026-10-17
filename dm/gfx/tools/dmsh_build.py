@@ -480,6 +480,22 @@ def vs_pad(key, src):
     k = src.find('main0_out out = {};') + len('main0_out out = {};')
     return src[:k] + ''.join(f'\n    out.dm_pad{l} = float4(0.0, 0.0, 0.0, 1.0);' for l in miss) + src[k:], miss
 
+def vs_depth(src):
+    """深度口径的两个入口：翻译器出的顶点着色器 z 原样（NVN 近=0 口径）；这里把主函数复制一份——main0 在每个 return out 前补 GL 口径（近=-w）的 z' = z/2 + w/2
+    （与 Ryujinx 原先在翻译器里改写的算式逐位相同），main0_z 不改。游戏设的口径是运行时状态（nvnDeviceSetDepthMode），宿主按它挑入口，任何游戏都不用配。
+    Metal 的函数常量也能做，但带函数常量的函数一律要特化才能建管线（实测每个顶点着色器约 2.4 ms），两个入口只多编一份顶点着色器（库里约 30%）。
+    返回 (只含 main0 的源码：反射 / 栅格事实照旧按它算, 写进 metallib 的完整源码)。
+    Two entry points for the depth convention: the translator's vertex shader leaves z unchanged (NVN's near=0 convention); the main function is copied here - main0 gets the GL convention's (near=-w) z' = z/2 + w/2 before every return out
+    (bit-identical to the formula Ryujinx used to emit in the translator), main0_z stays as is. The convention a game sets is runtime state (nvnDeviceSetDepthMode); the host picks the entry point by it, with nothing to configure per game.
+    Metal function constants could do this too, but a function with function constants must always be specialized before a pipeline can be built (measured about 2.4 ms per vertex shader); two entry points only compile the vertex shaders twice (about 30% of the library).
+    Returns (the source with only main0: reflection / raster facts are computed from it as before, the full source written into the metallib)."""
+    m = re.search(r'\bvertex\s+main0_out\s+main0\s*\(', src)
+    if not m: sys.exit('【红】顶点着色器没有 main0 主函数，补不了深度入口 | vertex shader without a main0 main function, cannot add the depth entry points')
+    body = src[m.start():]   # 主函数是文件里最后一个函数 | the main function is the last function in the file
+    gl = body.replace('return out;', 'out.gl_Position.z = fma(out.gl_Position.z, 0.5, out.gl_Position.w * 0.5);\n    return out;')
+    single = src[:m.start()] + gl
+    return single, single + '\n' + re.sub(r'\bmain0\s*\(', 'main0_z(', body, count=1)
+
 def finish(key, w, j, c1):
     name, k = loc[key]
     msl = os.path.join(w, key + '.metal'); air = msl[:-6] + '.air'; lib = os.path.join(out, key + '_b.metallib')
@@ -499,6 +515,9 @@ def finish(key, w, j, c1):
     if j['stage'] == 'vs' and PAIRS.get(key):   # 像素着色器读而顶点没写的输出补成 (0,0,0,1)（见 vs_pad） | outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
+    if j['stage'] == 'vs':   # 两个深度口径入口（见 vs_depth）；之后的分析都按只含 main0 的源码 | the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
+        src, full = vs_depth(src)
+        open(msl, 'w').write(full)
     res = json.load(open(os.path.join(w, key + '.res.json')))
     try:
         subprocess.run(['xcrun', '-sdk', 'macosx', 'metal', '-c', msl, '-o', air], check=True)
@@ -517,7 +536,7 @@ def finish(key, w, j, c1):
     entry = re.search(r'(vertex|fragment|kernel)\s+\S+\s+(\w+)\s*\(', src)
     dr = drv_reads(src)
     refl = {'key': key + '_b', 'route': 'B', 'chain': CHAIN, 'dm_ctl': key, 'source': f'{name}#{k}', 'pc_paired': pc_of[key], 'stage': j['stage'],
-            'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None,
+            'entry': entry.group(2) if entry else 'main0', 'msl_entry_kind': entry.group(1) if entry else None, **({'entry_z': 'main0_z'} if j['stage'] == 'vs' else {}),
             'threadgroup_size': j.get('local'), 'c1': c1.hex(), 'notes': res['notes'] + (['无配对 PC 反射，查询按缺省'] if j.get('pc_missing') else []), 'drv_reads': dr, 'drv_unfillable': unfillable(dr),
             'bindings': reflect(key, j['stage'], src, res),
             'vertex_inputs': [{'location': int(m.group(2)), 'msl_type': m.group(1)} for m in re.finditer(r'(\w+)\s+\w+\s*\[\[attribute\((\d+)\)\]\]', src)],

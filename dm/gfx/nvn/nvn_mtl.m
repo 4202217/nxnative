@@ -2223,6 +2223,15 @@ static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
     dispatch_data_t d = dispatch_data_create(m, len, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{ munmap(m, len); });
     return [g_dev newLibraryWithData:d error:err];
 }
+// NVN depth mode (nvnDeviceSetDepthMode): every vertex library has two entry points (dmsh_build.py vs_depth): main0 rewrites z for the GL convention (near = -w, NVN's default),
+// main0_z leaves z as is (near = 0, which Link's Awakening, 13 Sentinels and Engage set). Loading picks by the mode the game set, so no game needs a setting for it
+static _Atomic int g_depth_zero, g_vs_loaded;
+void mtl_set_depth_zero(int on) {
+    if (atomic_exchange(&g_depth_zero, on) == on) return;
+    MLOG("深度模式：%s", on ? "近=0，顶点着色器用 main0_z 入口" : "近=-w（GL），顶点着色器用 main0 入口");
+    int n = atomic_load(&g_vs_loaded);
+    if (n) MLOG("【红】深度模式在载入 %d 个顶点着色器之后才改：它们仍按原口径", n);
+}
 static NvShader *shader_load(NSString *pc, int stage) {
     NSError *e = nil;
     NSString *lp = [NSString stringWithFormat:@"%@/%@.metallib", g_msl_dir, pc];
@@ -2235,7 +2244,12 @@ static NvShader *shader_load(NSString *pc, int stage) {
     char err[160];
     if (nvn_refl_from_json(j, &o->rf, err, sizeof err)) { MLOG("【红】着色器 %s 反射转换失败：%s", pc.UTF8String, err); return nil; }
     if (rt_range_on()) o->range_ro=rt_range_bindings_ro(j);
-    o->fn = [lib newFunctionWithName:j[@"entry"]]; o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key);
+    NSString *entry = j[@"entry"];
+    if (stage == 0) {
+        atomic_fetch_add(&g_vs_loaded, 1);
+        if (atomic_load(&g_depth_zero)) { if (j[@"entry_z"]) entry = j[@"entry_z"]; else RED_ONCE(85, "顶点着色器 %s 没有近=0 入口（entry_z）：深度按 GL 口径改写", pc.UTF8String); }
+    }
+    o->fn = [lib newFunctionWithName:entry]; o->stage = stage; strlcpy(o->key, pc.UTF8String, sizeof o->key);
     if (o->rf.nb) {
         o->ae = [o->fn newArgumentEncoderWithBufferIndex:o->rf.abi];
         int max_aid = -1;
