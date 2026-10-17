@@ -75,6 +75,11 @@ HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "启动参数：没有", uns
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "录像开关；宿主无系统录像", void, h_oe_DisableRec, void) {}
 HLE_FORCE("_ZN2nn2oe16EnableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_EnableShot, void) {}
 HLE_FORCE("_ZN2nn2oe17DisableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_DisableShot, void) {}
+// Super Mario Odyssey: HOME button blocking around its own menus, screenshot orientation, and the auto-sleep query (all through am)
+HLE_FORCE("_ZN2nn2oe23BeginBlockingHomeButtonEv", "暂时屏蔽 HOME 键（经 am）；宿主没有 HOME 键", void, h_oe_BlockHome, void) {}
+HLE_FORCE("_ZN2nn2oe21EndBlockingHomeButtonEv", "恢复 HOME 键（经 am）", void, h_oe_UnblockHome, void) {}
+HLE_FORCE("_ZN2nn2oe29SetScreenShotImageOrientationENS_5album16ImageOrientationE", "截图方向（经 am）；宿主无系统截图", void, h_oe_ShotOrient, int o) { (void)o; }
+HLE_FORCE("_ZN2nn2oe37IsUserInactivityDetectionTimeExtendedEv", "无操作自动熄屏是否延长；宿主不熄屏，报否", unsigned, h_oe_InactivityExtQ, void) { return 0; }
 
 // OperationMode: 0 Handheld, 1 Console; PerformanceMode: 0 Normal, 1 Boost (one-to-one with the operation mode)
 HLE_FORCE("_ZN2nn2oe16GetOperationModeEv", "运行模式查询；按 DM_OPMODE 给固定值", int, h_oe_GetOpMode, void) { int u = g_ui_opmode; if (atomic_exchange(&g_ui_armed, 0)) atomic_fetch_add(&g_ui_reads, 1); return u >= 0 ? u : opmode(); }

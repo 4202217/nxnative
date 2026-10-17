@@ -234,3 +234,6 @@ HLE_FORCE("_ZN2nn5audio24GetActiveAudioDeviceNameEPNS0_15AudioDeviceNameE", "当
 HLE_FORCE("_ZN2nn5audio41GetActiveAudioDeviceChannelCountForOutputEv", "输出声道数：2", int, h_ad_Channels, void) { return 2; }
 HLE_FORCE("_ZN2nn5audio26SetAudioDeviceOutputVolumeEPKNS0_15AudioDeviceNameEf", "设备音量；宿主忽略", void, h_ad_SetVol, const char *name, float v) { (void)name; (void)v; }
 HLE_FORCE("_ZN2nn5audio39AcquireAudioDeviceNotificationForOutputEPNS_2os11SystemEventE", "输出设备变化通知：绑定、永不触发", void, h_ad_Notify, void *ev) { hle_bind_system_event(ev, 0); }
+// SDK 7 names of the two above (Super Mario Odyssey): the device-switch event and the active channel count
+HLE_FORCE("_ZN2nn5audio36AcquireAudioDeviceSwitchNotificationEPNS_2os11SystemEventE", "输出设备切换通知（SDK 7 名）：绑定、永不触发", void, h_ad_Notify7, void *ev) { hle_bind_system_event(ev, 0); }
+HLE_FORCE("_ZN2nn5audio21GetActiveChannelCountEv", "输出声道数（SDK 7 名）：2", int, h_ad_Channels7, void) { return 2; }

@@ -32,8 +32,9 @@ All of these are tested on an iPhone and playable:
 | 13 Sentinels: Aegis Rim | base game + update 1.10 | ~5 GB | |
 | Super Mario 3D World + Bowser's Fury | base game + update 1.2.2 | ~3 GB | |
 | The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | Upgraded to 60 fps (30 fps on Switch) |
+| The Legend of Zelda: Link's Awakening | base game + update 1.1.0 | ~6 GB | |
 
-New, in testing on an iPhone: The Legend of Zelda: Link's Awakening (base game + update 1.1.0, ~6 GB).
+Being ported, not playable yet: Super Mario Odyssey (base game + update 1.4.1).
 
 | | |
 |:---:|:---:|
@@ -71,21 +72,11 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
 
 The IPA appears in the same folder (here `~/Games/MarioWonder/SMBWMobile.ipa`). The first build takes 30–60 minutes, later ones about 10. You need free disk space of about twice the NSPs' size plus 10 GB. Options such as `-o` (output path) and `--app-name` are listed by `-h`.
 
-**4. Install** the IPA with your sideloading tool (AltStore, Sideloadly, LiveContainer, …). The app gets the game's name and icon.
+**4. Install** the IPA with your sideloading tool (AltStore, Sideloadly, LiveContainer, …). The app gets the game's name, icon and version (the update's version, for example 1.2.1 for Mario Wonder; the base game's when there is no update).
 
 ## Play
 
 **Touch controls.** Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice. 3D World and Breath of the Wild start in 3D, the other games in 2D.
-
-```
- ZL  L3*        [−]  2D/3D  [+]        R3*  ZR
- L                                           R
-                                         X
-  ( L stick )                          Y   A
-             ✚ D-pad*   ( R stick )*     B
-                                  * 3D layout only
-```
-
 A connected game controller hides the touch controls and keeps every button.
 
 - **Game language** is English by default. For Chinese, add the line `DM_LANG=zh-Hans` to `Documents/env.txt`.
@@ -142,8 +133,9 @@ MIT (see [LICENSE](LICENSE)). Third-party code keeps its own license; see [dm/th
 | 十三机兵防卫圈 | 本体 + 1.10 更新 | 约 5 GB | |
 | 超级马力欧 3D 世界 + 狂怒世界 | 本体 + 1.2.2 更新 | 约 3 GB | |
 | 塞尔达传说 旷野之息 | 本体 + 1.9.0 更新（+ DLC） | 约 16 GB | 升级到 60 fps（Switch 上 30 fps） |
+| 塞尔达传说 织梦岛 | 本体 + 1.1.0 更新 | 约 6 GB | |
 
-新加入、正在 iPhone 上测试：塞尔达传说 织梦岛（本体 + 1.1.0 更新，约 6 GB）。
+正在移植、还不能玩：超级马力欧 奥德赛（本体 + 1.4.1 更新）。
 
 | | |
 |:---:|:---:|
@@ -181,7 +173,7 @@ python3 scripts/build_ipa_from_nsp.py ~/Games/MarioWonder -k ~/keys/prod.keys
 
 IPA 会出现在同一个文件夹里（这里是 `~/Games/MarioWonder/SMBWMobile.ipa`）。第一次打包要 30–60 分钟，之后约 10 分钟。需要的空闲磁盘空间约为 NSP 大小的两倍再加 10 GB。`-o`（输出路径）、`--app-name` 等选项用 `-h` 查看。
 
-**4. 安装**：用你的侧载工具（AltStore、Sideloadly、LiveContainer 等）安装 IPA。App 会带上游戏的名字和图标。
+**4. 安装**：用你的侧载工具（AltStore、Sideloadly、LiveContainer 等）安装 IPA。App 会带上游戏的名字、图标和版本号（用更新的版本号，例如马力欧惊奇是 1.2.1；没有更新时用本体的）。
 
 ## 游玩
 
