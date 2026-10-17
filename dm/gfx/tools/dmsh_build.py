@@ -480,6 +480,20 @@ def vs_pad(key, src):
     k = src.find('main0_out out = {};') + len('main0_out out = {};')
     return src[:k] + ''.join(f'\n    out.dm_pad{l} = float4(0.0, 0.0, 0.0, 1.0);' for l in miss) + src[k:], miss
 
+def vs_init(src):
+    """顶点着色器的每个输出先置 (0,0,0,1)，再跑翻译出的主体：硬件上没写的分量就是这个缺省值。翻译器出的源码以 out = {} 开头，全是 0；
+    Ryujinx 连接阶段时把下一阶段读的分量这样初始化，这里逐个着色器离线翻译，不知道下一阶段读什么，就全初始化（写了的分量照样被主体覆盖）。
+    只写 xyz 的输出（世界坐标）在像素着色器里按 w 除：w 为 0 时整张阴影图的比较值成了无穷大，梦见岛户外全在阴影里（暗、篱笆不投影）。
+    Every vertex shader output starts as (0,0,0,1) before the translated body runs: on the hardware that is what an unwritten component reads. The translator's source starts with out = {}, all zeros;
+    Ryujinx initializes the components the next stage reads this way when it links stages, and since every shader is translated offline on its own without knowing what the next stage reads, all are
+    initialized (components the body writes are overwritten as before). An output written only in xyz (a world position) is divided by its w in the pixel shader: with w = 0 every shadow-map
+    compare value became infinite and Link's Awakening was in shadow everywhere outdoors (dim, no shadows from the fences)."""
+    i = src.find('struct main0_out\n{\n'); j = src.find('\n};', i); k = src.find('main0_out out = {};')
+    if i < 0 or j < 0 or k < 0: return src
+    outs = re.findall(r'\n    float4 (\w+) \[\[user\(locn\d+\)\]\];', src[i:j])
+    k += len('main0_out out = {};')
+    return src[:k] + ''.join(f'\n    out.{n} = float4(0.0, 0.0, 0.0, 1.0);' for n in outs) + src[k:]
+
 def vs_depth(src):
     """深度口径的两个入口：翻译器出的顶点着色器 z 原样（NVN 近=0 口径）；这里把主函数复制一份——main0 在每个 return out 前补 GL 口径（近=-w）的 z' = z/2 + w/2
     （与 Ryujinx 原先在翻译器里改写的算式逐位相同），main0_z 不改。游戏设的口径是运行时状态（nvnDeviceSetDepthMode），宿主按它挑入口，任何游戏都不用配。
@@ -512,6 +526,8 @@ def finish(key, w, j, c1):
             if r.returncode: return 'MSL 失败', r.stderr.strip()[:160], None
             src = open(msl).read()
     pad = []
+    if j['stage'] == 'vs':   # 输出先置 (0,0,0,1)（见 vs_init） | outputs start as (0,0,0,1) (see vs_init)
+        src = vs_init(src); open(msl, 'w').write(src)
     if j['stage'] == 'vs' and PAIRS.get(key):   # 像素着色器读而顶点没写的输出补成 (0,0,0,1)（见 vs_pad） | outputs the pixel shader reads but the vertex shader does not write get (0,0,0,1) (see vs_pad)
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
