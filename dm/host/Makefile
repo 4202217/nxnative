@@ -6,7 +6,13 @@ ifneq ($(filter-out clean,$(MAKECMDGOALS)),)
 $(error 没设 GAME | GAME is not set: make GAME=<基础版标题号 | base game title ID>: $(shell python3 ../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}'))
 endif
 endif
-GAME_DIR = ../games/$(GAME)
+# A profile outside the repository (DM_GAMES_DIR, e.g. the NSP script's provisional profile) is reached through the symlink gen/<id>/profile: make cannot take paths with spaces
+ifneq ($(strip $(GAME)),)
+GAME_DIR := $(if $(wildcard ../games/$(GAME)/game.tsv),../games/$(GAME),$(shell python3 ../games/game.py link $(GAME) gen/$(GAME)/profile >&2 && echo gen/$(GAME)/profile))
+ifeq ($(GAME_DIR),)
+$(error 没有游戏档案 $(GAME)（dm/games 与 DM_GAMES_DIR 里都没有）| no game profile $(GAME) (neither in dm/games nor in DM_GAMES_DIR))
+endif
+endif
 GAME_H = gen/$(GAME)/game_profile.h
 CFLAGS=-O1 -g -Wall -Wno-unused-function
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
