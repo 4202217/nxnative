@@ -95,18 +95,27 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "关渲
     orig(obj, state);
 }
 
-// DeviceSink input mix buffers → int16 stereo. The command ID is 0x13 in SDK 16; SDK 20 inserted a command before it, making it 0x14 (written at sdk+0x233f44, same layout: 0x148 bytes,
-//   +0x128 upsample buffer, +0x130 input count, +0x134 input indices). render_once sets it by layout
+// DeviceSink input mix buffers → int16 stereo. The command ID is 0x13 in SDK 16; SDK 20 inserted a command before it, making it 0x14 (written at sdk+0x233f44); SDK 8 (Link's Awakening)
+//   has four fewer commands before it, making it 0x10. The layout is the same in all three: 0x148 bytes, +0x20 device name ("MainAudioOut"), +0x128 upsample buffer, +0x130 input count,
+//   +0x134 input indices. render_once sets the ID by layout; when the first full command list has no command with that ID, its one 0x148-byte command with 1 to 6 inputs is the sink
+//   (without this, Link's Awakening rendered every frame and played silence: the music and sound effects never reached the output, only the movies' own AudioOut did)
 static int g_sink_id = 0x13;
 static int capture(const uint8_t *cl, int16_t *dst) {
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
     const int32_t *mix = *(const int32_t *const *)(cl + 8);
-    static int logged;
-    if (!logged && ncmd > 4) {   // first full command list: command ID histogram
-        int hist[64] = {0}; const uint8_t *q = cl + 0x20; char line[512]; size_t o = 0;
-        for (uint32_t i = 0; i < ncmd && *(const uint32_t *)q == 0xcafebabeu && *(const int16_t *)(q + 6) > 0; i++) { hist[q[5] & 63]++; q += *(const int16_t *)(q + 6); }
+    static int logged, hist_logged;
+    if (!hist_logged && ncmd > 4) {   // first full command list: command ID histogram, and the sink ID check
+        hist_logged = 1;
+        int hist[64] = {0}, cand = -1, ncand = 0; const uint8_t *q = cl + 0x20; char line[512]; size_t o = 0;
+        for (uint32_t i = 0; i < ncmd && *(const uint32_t *)q == 0xcafebabeu && *(const int16_t *)(q + 6) > 0; i++) {
+            int16_t sz = *(const int16_t *)(q + 6); hist[q[5] & 63]++;
+            if (sz == 0x148 && *(const uint32_t *)(q + 0x130) - 1 < 6) { cand = q[5]; ncand++; }
+            q += sz;
+        }
         for (int k = 0; k < 64; k++) if (hist[k]) o += snprintf(line + o, sizeof line - o, " %d×%d", k, hist[k]);
         LOG("audren：首帧命令 %u 条，按命令号：%s", ncmd, line);
+        if (!hist[g_sink_id & 63] && ncand == 1) { LOG("audren：命令表里没有 %#x 号命令；唯一的 0x148 字节命令是 %#x 号，按它当 DeviceSink", g_sink_id, cand); g_sink_id = cand; }
+        else if (!hist[g_sink_id & 63]) LOG("【红】audren：命令表里没有 DeviceSink（%#x 号），0x148 字节的命令有 %d 个：游戏声音出不来", g_sink_id, ncand);
     }
     const uint8_t *c = cl + 0x20;
     for (uint32_t i = 0; i < ncmd; i++) {
