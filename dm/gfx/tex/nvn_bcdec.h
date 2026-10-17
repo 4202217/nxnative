@@ -1,5 +1,5 @@
 // GPUs without BC compressed format support (A15 / A16 etc., Apple GPU family Apple8 and below): BC textures are decompressed on the CPU into uncompressed formats.
-// BC3 in game textures is converted offline to ASTC by the Legacy Device Pack (dm/tools/astc_pack.py); the remaining BC (BC3 in sprites, a few BC1 / BC4 / BC5 / BC6H) goes through here.
+// On a GPU without BC every BC texture is stored decompressed; BC1-5 are decoded on the GPU at upload (nvn_mtl.m, bcd), BC6H / BC7 / 3D textures go through here (d2r-mobile's offline ASTC pack is not part of this repository).
 #pragma once
 #include <stddef.h>
 #include <stdint.h>

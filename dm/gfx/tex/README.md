@@ -24,8 +24,8 @@ The offsets of each level and layer within the storage, and the block height and
 
 Some older Apple GPUs do not support BC compressed textures (determined by `supportsBCTextureCompression` of `MTLDevice`). On these devices:
 
-- the game's textures can be converted to ASTC format offline in advance with an optional supplementary pack (`dm/tools/astc_pack.py`; for dependencies see the "Optional" section of `docs/DEPENDENCIES.md`);
-- the remaining BC textures are created by the replay layer in their decompressed format and decompressed at upload; decompression on the CPU goes through `nvn_bcdec.c` in this directory.
+- BC textures are created by the replay layer in their decompressed format and decompressed at upload: BC1–5 on the GPU (the `bcd` kernel in `../nvn/nvn_mtl.m`), BC6H, BC7 and 3D textures on the CPU through `nvn_bcdec.c` in this directory. Decompressed textures take 2–8 times the memory (Breath of the Wild: about 3.9 GB instead of 2.8 GB, which iOS does not allow on a 6 GB iPhone without the increased-memory-limit entitlement); d2r-mobile's offline ASTC pack (`astc_pack.py`) is not part of this repository;
+- a BC texture is never a render target and its raw blocks are not sampled through an uncompressed view, with or without BC (Metal has no such views; Breath of the Wild encodes one 32×32 BC4 texture on the GPU, GitHub issue #4).
 
 The environment variable `DM_TEST_NO_BC=1` forces this path on any machine.
 
