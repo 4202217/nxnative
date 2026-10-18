@@ -266,7 +266,13 @@ NVN(nvnTextureGetMemoryOffset, ptrdiff_t, const NVNtexture *t) { return (ptrdiff
 NVN(nvnTextureGetZCullStorageSize, size_t, const NVNtexture *t) { (void)t; return 0; }   // the host does no ZCull: no storage needed
 NVN(nvnTextureCompare, NVNboolean, const NVNtexture *a, const NVNtexture *b) {
     const tex_t *x = CTX(a), *y = CTX(b);
-    return !memcmp(&x->d, &y->d, sizeof x->d) && x->mem == y->mem;
+    const uint16_t identity = 2u | 3u << 3 | 4u << 6 | 5u << 9;
+    uint16_t xs = x->set_swz ? x->swz : identity, ys = y->set_swz ? y->swz : identity;
+    // Channel selection is part of texture identity. BOTW rebuilds layout captures
+    // on the same storage to change A8 masks to (1,1,1,R), or force capture alpha
+    // to one. Reporting equality here makes the engine discard that replacement.
+    int same_storage = !memcmp(&x->d, &y->d, sizeof x->d) && x->mem == y->mem;
+    return same_storage && xs == ys;
 }
 // No prototype in the header; call sites such as main 0x174899c compare the return value with 1 and set some status bit 0x100 if not equal. Meaning unverified; return 1 for now
 NVN_NOPROTO(nvnTextureGetRawStorageClass, int, const NVNtexture *t) { (void)t; return 1; }
