@@ -9,7 +9,8 @@
 # Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), aoc/ (each DLC's RomFS by index), tools/, patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes to the NSP folder by default.
 # The shader translator is the in-repo dm/gfx/tools/dmsh_xlate_bin (the build whose fingerprints match dmsh_chain.lock; a rebuilt dll has different fingerprints and dmsh_build refuses it).
 # The Python running this file needs lz4, capstone and fonttools; also needed: Xcode, xcodegen, .NET SDK 10, zstd, spirv-cross. For Mario the first run takes about 35 minutes (mostly the shader libraries); later runs take about 10 (the shader libraries come from the cache). Key values are never printed.
-import collections, ctypes, getpass, os, re, shutil, struct, subprocess, sys, tempfile, threading, time, zlib
+# The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress).
+import collections, ctypes, getpass, os, re, shutil, struct, subprocess, sys, tempfile, threading, time, types, zlib
 from pathlib import Path
 
 # ---- Settings ----
@@ -24,7 +25,8 @@ DM_ENV_FILE = ''                        # optional: environment switches for a d
 SURVEY_ONLY = False                     # a game with no profile in dm/games: only write the survey, no provisional profile and no IPA
 PROFILE_OUT = ''                        # where a provisional profile goes (empty = <NSP folder>/<title ID>_build/profile; the profile is <this>/<title ID>/)
 
-BEAT = 60                               # progress interval of quiet steps (seconds)
+PROGRESS = 'auto'                       # stage lines on the console: 'bar' (one line per stage, redrawn in place), 'lines' (a plain line every BEAT seconds), 'off' (only each stage's start and end); 'auto' = bar in a terminal or Spyder, lines when the output goes to a file
+BEAT = 30                               # seconds between progress lines in 'lines' mode
 TOOL_PATHS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/local/share/dotnet', os.path.expanduser('~/.dotnet')]   # GUI apps such as Spyder do not get the shell's PATH
 
 
@@ -32,8 +34,182 @@ class BuildError(Exception):
     pass
 
 
+def clock():
+    return time.strftime('%H:%M:%S')
+
+
 def say(msg):
-    print(f'[{time.strftime("%H:%M:%S")}] {msg}', flush=True)
+    PROG.say(f'[{clock()}] {msg}')
+
+
+def hms(s):   # seconds → m:ss, or h:mm:ss from an hour on
+    s = int(s); h, m = divmod(s // 60, 60)
+    return f'{h}:{m:02d}:{s % 60:02d}' if h else f'{m}:{s % 60:02d}'
+
+
+def size_unit(v):   # (unit, divisor) for a byte count
+    return next(((u, d) for u, d in (('GB', 2**30), ('MB', 2**20)) if v >= d), ('KB', 2**10))
+
+
+def amount(v, unit=''):   # a count, or a byte size when unit is 'B'
+    if unit == 'B':
+        u, d = size_unit(v); return f'{v / d:.1f} {u}'
+    return f'{v:,}' + (f' {unit}' if unit else '')
+
+
+# ---- Progress on the console ----
+class Progress:
+    """The console view of the build: one line per stage, "[k/n] stage · step", with a bar, done/total, percent, elapsed time and ETA when the work can be counted, else a spinner and the elapsed time.
+    Modes: bar = the line is redrawn in place (a terminal, Spyder's console) and replaced by a ✓ line when the stage ends; lines = a plain line when a stage or step starts, every BEAT seconds and at the end
+    (for output piped to a file); off = only each stage's start and end lines. Counters come from set(), or from a poll function that runs in a thread of its own (it may walk a big folder) and returns set()'s arguments.
+    Messages go through say(), which prints them above the live line"""
+    SPIN, BLOCKS, POLL = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', ' ▏▎▍▌▋▊▉', 1.0
+
+    def __init__(self, mode='off'):
+        self.mode, self.lock, self.k, self.n, self.cur, self.shown, self.ticker = mode, threading.RLock(), 0, 0, None, 0, None
+
+    def plan(self, n):   # the next n stages are numbered 1..n
+        with self.lock: self.k, self.n = 0, n
+
+    def stage(self, name, poll=None, step='', **kw):
+        """Start the next stage, ending the current one. kw: set()'s arguments"""
+        with self.lock:
+            self.end()
+            self.k += 1; now = time.time()
+            self.cur = types.SimpleNamespace(name=name, step=step, unit='', total=None, done=None, est=False, note='', t0=now, hist=collections.deque(), beat=now, pstop=None)
+            if self.mode != 'bar': self._out(f'[{clock()}] [{self.k}/{self.n}] {name}' + (f' · {step}' if step else '') + ' …')
+            self.set(**kw)
+        if poll: self.watch(poll)
+        if self.mode != 'off' and not self.ticker:
+            self.ticker = threading.Thread(target=self._tick, daemon=True); self.ticker.start()
+
+    def watch(self, poll):
+        """Call poll() over and over until the stage ends or watch() is called again (None: stop); poll returns set()'s arguments, or None to leave the line as it is"""
+        with self.lock:
+            st = self.cur
+            if not st: return
+            if st.pstop: st.pstop.set()
+            st.pstop = stop = threading.Event()
+        if poll: threading.Thread(target=self._poll, args=(st, poll, stop), daemon=True).start()
+
+    def set(self, done=None, total=None, step=None, unit=None, est=None, note=None):
+        """done / total: the count of the current step (unit 'B' = bytes); est: total is an estimate (shown with ~); note: shown after the count;
+        step: the step within the stage (a new step starts with no count and restarts the ETA)"""
+        with self.lock:
+            st = self.cur
+            if not st: return
+            if step is not None and step != st.step:
+                st.step, st.done, st.total, st.unit, st.est, st.note, st.beat = step, None, None, '', False, '', time.time(); st.hist.clear()
+                if self.mode == 'lines': self._out(f'[{clock()}] [{self.k}/{self.n}] {st.name} · {step} …')
+            if unit is not None: st.unit = unit
+            if total is not None: st.total = total
+            if est is not None: st.est = est
+            if note is not None: st.note = note
+            if done is not None:
+                st.done = done; now = time.time(); st.hist.append((now, done))
+                while len(st.hist) > 2 and st.hist[1][0] < now - 60: st.hist.popleft()   # the ETA follows the rate of the last minute
+
+    def end(self, summary='', ok=True):
+        """End the current stage with a ✓ (or ✗) line: its elapsed time and a summary"""
+        with self.lock:
+            st, self.cur = self.cur, None
+            if not st: return
+            if st.pstop: st.pstop.set()
+            self._out(f'[{clock()}] {"✓" if ok else "✗"} [{self.k}/{self.n}] {st.name} ({hms(time.time() - st.t0)})' + (f': {summary}' if summary else ''))
+
+    def say(self, msg):
+        with self.lock: self._out(msg)
+
+    def close(self, ok=True):   # end the current stage and stop drawing
+        with self.lock: self.end(ok=ok); self.mode = 'off'
+
+    def _count(self, st):   # "1.9/~5.0 GB", "1,203/19,592 shaders", "2,301 files" (no total); '' without a count
+        if st.done is None: return ''
+        if not st.total: return amount(st.done, st.unit)
+        t = '~' if st.est else ''
+        if st.unit == 'B':
+            u, d = size_unit(st.total); return f'{st.done / d:.1f}/{t}{st.total / d:.1f} {u}'
+        return f'{st.done:,}/{t}{st.total:,}' + (f' {st.unit}' if st.unit else '')
+
+    def _eta(self, st):   # seconds left at the rate of the last minute; None while unknown
+        if not st.total or len(st.hist) < 2: return None
+        (t1, d1), (t2, d2) = st.hist[0], st.hist[-1]
+        if t2 - t1 < 3 or d2 <= d1: return None
+        return max(st.total - st.done, 0) * (t2 - t1) / (d2 - d1)
+
+    def _fields(self, st):   # (head, fraction done or None, count, note, times)
+        head = f'[{self.k}/{self.n}] {st.name}' + (f' · {st.step}' if st.step else '')
+        frac = min(st.done / st.total, 0.99) if st.total and st.done is not None else None   # 100 % only when the stage ends
+        eta = self._eta(st)
+        return head, frac, self._count(st), st.note, hms(time.time() - st.t0) + (f' · ETA {hms(eta)}' if eta is not None else '')
+
+    def _line(self, st, width):
+        head, frac, count, note, times = self._fields(st)
+        head = f'{self.SPIN[int(time.time() * 8) % len(self.SPIN)]} {head}'
+        pct = f'{frac * 100:.0f}%' if frac is not None else ''
+        for note in (note, ''):   # a narrow console loses the note first, then the bar
+            rest = '  '.join(x for x in (' · '.join(x for x in (count, note) if x), times) if x)
+            barw = min(20, width - len(f'{head}  {pct:>4}  {rest}') - 3)   # the bar takes what the console's width leaves, up to 20 cells; none below 8
+            if frac is None or barw >= 8: break
+        if frac is not None and barw >= 8:
+            cells = frac * barw; full = int(cells); part = int((cells - full) * 8)
+            pct = ('█' * full + (self.BLOCKS[part] if part else '')).ljust(barw, '░') + f' {pct:>4}'
+        return '  '.join(x for x in (head, pct, rest) if x)[:width - 1]
+
+    def _out(self, text):   # a whole line above the live one (the caller holds the lock)
+        if self.shown: sys.stdout.write('\r' + ' ' * self.shown + '\r'); self.shown = 0
+        print(text, flush=True)
+        if self.mode == 'bar' and self.cur: self._draw()
+
+    def _draw(self):
+        line = self._line(self.cur, shutil.get_terminal_size((80, 24)).columns)   # Spyder has no size to ask, and a line that wraps there cannot be redrawn: 80 columns
+        sys.stdout.write('\r' + line + ' ' * max(self.shown - len(line), 0)); sys.stdout.flush()
+        self.shown = len(line)
+
+    def _tick(self):
+        while self.mode != 'off':
+            time.sleep(0.25 if self.mode == 'bar' and not in_ipython() else 1)   # Spyder's console gets fewer redraws
+            with self.lock:
+                st = self.cur
+                if not st: continue
+                try:
+                    if self.mode == 'bar': self._draw()
+                    elif self.mode == 'lines' and time.time() - st.beat >= BEAT:
+                        st.beat = time.time(); head, frac, count, note, times = self._fields(st)
+                        self._out(f'[{clock()}] {head}: ' + ', '.join(x for x in (f'{frac * 100:.0f}%' if frac is not None else '', count, note, times) if x))
+                except Exception: pass   # progress never stops the build, and one bad line does not stop the next
+
+    def _poll(self, st, poll, stop):
+        while not stop.is_set():
+            t, step = time.time(), st.step
+            try: r = poll()
+            except Exception: r = None   # progress never stops the build
+            with self.lock:   # a count read for a step that ended meanwhile is dropped
+                if r and self.cur is st and not stop.is_set() and ('step' in r or st.step == step): self.set(**r)
+            stop.wait(max(self.POLL, (time.time() - t) * 5))   # a slow poll (a walk over tens of thousands of files) runs less often
+
+
+PROG = Progress()
+
+
+def progress_mode(want):   # auto: redraw in a terminal or in Spyder (IPython handles \r), plain lines when the output goes to a file or a pipe
+    if want in ('bar', 'lines', 'off'): return want
+    if want != 'auto': raise BuildError(f'PROGRESS / --progress must be auto, bar, lines or off: {want}')
+    return 'bar' if in_ipython() or (sys.stdout and sys.stdout.isatty()) else 'lines'
+
+
+def tree_size(d):   # (files, bytes) under d; (0, 0) when it does not exist yet
+    n = b = 0; todo = [str(d)]
+    while todo:
+        try: it = os.scandir(todo.pop())
+        except OSError: continue
+        with it:
+            for e in it:
+                try:
+                    if e.is_dir(follow_symlinks=False): todo.append(e.path)
+                    else: n += 1; b += e.stat(follow_symlinks=False).st_size
+                except OSError: pass
+    return n, b
 
 
 def in_ipython():   # Spyder (and Jupyter) run this file inside IPython: input works there, and sys.exit must not be called (it piles an error onto the console)
@@ -48,28 +224,26 @@ def ask(prompt, zh, en):   # zh / en: what is missing, for the error message
     return os.path.expanduser(s)
 
 
-def run(cmd, log, env=None, cwd=None, quiet=False):
-    """Run a subprocess with all its output written to log; stop on a non-zero exit. quiet: report progress to the console once a minute and print only the last lines at the end (the shader build emits tens of thousands of compiler warnings)"""
+def run(cmd, log, env=None, cwd=None, on_line=None):
+    """Run a subprocess with all its output written to log (the console shows the stage line instead: the shader build alone emits tens of thousands of compiler warnings);
+    stop on a non-zero exit, printing the log's last lines. on_line: called with every output line (build_ipa.sh's own step lines move its stages on)"""
     cmd = [str(c) for c in cmd]
     log.parent.mkdir(parents=True, exist_ok=True)
-    tail, n, done = collections.deque(maxlen=40), [0], threading.Event()
-    def beat():   # report even while the subprocess is silent (a cached shader build prints nothing for minutes)
-        t0 = time.time()
-        while not done.wait(BEAT): say(f'……仍在进行，{(time.time() - t0) / 60:.0f} 分钟 | still running, {(time.time() - t0) / 60:.0f} min')
+    tail = collections.deque(maxlen=40)
     p = subprocess.Popen(cmd, env=env, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors='replace', bufsize=1)
-    if quiet: threading.Thread(target=beat, daemon=True).start()
     try:
         with open(log, 'w') as f:
             for line in p.stdout:
-                f.write(line); tail.append(line); n[0] += 1
-                if not quiet: print(line, end='', flush=True)
+                f.write(line); tail.append(line)
+                if on_line:
+                    try: on_line(line.rstrip('\n'))
+                    except Exception: pass   # progress never stops the build
         p.wait()
     except KeyboardInterrupt:
         p.terminate(); p.wait(); raise
-    finally:
-        done.set()
-    if quiet: print(''.join(list(tail)[-40 if p.returncode else -12:]), end='', flush=True)
     if p.returncode:
+        PROG.end(ok=False)
+        PROG.say(f'---- last lines of {log} ----\n' + ''.join(tail).rstrip('\n'))
         tool = Path(cmd[1] if cmd[0] in (sys.executable, 'bash') else cmd[0]).name
         raise BuildError(f'{tool} 退出码 | exit code {p.returncode}（完整输出 | full output: {log}）')
 
@@ -195,13 +369,20 @@ def nso_image(path):   # decompress an NSO's three segments
 def survey(nsp_dir, app, fam, keys, repo, py, env):
     work = nsp_dir / f'{app:016X}_survey'; logs, ex = work / 'logs', work / 'extract'
     say(f'没有 {app:016X} 的游戏档案：先粗查 | no game profile for {app:016X}: surveying first')
+    PROG.plan(4)   # nx_extract, the manifest, the code modules (reading them, then the rewrite-site census), the imports
+    PROG.stage('survey: build nx_extract')
     nx = build_nx_extract(repo, work, logs, env)
     ups = sorted(fam['updates'], key=lambda u: u[0] or 0)
     upd = ups[-1][1] if ups else None
     tmp = work / 'extract.partial'; rmtree(tmp)
+    def listed():   # files in the manifest so far
+        try: return {'done': (tmp / 'romfs_manifest.tsv').read_bytes().count(b'\n'), 'unit': 'files'}
+        except OSError: return None
+    PROG.stage('survey: RomFS manifest', poll=listed)
     say(f'解出代码模块与 RomFS 清单（不写游戏文件）| extracting the code modules and a RomFS manifest (no game files written) → {ex}')
     run([nx, keys, fam['base'], upd or '-', tmp, '--manifest'], logs / 'extract.log')
     swap_in(tmp, ex)
+    PROG.stage('survey: code modules', step='reading')
     xlog = (logs / 'extract.log').read_text(errors='replace')
     dv = re.search(r'display version (\S+)', xlog)
     R = [f'# 粗查 | Survey: {nacp.name(ex / "control.nacp") or "?"} ({app:016X})', '', f'- 显示版本 | display version: {dv.group(1) if dv else "?"}', f'- 基础版 | base: `{fam["base"].name}` ({fam["base"].stat().st_size / 2**30:.2f} GB)']
@@ -256,13 +437,15 @@ def survey(nsp_dir, app, fam, keys, repo, py, env):
 
     # Rewrite-site census and SDK surface
     R += ['', '## 改写点统计 | Rewrite-site census (insn_census.py)', '', '```']
-    for m in mods:
-        if m.name == 'rtld': continue   # rtld is replaced by the host
-        say(f'统计改写点 | counting rewrite sites: {m.name}')
-        run([py, repo / 'dm/tools/insn_census.py', m], logs / f'census_{m.name}.log', env=env, quiet=True)
+    census = [m for m in mods if m.name != 'rtld']   # rtld is replaced by the host
+    for i, m in enumerate(census):
+        PROG.set(step=f'rewrite sites in {m.name}', done=i, total=len(census), unit='modules')
+        run([py, repo / 'dm/tools/insn_census.py', m], logs / f'census_{m.name}.log', env=env)
         R += (logs / f'census_{m.name}.log').read_text(errors='replace').rstrip().splitlines()
     R += ['```', '', '## 导入与宿主钩子 | Imports vs host hooks (nso_syms.py)', '', '```']
-    run([py, repo / 'dm/tools/nso_syms.py', repo / 'dm/host', '-', ex / 'ExeFS'], logs / 'nso_syms.log', env=env, quiet=True)
+    PROG.stage('survey: imports vs host hooks')
+    run([py, repo / 'dm/tools/nso_syms.py', repo / 'dm/host', '-', ex / 'ExeFS'], logs / 'nso_syms.log', env=env)
+    PROG.end()
     R += (logs / 'nso_syms.log').read_text(errors='replace').rstrip().splitlines() + ['```']
 
     # What it means for a port
@@ -354,16 +537,29 @@ def _importable(m):
     except ImportError: return False
 
 
+def extracted(log):   # (files, bytes) from the summary lines nx_extract wrote to log (ExeFS + RomFS); None without them
+    try: rows = re.findall(r'\| (\d+) files ([\d.]+) MB', log.read_text(errors='replace'))
+    except OSError: return None
+    return (sum(int(n) for n, _ in rows), int(sum(float(mb) for _, mb in rows) * 2**20)) if rows else None
+
+
 def extract(nx, keys, ex, name, base, upd, cmp_dir, logs, g):
-    dst, marker = ex / name, g.get('romfs_marker')
+    dst, marker, log = ex / name, g.get('romfs_marker'), logs / f'extract_{name}.log'
     if (dst / 'ExeFS' / 'main').exists() and (dst / 'RomFS' / marker).exists():
+        PROG.stage(f'extract {name}')
         say(f'沿用已解出的 {name} | reusing the extracted {name}: {dst}')
-    else:
-        tmp = ex / (name + '.partial'); rmtree(tmp)
-        say(f'解包 {name} | extracting {name} → {dst}')
-        run([nx, keys, base, upd or '-', tmp] + ([cmp_dir] if cmp_dir else []), logs / f'extract_{name}.log')
-        check_build(tmp, name, g); swap_in(tmp, dst)
-    check_build(dst, name, g)
+        check_build(dst, name, g)
+        PROG.end('reused')
+        return dst
+    tmp = ex / (name + '.partial'); rmtree(tmp)
+    last = extracted(log)   # the last extraction of this version (its log is about to be overwritten) has the exact size; without one, the NSPs' size is the estimate
+    def poll():
+        n, b = tree_size(tmp); return {'done': b, 'note': f'{n:,} files'}
+    PROG.stage(f'extract {name}', poll=poll, unit='B', total=last[1] if last else base.stat().st_size + (upd.stat().st_size if upd else 0), est=not last)
+    run([nx, keys, base, upd or '-', tmp] + ([cmp_dir] if cmp_dir else []), log)
+    check_build(tmp, name, g); swap_in(tmp, dst)
+    n, b = extracted(log) or (0, 0)
+    PROG.end(f'{n:,} files, {amount(b, "B")}')
     return dst
 
 
@@ -376,11 +572,14 @@ def extract_aoc(nx, keys, work, app, fam, logs):
     for tid, ver, p in fam['dlc']:
         k = (ver or 0, p.stat().st_size)
         if tid not in best or k > best[tid][0]: best[tid] = (k, p)
-    for tid, (_, p) in sorted(best.items()):
+    PROG.stage('extract DLC')
+    for i, (tid, (_, p)) in enumerate(sorted(best.items())):
         idx = tid - app - 0x1000
+        PROG.set(step='extracting', done=i, total=len(best), unit='DLC')
         say(f'DLC 序号 {idx} | DLC index {idx}: {p.name}')
         run([nx, keys, '--aoc', p, tmp / str(idx)], logs / f'aoc_{idx}.log')
     swap_in(tmp, work / 'aoc')
+    PROG.end(f'{len(best)} DLC')
     return work / 'aoc'
 
 
@@ -394,10 +593,13 @@ def check_build(d, name, g):   # every module's build ID must be the one registe
 
 def rewrite(py, repo, exe_dir, out, env, logs, g):
     tmp = out.with_name(out.name + '.partial'); rmtree(tmp); tmp.mkdir(parents=True)
-    for m in g.words('modules'):
-        say(f'改写 {m} | rewriting {m}')
+    mods = g.words('modules')
+    PROG.stage('rewrite')
+    for i, m in enumerate(mods):
+        PROG.set(step=m, done=i, total=len(mods), unit='modules')
         run([py, repo / 'dm/tools/patch_nso.py', exe_dir / m, tmp, m], logs / f'rewrite_{m}.log', env=dict(env, DM_RULESET='native'))
     swap_in(tmp, out)
+    PROG.end(', '.join(mods))
 
 
 def data_rows(b):   # a table's data rows (without # comment lines: the header changes with the shader_split.py version, not with the game files)
@@ -406,30 +608,142 @@ def data_rows(b):   # a table's data rows (without # comment lines: the header c
 
 def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False):
     tmp = pkg.with_name(pkg.name + '.partial'); rmtree(tmp); (tmp / 'tables').mkdir(parents=True)
-    say('拆出着色器 | splitting out the shaders')
     names = ('shader_map.tsv', 'shader_facts.tsv', 'shader_pairs.tsv')
+    PROG.stage('shader split')   # a spinner: shader_split.py writes the package and the tables only at the end
     run([py, repo / 'dm/gfx/tools/shader_split.py', ','.join(map(str, roms)), ','.join(map(str, mains)), tmp / 'pkg'] + [tmp / 'tables' / n for n in names], logs / 'shader_split.log', env=env)
+    m = re.search(r'着色器 (\d+) 个', (logs / 'shader_split.log').read_text(errors='replace'))
     if provisional:   # a provisional profile takes the tables as they come
         for n in names: shutil.copyfile(tmp / 'tables' / n, g.table(n))
-        swap_in(tmp / 'pkg', pkg); rmtree(tmp); return
-    # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split
-    diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
-    if diff: raise BuildError(f'拆出的着色器表与游戏档案 {g.id} 的不同 | the split shader tables differ from game profile {g.id}\'s: {", ".join(diff)}（游戏文件不是档案登记的版本？| game files not the versions the profile registers?）')
+    else:
+        # Data rows byte-identical to the profile's = the same game files the tables were built from; if not, stop (the profile's tables are left alone). Only data rows are compared: the header of Engage's profile tables was written by an older shader_split
+        diff = [n for n in names if data_rows((tmp / 'tables' / n).read_bytes()) != data_rows(g.table(n).read_bytes())]
+        if diff: raise BuildError(f'拆出的着色器表与游戏档案 {g.id} 的不同 | the split shader tables differ from game profile {g.id}\'s: {", ".join(diff)}（游戏文件不是档案登记的版本？| game files not the versions the profile registers?）')
     swap_in(tmp / 'pkg', pkg); rmtree(tmp)
+    PROG.end(f'{int(m.group(1)):,} shaders' if m else '')
+
+
+class ShaderWatch:
+    """Progress of dmsh_build.py, read from the files it writes (it prints nothing until it ends). It works in three phases:
+    the cache check (a hit restores <key>_b.json into the iOS output b-<chain>/, a miss writes <key>.bin into its temporary folder dmsh_* under WORK),
+    the translation of the misses (<key>.spv in the temporary folder), and the compile, which takes the keys in a fixed order (sorted, the vertex shaders with pixel pairs last)
+    and writes <key>_b.json again for every miss and every pixel shader: the furthest key written so far tells how far it got"""
+    def __init__(self, g, ios, tmp):
+        keys = set()
+        for ln in open(g.table('shader_map.tsv'), errors='replace'):   # the keys dmsh_build.py builds: column 4 of the rows from a shader package or from main
+            c = ln.rstrip('\n').split('\t')
+            if len(c) > 4 and (c[0].endswith('.bin') or c[0].startswith('main.rodata@')): keys.add(c[3])
+        pairs = {ln.split()[0] for ln in open(g.table('shader_pairs.tsv'), errors='replace') if ln.strip() and not ln.startswith('#')}
+        order = sorted(keys - pairs) + sorted(keys & pairs)
+        self.pos, self.n = {k: i for i, k in enumerate(order)}, len(order)
+        chain = re.search(r'#define DMSH_CHAIN "(.*)"', g.table('dmsh_chain.h').read_text()).group(1)
+        self.out, self.tmp, self.t0, self.t1, self.w = ios / f'b-{chain}', tmp, time.time(), None, None
+        self.hits, self.fin, self.top = set(), set(), -1
+
+    def written(self, keys, since):   # those of keys whose <key>_b.json in the iOS output was written after since
+        found = set()
+        try:
+            with os.scandir(self.out) as it:
+                for e in it:
+                    if e.name.endswith('_b.json') and e.name[:-7] in keys and e.stat().st_mtime > since: found.add(e.name[:-7])
+        except OSError: pass
+        return found
+
+    def __call__(self):
+        if not self.w:   # dmsh_build.py's temporary folder: the dmsh_* under WORK made since it started
+            self.w = max((d for d in self.tmp.glob('dmsh_*') if d.stat().st_birthtime >= self.t0 - 2), key=lambda d: d.stat().st_birthtime, default=None)
+        try: ext = collections.Counter(os.path.splitext(x)[1] for x in os.listdir(self.w)) if self.w else collections.Counter()
+        except OSError: ext = collections.Counter()
+        if self.t1 is None:
+            self.hits |= self.written(self.pos.keys() - self.hits, self.t0 - 2)
+            if len(self.hits) + ext['.bin'] < self.n and not ext['.spv'] and not ext['.metal']:
+                return {'step': 'cache check', 'done': len(self.hits) + ext['.bin'], 'total': self.n, 'unit': 'shaders', 'note': f'{len(self.hits):,} cached'}
+            self.t1 = time.time()   # the cache check is over: from now on a <key>_b.json is written by the compile
+        if ext['.bin'] and not ext['.metal'] and ext['.spv'] < ext['.bin']:
+            return {'step': 'translating', 'done': ext['.spv'], 'total': ext['.bin'], 'unit': 'shaders'}
+        new = self.written(self.pos.keys() - self.fin, self.t1)
+        self.fin |= new; self.top = max([self.top] + [self.pos[k] for k in new])
+        return {'step': 'compiling' if ext['.bin'] else 'finishing', 'done': max(len(self.fin), self.top + 1), 'total': self.n, 'unit': 'shaders',
+                'note': f'{ext[".bin"]:,} not cached' if ext['.bin'] else ''}
 
 
 def build_shaders(py, repo, sh, xlate, env, logs, g, provisional=False):
-    say('出 iOS 着色器库（马力欧首次约 30 分钟，之后走缓存约 7 分钟）| building the iOS shader libraries (Mario: about 30 minutes the first time, about 7 with the cache)')
-    ios = sh / 'ios'
-    if provisional: run([py, repo / 'dm/gfx/tools/dmsh_chain.py', '--header'], logs / 'dmsh_chain.log', env=env)   # the profile's chain version header (dmsh_build checks it)
-    run([py, repo / 'dm/gfx/tools/dmsh_build.py', sh / 'pkg', sh / 'cache'], logs / 'dmsh_build.log', env=dict(env, XLATE=str(xlate), IOSOUT=str(ios)), quiet=True)
+    ios, log = sh / 'ios', logs / 'dmsh_build.log'
+    PROG.stage('iOS shaders')
+    if provisional:
+        PROG.set(step='chain header')
+        run([py, repo / 'dm/gfx/tools/dmsh_chain.py', '--header'], logs / 'dmsh_chain.log', env=env)   # the profile's chain version header (dmsh_build checks it)
+    try: PROG.watch(ShaderWatch(g, ios, Path(env['WORK'])))
+    except Exception: pass   # progress never stops the build (a missing table is dmsh_build.py's to report)
+    run([py, repo / 'dm/gfx/tools/dmsh_build.py', sh / 'pkg', sh / 'cache'], log, env=dict(env, XLATE=str(xlate), IOSOUT=str(ios)))
+    PROG.watch(None)
     chain = re.search(r'#define DMSH_CHAIN "(.*)"', g.table('dmsh_chain.h').read_text()).group(1)
-    if provisional: run([py, repo / 'dm/gfx/tools/c1_guard.py', sh / 'cache' / f'b-{chain}', g.table('c1_full.tsv')], logs / 'c1_guard.log', env=env)   # shaders whose c1 reads are not proven bounded
+    if provisional:
+        PROG.set(step='c1 guard')
+        run([py, repo / 'dm/gfx/tools/c1_guard.py', sh / 'cache' / f'b-{chain}', g.table('c1_full.tsv')], logs / 'c1_guard.log', env=env)   # shaders whose c1 reads are not proven bounded
     libs = ios / f'b-{chain}'
     n = sum(1 for _ in libs.glob('*_b.metallib')) if libs.is_dir() else 0
     if n == 0: raise BuildError(f'没出 iOS 着色器库 | no iOS shader libraries in {libs}')
     say(f'iOS 着色器库 {n} 个 | {n} iOS shader libraries ({libs})')
+    t = log.read_text(errors='replace')
+    m, c = re.search(r'着色器 (\d+)：成功 (\d+)', t), re.search(r'前置缓存：命中 (\d+)', t)
+    if m:
+        total, ok = int(m.group(1)), int(m.group(2))
+        PROG.end(f'{ok:,} of {total:,} shaders ready' + (f' ({int(c.group(1)):,} from the cache)' if c else '') + (f'; {total - ok:,} failed, reasons at the end of {log}' if ok < total else ''))
+    else: PROG.end()
     return ios
+
+
+class IpaWatch:
+    """Progress of build_ipa.sh, from its step lines ("[time] generate Gen/ …", "xcodebuild …", "assemble Payload …", "zip …") and the files it writes:
+    the CompileC lines in xcodebuild's build.log (one per source file: Gen/src, Gen/main/main.c, Gen/embed.S and the app's Sources), the bytes copied into Payload/DmIOS.app/romfs,
+    and the bytes of the archive zip is writing (a zi* temporary file next to out.ipa, renamed at the end). Its two halves are the stages "app build" and "IPA pack" """
+    XCODE = {'CompileC': 'compiling', 'Ld': 'linking', 'CpResource': 'copying resources', 'CompileAssetCatalogVariant': 'asset catalog', 'ProcessInfoPlistFile': 'Info.plist'}
+
+    def __init__(self, repo, w, romfs, out_ipa):
+        self.ios, self.o, self.romfs = repo / 'dm/ios', w / 'build/ios/pkg', romfs
+        self.last = out_ipa.stat().st_size if out_ipa.is_file() else None   # the last IPA's size: the expected size of the new archive
+        self.state, self.t, self.off, self.compiled, self.what, self.total, self.most, self.lock = None, 0, 0, 0, '', None, 0, threading.Lock()
+
+    def line(self, line):   # a line of build_ipa.sh's output
+        s = re.sub(r'^\[[\d:]+\] ', '', line)
+        with self.lock:   # a poll sees a step change whole
+            if s.startswith('generate Gen/'): self.state = 'gen'; PROG.set(step='generating sources')
+            elif s.startswith('xcodebuild'):
+                units = len(os.listdir(self.ios / 'Gen/src')) + 2 + sum(1 for p in (self.ios / 'Sources').iterdir() if p.suffix in ('.c', '.m'))   # + Gen/main/main.c and Gen/embed.S
+                self.state, self.t = 'xcode', time.time(); PROG.set(step='xcodebuild', done=0, total=units, unit='files', est=True)   # an incremental build compiles fewer
+            elif s.startswith('assemble Payload'):
+                try: self._poll()   # the rest of build.log (xcodebuild writes it in big blocks)
+                except OSError: pass
+                PROG.end(f'{self.compiled:,} file{"" if self.compiled == 1 else "s"} compiled')
+                self.state, self.total, self.most = 'copy', None, 0; PROG.stage('IPA pack', poll=self.poll, step='copying the game files', unit='B')
+            elif s.startswith('zip'): self.state, self.total, self.most = 'zip', None, 0; PROG.set(step='zip', unit='B')
+
+    def poll(self):   # from the poll thread
+        with self.lock: return self._poll()
+
+    def _poll(self):
+        state = self.state
+        if state == 'xcode':
+            log = self.o / 'build.log'
+            if log.stat().st_mtime < self.t - 1: return None   # still the last build's log
+            if log.stat().st_size < self.off: self.off = self.compiled = 0
+            with open(log, 'rb') as f: f.seek(self.off); chunk = f.read()
+            chunk = chunk[:chunk.rfind(b'\n') + 1]; self.off += len(chunk)
+            for ln in chunk.split(b'\n'):
+                w = ln.split(b' ', 1)[0].decode(errors='replace')
+                if w == 'CompileC': self.compiled += 1
+                self.what = self.XCODE.get(w, self.what)
+            r = {'done': self.compiled, 'note': self.what}
+        elif state == 'copy':
+            if self.total is None: self.total = tree_size(self.romfs)[1]
+            self.most = max(self.most, tree_size(self.o / 'Payload/DmIOS.app/romfs')[1])   # never backwards: the copy and the archive leave pkg/ at the end
+            r = {'done': self.most, 'total': self.total}
+        elif state == 'zip':
+            if self.total is None: self.total = self.last or tree_size(self.o / 'Payload')[1]
+            self.most = max([self.most] + [e.stat().st_size for e in os.scandir(self.o) if e.is_file() and e.name != 'build.log'])
+            r = {'done': self.most, 'total': self.total, 'est': True}
+        else: return None
+        return r
 
 
 def find_repo(here):   # this file lives in the repository's scripts/; walk up to the level that has dm/tools/nx_extract/Program.cs
@@ -454,11 +768,14 @@ def parse_args(argv):
     ap.add_argument('--env-file', help='诊断包的环境开关文件（每行 KEY=VALUE）| environment switches for a diagnostic build (one KEY=VALUE per line)')
     ap.add_argument('--survey-only', action='store_true', help='没有游戏档案的游戏只写粗查报告，不生成临时档案、不出 IPA | a game with no profile: only the survey, no provisional profile and no IPA')
     ap.add_argument('--profile-out', help='临时游戏档案放哪（缺省 = <NSP 文件夹>/<标题号>_build/profile）| where the provisional profile goes (default: <NSP folder>/<title ID>_build/profile)')
+    ap.add_argument('--progress', choices=('auto', 'bar', 'lines', 'off'), help='stage lines on the console: bar = one line per stage, redrawn in place; lines = a plain line every BEAT seconds; off = only each stage\'s start and end '
+                    '(default: the PROGRESS setting; auto = bar in a terminal or Spyder, lines when the output goes to a file or a pipe)')
     return ap.parse_args(argv)
 
 
 def main(args=None):
     args = args or parse_args([])
+    PROG.mode = progress_mode(args.progress or PROGRESS)
     here = Path(globals().get('__file__') or sys.argv[0]).resolve()
     repo = find_repo(here)
     sys.path.insert(0, str(repo / 'dm/games')); import game as gamemod   # game profiles
@@ -507,8 +824,10 @@ def main(args=None):
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
     gb = sum({p.stat().st_size for b, u in picks.values() for p in (b, u) if p}) / 2**30 + 6   # extraction + shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'{work} 所在的卷剩余不足 {gb:.0f} GB | less than {gb:.0f} GB free on the volume of {work}')
-    say('编译 nx_extract | building nx_extract')
+    PROG.plan(1 + len(versions) + bool(fam['dlc']) + 5)   # nx_extract, each version's extraction, the DLC, rewrite, shader split, iOS shaders, app build, IPA pack
+    PROG.stage('build nx_extract')
     nx = build_nx_extract(repo, work, logs, env)
+    PROG.end()
     dirs, clone = {}, None
     for ver in versions:   # the base game is extracted alone first; later updates clone against its RomFS
         b, u = picks[ver]
@@ -541,8 +860,11 @@ def main(args=None):
     else: say('【红】解包里没有游戏图标（之前的解包没存图标：删掉 extract/ 重跑即可补上）；主屏图标会是空白 | no game icon in the extraction (an older extraction did not save it: delete extract/ and run again); the home-screen icon will be blank')
     env_file = args.env_file or DM_ENV_FILE
     if env_file: ipa_env['DM_ENV_FILE'] = str(Path(os.path.expanduser(env_file)).resolve())
-    run(['bash', repo / 'dm/ios/tools/build_ipa.sh', out_ipa], logs / 'build_ipa.log', env=ipa_env)
+    watch = IpaWatch(repo, work / 'ipa', game / 'RomFS', out_ipa)
+    PROG.stage('app build', poll=watch.poll, step='starting')   # build_ipa.sh's "assemble Payload" line starts the stage "IPA pack"
+    run(['bash', repo / 'dm/ios/tools/build_ipa.sh', out_ipa], logs / 'build_ipa.log', env=ipa_env, on_line=watch.line)
     if not out_ipa.is_file(): raise BuildError(f'没出 IPA | no IPA at {out_ipa}')
+    PROG.end(f'{out_ipa.name}, {amount(out_ipa.stat().st_size, "B")}')
     rmtree(work / 'tmp')
     if not (args.keep_extracted or KEEP_EXTRACTED):
         say(f'删掉解出的游戏文件 | deleting the extracted game files: {ex}'); rmtree(ex)
@@ -556,9 +878,11 @@ def cli(argv):   # returns the exit code: 0 done, 1 error, 130 interrupted
     try:
         main(parse_args(argv))
     except BuildError as e:
-        print(f'【红】{e}', flush=True); return 1
+        PROG.close(ok=False); print(f'【红】{e}', flush=True); return 1
     except KeyboardInterrupt:
-        print('【红】中断 | interrupted', flush=True); return 130
+        PROG.close(ok=False); print('【红】中断 | interrupted', flush=True); return 130
+    finally:
+        PROG.close(ok=False)   # an unexpected error: end the stage line before the traceback
     return 0
 
 
