@@ -58,6 +58,20 @@ int main(void) {
         munmap(live[i], 4096);
     }
 
+    // More pools alive at once than the table's fixed 4,096 slots used to hold (Breath of the Wild reaches 4,006 in its first shrine): the table grows, and the last pool is still tracked
+    enum { NMANY = 5000 };
+    void **many = malloc(NMANY * sizeof *many);
+    for (int i = 0; i < NMANY; i++) { many[i] = page_map(); nvn_dirty_add_range(many[i], 4096); }
+    void *last = many[NMANY - 1];
+    EXPECT("同时存活 5000 个池：最后一个在跟踪", 1, nvn_dirty_tracked(last, 4096));
+    nvn_dirty_protect(last, 4096);
+    stamp = nvn_dirty_now();
+    EXPECT("第 5000 个池保护后没人写：不脏", 0, nvn_dirty_since(last, 4096, stamp));
+    ((volatile uint8_t *)last)[0] = 5;
+    EXPECT("第 5000 个池被游戏写：脏", 1, nvn_dirty_since(last, 4096, stamp));
+    for (int i = 0; i < NMANY; i++) { nvn_dirty_remove_range(many[i]); munmap(many[i], 4096); }
+    free(many);
+
     // Adjacent pools sharing a host page (pools are 4 KB aligned, host pages 16 KB): the first page of SMBW's ASTC texture pool is shared with a small preceding pool, and was judged untracked and re-uploaded on every use
     size_t pg = (size_t)getpagesize();
     uint8_t *blk = mmap(NULL, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);

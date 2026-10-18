@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-# Unsigned IPA straight from the NSPs: identify the game (title ID → game profile dm/games/<id>/) → extract (nx_extract) → rewrite the code modules (patch_nso.py) → split out the shaders and check them against the profile's tables (shader_split.py)
+# Unsigned IPA straight from the NSPs: identify the game (title ID → game profile dm/games/<id>/) → extract (nx_extract) → rewrite the code modules (patch_nso.py)
+#   → (profiles with shader_glslc_capture: capture the shaders the game compiles at run time, by booting it in the Mac host for a few seconds) → split out the shaders and check them against the profile's tables (shader_split.py)
 #   → iOS shader libraries (dmsh_build.py) → build_ipa.sh. A game with no matching profile is surveyed (<NSP folder>/<title ID>_survey/survey.md), then gets a provisional profile guessed from
 #   the survey (<NSP folder>/<title ID>_build/profile/<title ID>/, outside the repository, found through DM_GAMES_DIR) and a best-effort IPA that may not boot; SURVEY_ONLY / --survey-only stops after the survey.
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
 #   without keyboard input a missing value is not asked for but reported as an error; exit code 0 on success, 1 on error, 130 when interrupted). Command-line options entered in Spyder's run configuration work the same way.
 # Uses only three things: this repository, a folder holding one game's NSPs (the base game plus the updates listed in the profile's shader_versions are required; DLC NSPs, when present, are packed too and unlock the add-on content already in the game), and prod.keys.
-# Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), aoc/ (each DLC's RomFS by index), tools/, patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes to the NSP folder by default.
+# Every intermediate file is under <id>_build/ in the NSP folder: extract/ (the extracted game files, deleted after the IPA is built by default), aoc/ (each DLC's RomFS by index), tools/ (nx_extract, and the Mac host for a run-time shader capture), patched_*/, shader/ (shader package and caches, kept so the next build is fast), logs/ (each step's full output), tmp/, ipa/. The finished IPA also goes to the NSP folder by default.
 # The shader translator is the in-repo dm/gfx/tools/dmsh_xlate_bin (the build whose fingerprints match dmsh_chain.lock; a rebuilt dll has different fingerprints and dmsh_build refuses it).
 # The Python running this file needs lz4, capstone and fonttools; also needed: Xcode, xcodegen, .NET SDK 10, zstd, spirv-cross. For Mario the first run takes about 35 minutes (mostly the shader libraries); later runs take about 10 (the shader libraries come from the cache). Key values are never printed.
 # The console shows one line per stage ([k/n] stage, with a bar, done/total, percent, elapsed time and ETA where the work can be counted); the tools' own output goes only to logs/ (PROGRESS / --progress).
-import collections, ctypes, getpass, os, re, shutil, struct, subprocess, sys, tempfile, threading, time, types, zlib
+import collections, ctypes, getpass, os, re, shlex, shutil, struct, subprocess, sys, tempfile, threading, time, types, zlib
 from pathlib import Path
 
 # ---- Settings ----
@@ -602,6 +603,83 @@ def rewrite(py, repo, exe_dir, out, env, logs, g):
     PROG.end(', '.join(mods))
 
 
+GLSLC_SECS = 30   # the longest capture run: Three Houses compiles its 9 shaders within 1.2 s of boot, and the run stops as soon as every file the profile names is there
+
+
+def glslc_wanted(g):   # the capture files the profile's shader map was built from (column 5: /glslc_capture/<name>#GLSLC@…); None without any (a provisional profile)
+    try: t = g.table('shader_map.tsv').read_text(errors='replace')
+    except OSError: return None
+    return set(re.findall(r'/glslc_capture/([0-9a-f]{16}\.glslc)#', t)) or None
+
+
+def glslc_done(d):   # capture files written whole: a GLSLC output (magic 0x19866891) holds its own length at +0x44
+    out = set()
+    try: names = [n for n in os.listdir(d) if n.endswith('.glslc')]
+    except OSError: return out
+    for n in names:
+        try: b = (d / n).read_bytes()
+        except OSError: continue
+        if len(b) >= 0x48 and b[:4] == b'\x91\x68\x86\x19' and struct.unpack_from('<I', b, 0x44)[0] == len(b): out.add(n)
+    return out
+
+
+def build_mac_host(repo, out, env, logs, g):
+    """The Mac host for the profile, built into out: dm/host's own compile line (make -n) with the output moved, since make takes no target path with spaces and dm/host/dmhost may be another build's"""
+    host = repo / 'dm/host'
+    run(['make', '-s', f'GAME={g.id}', f'gen/{g.id}/game_profile.h', 'gen/vpx/libvpx.a'], logs / 'mac_host_make.log', env=env, cwd=host)
+    dry = subprocess.run(['make', '-n', '-B', f'GAME={g.id}', 'dmhost'], env=env, cwd=host, capture_output=True, text=True)
+    line = next((l for l in dry.stdout.splitlines() if ' -o dmhost ' in l), None)
+    if not line: raise BuildError(f'make -n 没给出 Mac 宿主的编译行 | make -n gave no compile line for the Mac host: {dry.stderr.strip()[-500:]}')
+    cmd = shlex.split(line); cmd[cmd.index('-o') + 1] = out
+    out.parent.mkdir(parents=True, exist_ok=True)
+    run(cmd, logs / 'mac_host_build.log', env=env, cwd=host)
+    return out
+
+
+def capture_glslc(repo, dirs, pkg_ver, patched, work, env, logs, g):
+    """Profiles with shader_glslc_capture on (Fire Emblem: Three Houses): the game compiles some shaders at run time with its own GLSLC, so no game file holds them. The game boots in the Mac host
+    (headless and silent) with DM_GLSLC_CAPTURE (dm/host/hle_glslc.c), which writes each output to <version dir>/glslc_capture, where shader_split.py reads them; the outputs are the same on every run.
+    dirs: {shader version: its extraction}; a folder that already holds every file the profile's shader map names is reused"""
+    want = glslc_wanted(g)
+    todo = [v for v, d in dirs.items() if not (glslc_done(d / 'glslc_capture') >= want if want else glslc_done(d / 'glslc_capture'))]
+    PROG.stage('GLSLC capture')
+    if not todo:
+        say(f'沿用捕获的运行时着色器 | reusing the captured run-time shaders: {", ".join(str(d / "glslc_capture") for d in dirs.values())}')
+        PROG.end('reused'); return
+    if todo != [pkg_ver]: raise BuildError(f'运行时着色器的捕获跑的是打包版本 {pkg_ver} 的代码，{", ".join(v for v in todo if v != pkg_ver)} 要另外捕获 | the run-time shader capture runs the packed version {pkg_ver}\'s code; {", ".join(v for v in todo if v != pkg_ver)} needs a capture of its own')
+    PROG.set(step='building the Mac host')
+    host = build_mac_host(repo, work / 'tools/dmhost', env, logs, g)
+    d = dirs[pkg_ver]; cap, rd, log = d / 'glslc_capture.partial', work / 'tmp/glslc_run', logs / 'glslc_capture.log'
+    rmtree(cap); rmtree(rd)
+    for s in ('save', 'temp'): (rd / s).mkdir(parents=True)
+    # everything the run writes stays in <id>_build (DM_ROOT is already there): a fresh save and temporary storage, no shader libraries yet, the profile's shader map (the host looks beside itself by default)
+    henv = dict(env, DM_ROMFS=str(d / 'RomFS'), DM_SAVE=str(rd / 'save'), DM_TEMP=str(rd / 'temp'), DM_MSL_DIR=str(rd / 'msl'), DM_NVN_SHMAP=str(g.table('shader_map.tsv')), DM_GLSLC_CAPTURE=str(cap))
+    PROG.set(step='booting the game', done=0, total=len(want) if want else None, unit='shaders')
+    say(f'在 Mac 宿主里启动游戏，捕获它运行时编译的着色器 | booting the game in the Mac host to capture the shaders it compiles at run time → {d / "glslc_capture"}')
+    t0 = time.time()
+    with open(log, 'w') as f:
+        p = subprocess.Popen([str(host), str(patched)], env=henv, cwd=rd, stdout=f, stderr=subprocess.STDOUT)
+        try:   # until every file the profile names is there (Three Houses: within its first frames), the host exits, or GLSLC_SECS pass
+            while True:
+                got = glslc_done(cap); PROG.set(done=len(got & want if want else got))
+                if (want and got >= want) or p.poll() is not None or time.time() - t0 > GLSLC_SECS: break
+                time.sleep(0.25)
+        finally:
+            if p.poll() is None:
+                p.terminate()   # SIGTERM: the host's graceful exit
+                try: p.wait(5)
+                except subprocess.TimeoutExpired: p.kill(); p.wait()
+    got = glslc_done(cap)
+    if not got or (want and not got >= want):
+        PROG.end(ok=False)
+        PROG.say(f'---- last lines of {log} ----\n' + ''.join(collections.deque(open(log, errors='replace'), maxlen=40)).rstrip('\n'))
+        raise BuildError(f'只捕获到 {len(got)} 个运行时着色器' + (f'，游戏档案要 {len(want)} 个' if want else '') + f'（宿主输出 | host output: {log}）| captured only {len(got)} run-time shaders'
+                         + (f', the profile needs {len(want)}' if want else '') + f' (host output: {log})')
+    if want and got - want: say(f'【红】捕获到游戏档案的着色器表里没有的 | captured files the profile\'s shader map does not name: {", ".join(sorted(got - want))}')
+    swap_in(cap, d / 'glslc_capture'); rmtree(rd)
+    PROG.end(f'{len(got)} shaders in {hms(time.time() - t0)}')
+
+
 def data_rows(b):   # a table's data rows (without # comment lines: the header changes with the shader_split.py version, not with the game files)
     return [l for l in b.splitlines() if not l.startswith(b'#')]
 
@@ -824,7 +902,8 @@ def main(args=None):
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
     gb = sum({p.stat().st_size for b, u in picks.values() for p in (b, u) if p}) / 2**30 + 6   # extraction + shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'{work} 所在的卷剩余不足 {gb:.0f} GB | less than {gb:.0f} GB free on the volume of {work}')
-    PROG.plan(1 + len(versions) + bool(fam['dlc']) + 5)   # nx_extract, each version's extraction, the DLC, rewrite, shader split, iOS shaders, app build, IPA pack
+    glslc = g.get('shader_glslc_capture', 'off') == 'on'   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
+    PROG.plan(1 + len(versions) + bool(fam['dlc']) + glslc + 5)   # nx_extract, each version's extraction, the DLC, rewrite, the GLSLC capture, shader split, iOS shaders, app build, IPA pack
     PROG.stage('build nx_extract')
     nx = build_nx_extract(repo, work, logs, env)
     PROG.end()
@@ -846,6 +925,7 @@ def main(args=None):
 
     patched = work / f'patched_{pkg_ver}'
     rewrite(py, repo, game / 'ExeFS', patched, env, logs, g)
+    if glslc: capture_glslc(repo, {v: dirs[v] for v in need}, pkg_ver, patched, work, env, logs, g)
     sh = work / 'shader'
     split_shaders(py, repo, [dirs[v] / 'RomFS' for v in need], [dirs[v] / 'ExeFS/main' for v in need], sh / 'pkg', env, logs, g, provisional)
     ios = build_shaders(py, repo, sh, xlate, env, logs, g, provisional)

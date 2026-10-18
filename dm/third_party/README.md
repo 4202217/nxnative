@@ -15,4 +15,4 @@ A few more notes:
 
 - `flip/tool/` also carries three single-header libraries used by the FLIP command-line tool: `stb_image.h` (2.23), `stb_image_write.h` (1.13) and `tinyexr.h`. Their license notices are in the files themselves.
 - `libdeflate/VERSION.md`, `libvpx/README.md`, `stb_vorbis/README.md`, `ryujinx/README.md` and `vulkan-headers/README.md` record where each came from and what it is used for.
-- Two pieces of third-party code live outside this directory: `dm/gfx/nvn/include/nvn.h` (MIT, author named in the file header) and the layout size algorithm in `dm/gfx/nvn/nvn_tex.c`, ported from deko3d (zlib license).
+- Three pieces of third-party code live outside this directory: `dm/gfx/nvn/include/nvn.h` (MIT, author named in the file header), the layout size algorithm in `dm/gfx/nvn/nvn_tex.c`, ported from deko3d (zlib license), and in `dm/gfx/nvn/nvn_mtl.m` the GPU widening of 8-bit indices (`wide_*`) and the in-pass clear triangles (`clear_color_tri` / `clear_ds_tri`), adapted from MacNativeGames' `widen_u8_gpu` and `clear_quad` / `clear_ds_quad` (MIT, license text in `macnativegames/LICENSE`).

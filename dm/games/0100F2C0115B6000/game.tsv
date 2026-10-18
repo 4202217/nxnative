@@ -38,6 +38,8 @@ app_pool	0xCD500000
 # ---- Graphics ----
 # Streamed textures are written by the CPU straight into pool memory (already in GPU layout) and published with nvnMemoryPoolFlushMappedRange (hle_nvn.c ft_add)
 tex_flush_upload	on
+render_cond	on
+tex_dirty_upload	on
 
 # ---- NVN driver constant segments (Breath of the Wild's values, the same NVN build) ----
 nvn_tex_base	0x20

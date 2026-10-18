@@ -146,13 +146,18 @@ CUTS = {
   # The game logic time step follows it: ksys::VFR is initialized with a base interval of 2 (constant 2 at main+0x127e740 → VFR::init main+0x151d2d0), and every frame VFR::updateInterval (main+0x151d3d0,
   # called at main+0xcf9ad4 / main+0x1281044) takes the framework's current interval (vtable +0x138); the frame ratio = current interval / 2 -- at interval 1 each frame advances half a 30 fps tick and the game speed stays the same;
   # when it struggles and steps back to 2 / 3 the ratio is 1 / 1.5, again at the same speed. So only the floor changes from 2 to 1: the lower bound of the candidate interval (two places), the step-down target recorded when stepping up, max(candidate, 3) - 1 → max(candidate, 2) - 1,
-  # and stepping down stops at < 3 → < 2. On hardware the same logic starting from 1 would also be 60 fps (falling back to 30 by itself when the GPU cannot keep up)
+  # and stepping down stops at < 3 → < 2. On hardware the same logic starting from 1 would also be 60 fps; it falls back to 30 by itself only when its input shows a slow frame (the last two cuts make that input include the GPU time)
   'cd57b23fa4bbad65803d9788c01821ee': [
     (0x112670c, '6041201e', '4041201e', '动态间隔候选下限：fmov s0,s11（2.0）→ fmov s0,s10（1.0）', '仅宿主'),
     (0x1126710, '7f0b0071', '7f070071', '动态间隔候选下限：cmp w27,#2 → cmp w27,#1', '仅宿主'),
     (0x112665c, '78008052', '58008052', '升档时记的降档目标 max(候选, w24) − 1：mov w24,#3 → mov w24,#2', '仅宿主'),
     (0x1126748, '1f0d0071', '1f090071', '升档时记的降档目标：cmp w8,#3 → cmp w8,#2', '仅宿主'),
     (0x1126794, '3f0d0071', '3f090071', '降档到 < 3 停 → 到 < 2 停：cmp w9,#3 → cmp w9,#2', '仅宿主'),
+    # The controller's input (framework +0x250, controller main+0x1126cec..) is the main thread's CPU span up to the draw step (about 2.7 ms in the first shrine), so GPU-bound frames stayed at interval 1 and the game ran slow
+    # (iPhone 16 Pro Max: 25 ms frames, two thirds of the speed). The game has a GPU-time path that uses max(CPU span, GPU time between the frame's two timestamp reports, framework +0x220, read after the fence wait)
+    # but takes it only while [main+0x1e3a638]+0x1d2b8 is set (64 of 6,046 shrine frames); both of its checks become branches into it. The GPU time needs the profile's gpu_timestamps segment
+    (0x112691c, 'c00000b4', '03000014', '间隔控制器恒走 GPU 时间路径（CPU 段计时）：cbz x0,#0x1126934 → b #0x1126928', '仅宿主'),
+    (0x1126974, 'c00000b4', '03000014', '间隔控制器恒走 GPU 时间路径（取 max(CPU 段, GPU 时间)）：cbz x0,#0x112698c → b #0x1126980', '仅宿主'),
   ],
   '56ec24747ec9e7f19b3efb062483a19d': [
     (0x346430, '08fca752', '087ca052', 'AddressRegionManager 构造：节点区上限 mov w8,#0x3fe00000 → mov w8,#0x3e00000', '仅宿主'),

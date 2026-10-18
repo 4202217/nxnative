@@ -93,6 +93,8 @@ To see the order of events, put temporary observation gates (`OBS` in `patch_nso
 1. The host's memory report line (`内存 至帧 …`) every few hundred frames; `footprint -p <pid>` from outside. On a phone, a crash with no log usually means `离系统内存上限还有` reached 0.
 2. `vmmap -summary <pid>` twice a few seconds apart: which region grows. "owned unmapped (graphics)" = private Metal resources.
 3. `DM_NVN_ALLOCPROF=1`: growth per replayed op type and per function (`tex_mtl` / pass begin / pipelines / argument buffers), command allocator sizes, and a log of new textures with serial, size, format and storage. A stream of new serials with the same sizes = objects re-created every frame.
+4. GPU allocated (`显卡已分配`) climbing while `驻留集` (the residency set), `共用贴图` and the upload counts stay flat: retired objects kept alive by an autorelease pool that never drains. Any objc call on the guest submit thread outside `g_sub_pool` leaks what it autoreleases (Metroid Dread; Breath of the Wild, GitHub issue #9). Build the host with the suspect wrapped in `@autoreleasepool` and compare.
+5. `序号对象` climbing by the same amount every frame with GPU memory flat: entries the serial table never deletes. A census of `g_by_serial` by class and size in `mtl_mem_stat` shows which (BotW: finalized textures replay resolved again; they now go to the small table counted as `已 Finalize 仍被引用的贴图`).
 
 Instruments' Metal Resource Events didn't record this process from the command line (`xctrace record --launch`, with `--env` for the variables); the in-host probes were faster.
 

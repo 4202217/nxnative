@@ -37,7 +37,7 @@ Being ported, playable on the Mac, with iPhone builds not tested yet:
 
 - Hades (base game + update 1.0.38233): the script cannot pack it yet.
 - Hyrule Warriors: Age of Calamity (base game + update 1.3.0, + DLC): up to its first battle.
-- Fire Emblem: Three Houses (base game + update 1.2.0, + DLC): through its prologue. Packing it needs a one-time capture of its run-time shaders on the Mac ([docs/development.md](docs/development.md#game-notes)).
+- Fire Emblem: Three Houses (base game + update 1.2.0, + DLC): through its prologue. While packing, the script starts the game on the Mac for a few seconds to collect the shaders it builds as it runs.
 
 | | |
 |:---:|:---:|
