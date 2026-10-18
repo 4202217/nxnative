@@ -8,6 +8,7 @@ void *front_metal_layer(void) { return NULL; }   // no window in unit tests: pre
 module_t *module_of(const void *p) { (void)p; return NULL; }   // no guest modules in unit tests
 module_t g_mod[MAX_MOD]; int g_nmod;                            // host symbols that crash.c depends on
 void svc_thread_dump(void) {}
+int dm_guest_as_contains(uintptr_t address) { (void)address; return 0; } // Tests use host-thread stacks.
 void crash_install(void);
 void nvn_present_config(int hz, int display_mode);
 #include <fcntl.h>
@@ -84,6 +85,35 @@ int main(void) {
     //    LINEAR 100×100 RGBA8: row pitch 400 aligned to 32 = 416; 416×100 = 41600, aligned to 32
     EXPECT("线性 100x100 RGBA8 尺寸", 41600, tex_size(NVN_FORMAT_RGBA8, 100, 100, NVN_TEXTURE_FLAGS_LINEAR, &al));
     EXPECT("线性对齐", 32, al);
+
+    // A channel change on the same storage must survive the game's descriptor
+    // deduplication. Exercise the public builder/init/compare API, including
+    // default versus explicitly specified identity channel selection.
+    {
+        NVNtextureBuilder tb; NVNtexture original = {0}, replacement = {0};
+        P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
+        P(nvnTextureBuilderSetSize2D)(&tb, 4, 4);
+        P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_R8);
+        P(nvnTextureBuilderSetStorage)(&tb, &pool, 0);
+        P(nvnTextureInitialize)(&original, &tb);
+        P(nvnTextureBuilderSetSwizzle)(&tb, 2, 3, 4, 5);
+        P(nvnTextureInitialize)(&replacement, &tb);
+        EXPECT("TextureCompare implicit/explicit identity", 1, P(nvnTextureCompare)(&original, &replacement));
+        P(nvnTextureFinalize)(&replacement);
+        P(nvnTextureBuilderSetSwizzle)(&tb, 1, 1, 1, 2);
+        P(nvnTextureInitialize)(&replacement, &tb);
+        EXPECT("TextureCompare A8 channel replacement", 0, P(nvnTextureCompare)(&original, &replacement));
+        EXPECT("TextureCompare channel replacement symmetric", 0, P(nvnTextureCompare)(&replacement, &original));
+        P(nvnTextureFinalize)(&original); P(nvnTextureFinalize)(&replacement);
+        P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGB10A2);
+        P(nvnTextureBuilderSetSwizzle)(&tb, 2, 3, 4, 0);
+        P(nvnTextureInitialize)(&original, &tb);
+        P(nvnTextureBuilderSetSwizzle)(&tb, 2, 3, 4, 1);
+        P(nvnTextureInitialize)(&replacement, &tb);
+        EXPECT("TextureCompare capture alpha zero/one", 0, P(nvnTextureCompare)(&original, &replacement));
+        EXPECT("TextureCompare same capture descriptor", 1, P(nvnTextureCompare)(&replacement, &replacement));
+        P(nvnTextureFinalize)(&original); P(nvnTextureFinalize)(&replacement);
+    }
 
     // 5. Command buffer: record uniform updates / events / counters / buffer copies / nested calls, with memory in 256 B segments to force multi-segment linking
     NVNcommandBuffer cb; P(nvnCommandBufferInitialize)(&cb, &dev);
