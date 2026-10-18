@@ -4,7 +4,6 @@ This is code written by others, shipped with the repository so there is nothing 
 
 | Directory | What it is | Version and changes | Where it is used | License file |
 |---|---|---|---|---|
-| `bcdec/` | Decompression of BC-compressed textures, a single header `bcdec.h` | 0.985 (upstream commit `80859ed`), unmodified | Graphics layer: decompresses textures on the CPU when the GPU does not support BC formats (`dm/gfx/tex/nvn_bcdec.c`) | `bcdec/LICENSE` (MIT or Unlicense, your choice) |
 | `flip/` | NVIDIA FLIP, an image difference metric that models human viewing. `FLIP.h` plus the source of the command-line tool in `tool/` | Not recorded in the directory | Verification: the image quality measurements in `dm/verify/gfxq/`; build `flip` first with `make -C dm/third_party/flip` | `flip/LICENSE` (BSD 3-Clause) |
 | `libdeflate/` | Decompression library | Upstream commit `92e6a0d`, unmodified | Host: zlib decoding of the game's resource blocks (`dm/host/hle_tact.c`). Only the five decompression-related source files are built; they are listed in `dm/host/Makefile` | `libdeflate/COPYING` (MIT) |
 | `libvpx/` | The VP9 decoder from libvpx: the 71 source files a VP9-decoder-only build compiles, their headers, and the generated configuration in `config/` | v1.17.0 (upstream commit `6df3ec3`), unmodified | Host: decodes the games' VP9 movies (`dm/host/hle_movie.c`). `dm/host/Makefile` builds it into `gen/vpx/libvpx.a`; the iOS build compiles the same files | `libvpx/LICENSE` (BSD 3-Clause), with the patent grant in `libvpx/PATENTS` |
@@ -15,5 +14,5 @@ This is code written by others, shipped with the repository so there is nothing 
 A few more notes:
 
 - `flip/tool/` also carries three single-header libraries used by the FLIP command-line tool: `stb_image.h` (2.23), `stb_image_write.h` (1.13) and `tinyexr.h`. Their license notices are in the files themselves.
-- `bcdec/README.md`, `libdeflate/VERSION.md`, `libvpx/README.md`, `stb_vorbis/README.md`, `ryujinx/README.md` and `vulkan-headers/README.md` record where each came from and what it is used for.
+- `libdeflate/VERSION.md`, `libvpx/README.md`, `stb_vorbis/README.md`, `ryujinx/README.md` and `vulkan-headers/README.md` record where each came from and what it is used for.
 - Two pieces of third-party code live outside this directory: `dm/gfx/nvn/include/nvn.h` (MIT, author named in the file header) and the layout size algorithm in `dm/gfx/nvn/nvn_tex.c`, ported from deko3d (zlib license).
