@@ -197,6 +197,7 @@ Record on the game version you ship. At launch the log names each list it read a
   - its character shaders read Half2 UVs through integer-declared inputs, now converted to float32 bits at replay (black silhouettes, then flat tan characters);
   - depth clamp is replayed.
 - **Fixed:** the ground under close-up battle cameras showed as flat blue. The terrain's signed 16-bit heights were read zero-extended, so the vertices with negative heights went out of view ([04](agents/04-graphics.md), Three Houses).
+- **Fixed:** the first loading screen took 78 s on the iPhone. The loader calls `nvnQueueFinish` after each resource it uploads, and that call waited for the display to take every queued frame; it now waits only for the GPU ([04](agents/04-graphics.md), Three Houses).
 - **Open:** 64-pixel rectangles in the ground where decals land. One red line per run says a texture buffer is bound where a shader samples 2D: the decal and light lists.
 - **Memory:** about 3.5 GB resident and 2.8 GB of Metal allocations on the Mac; the game itself makes a 1.5 GB GPU-only memory pool.
 - **Frame rate:** 30 fps, as on the Switch.
