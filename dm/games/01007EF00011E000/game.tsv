@@ -20,8 +20,6 @@ app_category	public.app-category.adventure-games
 pad_layout	full
 
 # ---- Graphics ----
-# Capture textures carry their own channel selection. TextureCompare includes it,
-# so no alpha_from_red shader whitelist is needed.
 # The frame-interval controller (60 fps cuts in patch_nso.py) and dynamic resolution read the GPU time between the frame's two timestamp reports: each report takes its segment's GPU start / end
 gpu_timestamps	segment
 
