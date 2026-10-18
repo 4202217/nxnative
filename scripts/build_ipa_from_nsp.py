@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Unsigned IPA straight from the NSPs: identify the game (title ID → game profile dm/games/<id>/) → extract (nx_extract) → rewrite the code modules (patch_nso.py)
 #   → (profiles with shader_glslc_capture: capture the shaders the game compiles at run time, by booting it in the Mac host for a few seconds) → split out the shaders and check them against the profile's tables (shader_split.py)
-#   → iOS shader libraries (dmsh_build.py) → build_ipa.sh. A game with no matching profile is surveyed (<NSP folder>/<title ID>_survey/survey.md), then gets a provisional profile guessed from
+#   → iOS shader libraries (dmsh_build.py) → build_ipa.sh. A Vulkan game (profile key graphics vulkan: Hades) skips the NVN shader steps: vk_shaders.py translates its SPIR-V shaders instead. A game with no matching profile is surveyed (<NSP folder>/<title ID>_survey/survey.md), then gets a provisional profile guessed from
 #   the survey (<NSP folder>/<title ID>_build/profile/<title ID>/, outside the repository, found through DM_GAMES_DIR) and a best-effort IPA that may not boot; SURVEY_ONLY / --survey-only stops after the survey.
 # Two ways to run it: open this file in Spyder and press F5 (it uses the values under "Settings" below; an empty NSP folder or prod.keys is asked for at run time);
 #   or in a terminal: python3 scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> [options] (values given on the command line override "Settings", -h lists every option;
@@ -771,6 +771,19 @@ def build_shaders(py, repo, sh, xlate, env, logs, g, provisional=False):
     return ios
 
 
+def build_vk_shaders(py, repo, romfs, sh, env, logs):
+    """A Vulkan game's SPIR-V shaders → one Metal library each for the Mac (sh/vk/) and the iPhone (sh/ios/vk/, what build_ipa.sh takes from MSL_IOS), replacing the NVN split and chain build.
+    The old output is deleted first, so a failed run leaves nothing for build_ipa.sh to pick up; vk_shaders.py's temporary files go to WORK (on the NSP folder's volume)"""
+    ios = sh / 'ios'
+    PROG.stage('Vulkan shaders')
+    rmtree(sh / 'vk'); rmtree(ios / 'vk')
+    run([py, repo / 'dm/gfx/tools/vk_shaders.py', romfs, sh, '--ios', ios], logs / 'vk_shaders.log', env=dict(env, TMPDIR=env['WORK']))
+    if not (ios / 'vk/vk_shaders.metallib').is_file(): raise BuildError(f'没出 iOS Vulkan 着色器库 | no iOS Vulkan shader library in {ios / "vk"}')
+    m = re.search(r'iphoneos: (\d+)', (logs / 'vk_shaders.log').read_text(errors='replace'))
+    PROG.end(f'{int(m.group(1)):,} shaders for the Mac and iOS' if m else '')
+    return ios
+
+
 class IpaWatch:
     """Progress of build_ipa.sh, from its step lines ("[time] generate Gen/ …", "xcodebuild …", "assemble Payload …", "zip …") and the files it writes:
     the CompileC lines in xcodebuild's build.log (one per source file: Gen/src, Gen/main/main.c, Gen/embed.S and the app's Sources), the bytes copied into Payload/DmIOS.app/romfs,
@@ -884,6 +897,9 @@ def main(args=None):
         g, provisional = gamemod.load(f'{app:016X}'), True
         say('【红】临时游戏档案：按粗查猜的值，游戏可能起不来；出包后按 docs/agents 起机 | provisional game profile: values guessed from the survey, the game may not boot; bring it up per docs/agents after packing')
     say(f'游戏档案 | game profile: {g.id}{"（临时 | provisional: " + str(g.dir) + "）" if provisional else ""}')
+    gfx = g.get('graphics', 'nvn')   # nvn, or vulkan (Hades: the host's Vulkan layer, SPIR-V shaders)
+    if gfx not in ('nvn', 'vulkan'): raise BuildError(f'游戏档案 {g.id} 的 graphics 只能是 nvn / vulkan | game profile {g.id}: graphics must be nvn or vulkan: {gfx}')
+    if gfx == 'vulkan': say('Vulkan 游戏：着色器由 vk_shaders.py 翻译，不走 NVN 着色器链 | Vulkan game: vk_shaders.py translates the shaders instead of the NVN shader chain')
     builds, need = g.builds(), g.words('shader_versions')
     pkg_ver = args.package or PACKAGE or g.get('package')
     if pkg_ver not in builds: raise BuildError(f"打进 IPA 的版本（-p / PACKAGE）只能是游戏档案登记的 | the version to pack (-p / PACKAGE) must be one the game profile registers: {', '.join(builds)}")
@@ -902,8 +918,8 @@ def main(args=None):
     ex = work / 'extract'; ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
     gb = sum({p.stat().st_size for b, u in picks.values() for p in (b, u) if p}) / 2**30 + 6   # extraction + shader cache + slack
     if free_gb(work) < gb and not all((ex / v).exists() for v in versions): raise BuildError(f'{work} 所在的卷剩余不足 {gb:.0f} GB | less than {gb:.0f} GB free on the volume of {work}')
-    glslc = g.get('shader_glslc_capture', 'off') == 'on'   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
-    PROG.plan(1 + len(versions) + bool(fam['dlc']) + glslc + 5)   # nx_extract, each version's extraction, the DLC, rewrite, the GLSLC capture, shader split, iOS shaders, app build, IPA pack
+    glslc = gfx == 'nvn' and g.get('shader_glslc_capture', 'off') == 'on'   # shaders the game compiles at run time, captured in the Mac host (capture_glslc)
+    PROG.plan(1 + len(versions) + bool(fam['dlc']) + glslc + (5 if gfx == 'nvn' else 4))   # nx_extract, each version's extraction, the DLC, rewrite, the GLSLC capture, shader split + iOS shaders (or the Vulkan shaders), app build, IPA pack
     PROG.stage('build nx_extract')
     nx = build_nx_extract(repo, work, logs, env)
     PROG.end()
@@ -927,8 +943,10 @@ def main(args=None):
     rewrite(py, repo, game / 'ExeFS', patched, env, logs, g)
     if glslc: capture_glslc(repo, {v: dirs[v] for v in need}, pkg_ver, patched, work, env, logs, g)
     sh = work / 'shader'
-    split_shaders(py, repo, [dirs[v] / 'RomFS' for v in need], [dirs[v] / 'ExeFS/main' for v in need], sh / 'pkg', env, logs, g, provisional)
-    ios = build_shaders(py, repo, sh, xlate, env, logs, g, provisional)
+    if gfx == 'vulkan': ios = build_vk_shaders(py, repo, game / 'RomFS', sh, env, logs)   # the packed version's merged RomFS holds the SPIR-V files the game loads
+    else:
+        split_shaders(py, repo, [dirs[v] / 'RomFS' for v in need], [dirs[v] / 'ExeFS/main' for v in need], sh / 'pkg', env, logs, g, provisional)
+        ios = build_shaders(py, repo, sh, xlate, env, logs, g, provisional)
 
     if free_gb(out_ipa.parent) < 5: raise BuildError(f'{out_ipa.parent} 所在的卷剩余不足 5 GB | less than 5 GB free on the volume of {out_ipa.parent}')
     say(f'出 IPA | building the IPA → {out_ipa}')

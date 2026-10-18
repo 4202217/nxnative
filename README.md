@@ -32,12 +32,13 @@ All of these are tested on an iPhone and playable:
 | The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | Upgraded to 60 fps (30 fps on Switch) |
 | The Legend of Zelda: Link's Awakening | base game + update 1.1.0 | ~6 GB | |
 | Super Mario Odyssey | base game + update 1.4.1 | ~6 GB | |
+| Hades | base game + update 1.0.38233 | ~4 GB | |
+| Hyrule Warriors: Age of Calamity | base game + update 1.3.0 (+ DLC) | ~15 GB | |
+| Fire Emblem: Three Houses | base game + update 1.2.0 (+ DLC) | ~13 GB | While packing, the script starts the game on the Mac for a few seconds to collect the shaders it builds as it runs |
 
-Being ported, playable on the Mac, with iPhone builds not tested yet:
+Being ported:
 
-- Hades (base game + update 1.0.38233): the script cannot pack it yet.
-- Hyrule Warriors: Age of Calamity (base game + update 1.3.0, + DLC): up to its first battle.
-- Fire Emblem: Three Houses (base game + update 1.2.0, + DLC): through its prologue. While packing, the script starts the game on the Mac for a few seconds to collect the shaders it builds as it runs.
+- The Legend of Zelda: Tears of the Kingdom (base game + update 1.4.3): its opening cave renders on the Mac; it doesn't fit in an iPhone's memory yet.
 
 | | |
 |:---:|:---:|
@@ -45,6 +46,8 @@ Being ported, playable on the Mac, with iPhone builds not tested yet:
 | ![Metroid Dread](docs/images/metroid-dread.jpg)<br>Metroid Dread | ![13 Sentinels: Aegis Rim](docs/images/13-sentinels.jpg)<br>13 Sentinels: Aegis Rim |
 | ![Super Mario 3D World + Bowser's Fury](docs/images/super-mario-3d-world.jpg)<br>Super Mario 3D World + Bowser's Fury | ![The Legend of Zelda: Breath of the Wild](docs/images/zelda-breath-of-the-wild.jpg)<br>The Legend of Zelda: Breath of the Wild |
 | ![The Legend of Zelda: Link's Awakening](docs/images/zelda-links-awakening.jpg)<br>The Legend of Zelda: Link's Awakening | ![Super Mario Odyssey](docs/images/super-mario-odyssey.jpg)<br>Super Mario Odyssey |
+| ![Hades](docs/images/hades.jpg)<br>Hades | ![Hyrule Warriors: Age of Calamity](docs/images/hyrule-warriors-age-of-calamity.jpg)<br>Hyrule Warriors: Age of Calamity |
+| ![Fire Emblem: Three Houses](docs/images/fire-emblem-three-houses.jpg)<br>Fire Emblem: Three Houses | |
 
 Needs iOS / iPadOS 26 or later on an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later: the games' textures are BC-compressed, and older iPhones can't read that format. Other games aren't supported yet. For them the script writes a survey and still tries its best to pack an IPA, guessing the game's settings; such an IPA may not start.
 
@@ -79,7 +82,7 @@ The IPA appears in the same folder (here `~/Games/MarioWonder/SMBWMobile.ipa`). 
 
 ## Play
 
-**Touch controls.** Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice. 3D World, Breath of the Wild and Odyssey start in 3D, the other games in 2D.
+**Touch controls.** Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice. 3D World, Breath of the Wild, Odyssey, Hades, Age of Calamity and Three Houses start in 3D, the other games in 2D.
 A connected game controller hides the touch controls and keeps every button.
 
 - **Game language** is English by default. For Chinese, add the line `DM_LANG=zh-Hans` to `Documents/env.txt`.
@@ -92,6 +95,7 @@ A connected game controller hides the touch controls and keeps every button.
 
 - No amiibo and no online features.
 - Fire Emblem Engage: after switching away from the app and back, some sounds may stay silent until you restart it.
+- Fire Emblem: Three Houses: small square patches on the ground where decals land.
 
 ## For developers
 
