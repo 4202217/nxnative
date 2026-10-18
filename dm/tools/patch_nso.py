@@ -645,7 +645,8 @@ for fa, fb in funcs:
     for j, ins in enumerate(insl):
         if ins.mnemonic == 'br' and ins.op_str == 'x18':
             base = width = None
-            ctx = insl[max(0, j - 8):j]
+            # 16 instructions back, as for the offset-table form: Hades main+0x1135d0 has six vector moves between the add and the br, which put its adr x18 nine back
+            ctx = insl[max(0, j - 16):j]
             for p in reversed(ctx):
                 if p.mnemonic == 'adr' and p.op_str.startswith('x18,'): base = p.operands[1].imm; break
             for p in reversed(ctx):
