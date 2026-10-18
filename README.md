@@ -32,7 +32,7 @@ All of these are tested on an iPhone and playable:
 | The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | Upgraded to 60 fps (30 fps on Switch) |
 | The Legend of Zelda: Link's Awakening | base game + update 1.1.0 | ~6 GB | |
 
-Being ported, not playable yet: Super Mario Odyssey (base game + update 1.4.1) and Hades (base game + update 1.0.38233).
+Being ported: Super Mario Odyssey (base game + update 1.4.1) and Hades (base game + update 1.0.38233). Both play on the Mac; their iPhone builds are not tested yet, and the script cannot pack Hades yet.
 
 | | |
 |:---:|:---:|
