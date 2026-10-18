@@ -78,6 +78,21 @@ HLE_FORCE("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditi
               ai->dst = tm.tm_isdst > 0; ai->offset = (int32_t)tm.tm_gmtoff; }
     return RES_OK;
 }
+// Clock snapshot (Tears of the Kingdom: CreateWithStandardSystemClock asks the time service, which the host never opens → abort in sm::Initialize). 0xD0 bytes, laid out
+// as Ryujinx lays out the service's ClockSnapshot and as this SDK's constructor clears it (its last store is the byte at +0xcd): +0x00 user clock context {offset,
+// steady time point}, +0x20 network clock context, +0x40 user time, +0x48 network time, +0x50 / +0x58 user / network calendar, +0x60 / +0x78 their additional info,
+// +0x90 steady time point, +0xa8 location name (0x24), +0xcc automatic correction, +0xcd type. Offline, the network fields stay 0, so the SDK's CalculateSpanBetween
+// uses the steady time points (same source ID)
+HLE_FORCE("_ZN2nn4time13ClockSnapshot29CreateWithStandardSystemClockEPS1_", "连 time 服务取快照；宿主现填（离线：网络时钟为 0）", Result, h_time_Snapshot, uint8_t *s) {
+    memset(s, 0, 0xd0);
+    uint8_t tp[0x18]; h_time_SteadyNow(tp);
+    int64_t now, off; h_time_GetCurrentTime(&now); off = now - *(const int64_t *)tp;
+    memcpy(s, &off, 8); memcpy(s + 0x08, tp, 0x18); memcpy(s + 0x40, &now, 8);
+    h_time_ToCalendarTime((CalendarTime *)(s + 0x50), (CalendarAdditionalInfo *)(s + 0x60), &now);
+    memcpy(s + 0x90, tp, 0x18);
+    tzset(); strlcpy((char *)s + 0xa8, tzname[0] && *tzname[0] ? tzname[0] : "UTC", 0x24);
+    return RES_OK;
+}
 // The reverse: local calendar → absolute seconds (13 Sentinels). Around a daylight-saving switch one local time maps to 0 or 2 absolute seconds; the host's mktime gives one
 HLE_FORCE("_ZN2nn4time11ToPosixTimeEPiPNS0_9PosixTimeEiRKNS0_12CalendarTimeE",
           "连 time 服务的时区规则；改用宿主 mktime", Result, h_time_ToPosixTime, int *count, int64_t *out, int n, const CalendarTime *ct) {

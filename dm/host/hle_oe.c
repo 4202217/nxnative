@@ -83,6 +83,9 @@ HLE_FORCE("_ZN2nn2oe15EnableRecordingEv", "录像开关；宿主无系统录像"
 HLE_FORCE("_ZN2nn6applet23GetAppletResourceUserIdEv", "小程序资源用户号；宿主固定非 0", uint64_t, h_applet_Aruid, void) { return 0x80; }
 // Launch parameter (present only when another program launched this one with one; returns bool): the host never passes one
 HLE_FORCE("_ZN2nn2oe21TryPopLaunchParameterEPmPvm", "启动参数：没有", unsigned, h_oe_PopLaunchParam, size_t *out, void *buf, size_t n) { (void)buf; (void)n; if (out) *out = 0; return 0; }
+// Tears of the Kingdom (SDK 20.5.22): the index of the program that launched this one in a multi-program application. The SDK asks the applet proxy, which the host never opens
+// (null read in applet::GetPreviousProgramIndex right after the window setup); -1 = launched from the home menu
+HLE_FORCE("_ZN2nn2oe23GetPreviousProgramIndexEv", "前一个程序的序号：从主页启动，-1", int, h_oe_PrevProgram, void) { return -1; }
 HLE_FORCE("_ZN2nn2oe16DisableRecordingEv", "录像开关；宿主无系统录像", void, h_oe_DisableRec, void) {}
 HLE_FORCE("_ZN2nn2oe16EnableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_EnableShot, void) {}
 HLE_FORCE("_ZN2nn2oe17DisableScreenShotEv", "截图开关；宿主无系统截图", void, h_oe_DisableShot, void) {}

@@ -351,6 +351,22 @@ HLE_FORCE("_ZN2nn2fs9IsMountedEPKc", "fsp-srv；查宿主挂载表", int, h_fs_I
 HLE_FORCE("_ZN2nn2fs21MountTemporaryStorageEPKc", "fsp-srv；临时区 → 宿主目录", Result, h_fs_MountTemp, const char *name) {
     char b[1024]; return mount(name, envdir("DM_TEMP", "run/platform/temp", b, sizeof b), 0);
 }
+// Cache storage (Tears of the Kingdom; its first list call opened fsp-srv and aborted in sm::Initialize): storage <index> is the host folder <temporary storage>_cache<index>,
+// created when it is created or mounted. The list reports none (a fresh console), so the game creates its storage at every boot; creating an existing one succeeds
+static const char *cache_dir(int index, char *b, size_t n) { char t[1024]; snprintf(b, n, "%s_cache%d", envdir("DM_TEMP", "run/platform/temp", t, sizeof t), index); return b; }
+HLE_FORCE("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", "fsp-srv；缓存存储列表：报没有", Result, h_fs_OpenCacheList, void *h) { (void)h; return RES_OK; }
+HLE_FORCE("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", "fsp-srv；缓存存储列表：报没有", Result, h_fs_ReadCacheList,
+          int *n, void *info, uint64_t h, int max) { (void)info; (void)h; (void)max; *n = 0; return RES_OK; }
+HLE_FORCE("_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE", "fsp-srv；缓存存储列表", void, h_fs_CloseCacheList, uint64_t h) { (void)h; }
+HLE_FORCE("_ZN2nn2fs18CreateCacheStorageEill", "fsp-srv；缓存存储 → 宿主目录", Result, h_fs_CreateCache, int index, int64_t size, int64_t journal) {
+    char b[1100]; LOG("fs 建缓存存储 %d（%lld 字节，日志 %lld）→ %s", index, (long long)size, (long long)journal, cache_dir(index, b, sizeof b)); mkdir(b, 0755); return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs17MountCacheStorageEPKci", "fsp-srv；缓存存储 → 宿主目录", Result, h_fs_MountCache, const char *name, int index) {
+    char b[1100]; cache_dir(index, b, sizeof b); mkdir(b, 0755); return mount(name, b, 0);
+}
+HLE_FORCE("_ZN2nn2fs18DeleteCacheStorageEi", "fsp-srv；缓存存储 → 删宿主目录", Result, h_fs_DeleteCache, int index) {
+    char b[1100]; rm_tree(cache_dir(index, b, sizeof b)); return RES_OK;
+}
 HLE_FORCE("_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", "fsp-srv；存档目录在挂载时建", Result, h_fs_EnsureSave, const void *uid) { (void)uid; return RES_OK; }
 // Settings defaults for the touch product (dropped item names shown permanently by default, can be turned off in settings): Settings/Settings.json in the save only records keys the player has changed, unrecorded ones use the game default.
 // Before mounting the save, fill in the touch product defaults for the two keys "the player has not touched yet"; existing keys are never changed (if the player changed it in the options page, the player wins):
@@ -446,6 +462,13 @@ const char *dm_save_workdir(void) { for (int i = 0; i < g_nmnt; i++) if (g_mnt[i
 // The committed directory of the transactional save (the copy on disk, the version from the last Commit). Returns NULL when no save is mounted
 const char *dm_save_commitdir(void) { for (int i = 0; i < g_nmnt; i++) if (g_mnt[i].commit[0]) return g_mnt[i].commit; return NULL; }
 void (*g_dm_mount_seed_hook)(const char *save_dir);   // called before mounting the save (save dir): adds the files the host needs to the save
+// Another application's save data (Tears of the Kingdom asks by application ID and would mount it read-only): the host keeps only this game's own save, which exists once mounted
+HLE_FORCE("_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE", "fsp-srv；只有本作自己的存档", int, h_fs_SaveExisting, uint64_t app, const void *uid) {
+    (void)uid; LOG("fs 问存档是否存在：程序 %016llx → %s", (unsigned long long)app, app == DM_GAME_PROGRAM_ID ? "本作，有" : "别的程序，没有"); return app == DM_GAME_PROGRAM_ID;
+}
+HLE_FORCE("_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE", "fsp-srv；别的程序的存档：没有", Result, h_fs_MountSaveRO, const char *name, uint64_t app, const void *uid) {
+    (void)uid; LOG("【红】fs 只读挂别的程序的存档 %s：程序 %016llx，宿主没有", name, (unsigned long long)app); return 0x7d402u;   // fs ResultTargetNotFound
+}
 HLE_FORCE("_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE", "fsp-srv；存档 → 宿主目录（单用户）", Result, h_fs_MountSave, const char *name, const void *uid) {
     (void)uid;
     // No default directory: silently landing on a directory with no characters distorts the "character select" measurement (this once caused a misjudgment). Runs always use a fresh copy of save_ref

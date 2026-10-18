@@ -155,10 +155,32 @@ def sarc_members(d):
 
 NV_STAGES = ['vs', 'ps', 'gs', 'hs', 'ds', 'cs']   # NVN stage order
 COMMON, TREES = None, {}   # Unity common strings and borrowed type trees (given when the pool starts)
+ZDICTS, _ZD = {}, {}       # zstd dictionaries by ID (given when the pool starts) and their digested form in this process
 
-def _pool_init(common, trees):
-    global COMMON, TREES
-    COMMON, TREES = common, trees
+def _pool_init(common, trees, zdicts={}):
+    global COMMON, TREES, ZDICTS
+    COMMON, TREES, ZDICTS = common, trees, zdicts
+
+def zs_dicts(romfs):
+    """Tears of the Kingdom compresses its RomFS files with zstd dictionaries (the frame header names one, ID 1 for the shader packages). They ship as Pack/ZsDic.pack.zs:
+    a SARC (itself plain zstd) of *.zsdic files, each a zstd dictionary (magic 0xEC30A437, then its ID). → {ID: dictionary}; {} without that file (Mario's .zs are plain zstd)"""
+    p = os.path.join(romfs, 'Pack/ZsDic.pack.zs')
+    if not os.path.exists(p): return {}
+    from compression import zstd   # Python 3.14+
+    d = zstd.decompress(open(p, 'rb').read())
+    return {struct.unpack_from('<I', m, 4)[0]: m for _, m in sarc_members(d) if m[:4] == bytes.fromhex('37a430ec')}
+
+def unzs(path):
+    """A .zs file decompressed: frames without a dictionary through the zstd command as before, frames that name one with that dictionary from ZDICTS"""
+    d = open(path, 'rb').read()
+    fhd = d[4] if len(d) > 5 and d[:4] == bytes.fromhex('28b52ffd') else 0
+    n, o = (0, 1, 2, 4)[fhd & 3], 6 - (fhd >> 5 & 1)   # dictionary ID size; it follows the window descriptor, which single-segment frames omit
+    did = int.from_bytes(d[o:o + n], 'little')
+    if not did: return subprocess.run(['zstd', '-d', '-c', '-q', path], capture_output=True, check=True).stdout
+    from compression import zstd
+    if did not in ZDICTS: red(f'{path}：帧要 zstd 字典 {did}，Pack/ZsDic.pack.zs 里没有')
+    if did not in _ZD: _ZD[did] = zstd.ZstdDict(ZDICTS[did])
+    return zstd.decompress(d, zstd_dict=_ZD[did])
 
 def unity_program(code, where, stage=None):
     """Unity's Switch program code → [(stage, control, code)]; stage = the subprogram's stage from m_ParsedForm, which only the pre-2019.3 layout needs"""
@@ -247,7 +269,7 @@ def var_pairs(found):
 def scan_file(args):
     """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, or 'defer' (no type tree, scanned again in the second pass)"""
     path, rel = args
-    d = subprocess.run(['zstd', '-d', '-c', '-q', path], capture_output=True, check=True).stdout if path.endswith('.zs') else open(path, 'rb').read()
+    d = unzs(path) if path.endswith('.zs') else open(path, 'rb').read()
     if d[:4] == b'Yaz0': d = yaz0(d)
     found = []; trees = {}
     if d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and __import__('unityfs').is_serialized(d)):
@@ -292,17 +314,18 @@ def main():
         found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
         if GLSLC: found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''))
         results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
+    zdicts = {k: v for r in romfs_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
-    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {})) as ex: results += list(ex.map(scan_file, files, chunksize=16))
+    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex: results += list(ex.map(scan_file, files, chunksize=16))
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)
         elif extra: trees.update(extra)
     if defer:
         byrel = {r: p for p, r in files}
-        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
+        with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, trees, zdicts)) as ex: again = list(ex.map(scan_file, [(byrel[r], r) for r in defer]))
         for rel, uniq, pr, extra in again:
             if extra == 'defer': red(f'{rel}：Unity 序列化文件没有类型树，资源包里也没有同哈希的 Shader 类型树可借')
         results = [r for r in results if r[3] != 'defer'] + again
