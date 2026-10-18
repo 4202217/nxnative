@@ -33,7 +33,11 @@ All of these are tested on an iPhone and playable:
 | The Legend of Zelda: Link's Awakening | base game + update 1.1.0 | ~6 GB | |
 | Super Mario Odyssey | base game + update 1.4.1 | ~6 GB | |
 
-Being ported: Hades (base game + update 1.0.38233). It plays on the Mac; its iPhone build is not tested yet, and the script cannot pack it yet.
+Being ported, playable on the Mac, with iPhone builds not tested yet:
+
+- Hades (base game + update 1.0.38233): the script cannot pack it yet.
+- Hyrule Warriors: Age of Calamity (base game + update 1.3.0, + DLC): up to its first battle.
+- Fire Emblem: Three Houses (base game + update 1.2.0, + DLC): through its prologue. Packing it needs a one-time capture of its run-time shaders on the Mac ([docs/development.md](docs/development.md#game-notes)).
 
 | | |
 |:---:|:---:|

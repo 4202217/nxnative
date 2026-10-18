@@ -30,7 +30,9 @@ static void cpu_manual(uint8_t *dst, const uint8_t *src) { memcpy(dst, src, P_SI
 HLE_FORCE("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE", "渲染器工作区大小：按 CPU 渲染 + 手动执行的参数算",
           size_t, h_ar_WorkSize, const uint8_t *param) {
     static size_t (*orig)(const uint8_t *); if (!orig) orig = gsym("_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE");
-    uint8_t p[P_SIZE]; cpu_manual(p, param); return orig(p);
+    uint8_t p[P_SIZE]; cpu_manual(p, param); size_t n = orig(p);
+    { static int once; if (!once++) LOG("audren：工作区 %#zx", n); }
+    return n;
 }
 HLE_FORCE("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22AudioRendererParameterEPvm", "开渲染器：改成 CPU 渲染 + 手动执行后走 SDK 进程内渲染器",
           Result, h_ar_Open0, void **handle, const uint8_t *param, void *work, size_t sz) {
@@ -79,9 +81,9 @@ HLE_FORCE("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11S
     static Result (*orig)(void **, void *, const uint8_t *, void *, size_t);
     if (!orig) orig = gsym("_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm");
     uint8_t p[P_SIZE]; cpu_manual(p, param);
-    LOG("audren：OpenAudioRenderer 采样率 %d 每帧 %d 混音缓冲 %d 子混音 %d 声部 %d 输出 %d 效果 %d 分路 %d（原设备 %d 模式 %d → CPU / 手动）",
+    LOG("audren：OpenAudioRenderer 采样率 %d 每帧 %d 混音缓冲 %d 子混音 %d 声部 %d 输出 %d 效果 %d 分路 %d（原设备 %d 模式 %d → CPU / 手动）工作区 %p+%#zx",
         *(int32_t *)param, *(int32_t *)(param + 4), *(int32_t *)(param + 8), *(int32_t *)(param + 0xc), *(int32_t *)(param + 0x10), *(int32_t *)(param + 0x14),
-        *(int32_t *)(param + 0x18), *(int32_t *)(param + 0x24), *(int32_t *)(param + P_DEVICE), *(int32_t *)(param + P_MODE));
+        *(int32_t *)(param + 0x18), *(int32_t *)(param + 0x24), *(int32_t *)(param + P_DEVICE), *(int32_t *)(param + P_MODE), work, sz);
     Result r = orig(handle, ev, p, work, sz);
     if (r) { LOG("【红】audren：SDK OpenAudioRenderer 失败 %#x", r); return r; }
     if (atomic_load(&g_open)) { LOG("【红】audren：第二个渲染器（宿主只驱动一个）"); return r; }
@@ -99,17 +101,29 @@ HLE_FORCE("_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE", "关渲
 //   has four fewer commands before it, making it 0x10. The layout is the same in all three: 0x148 bytes, +0x20 device name ("MainAudioOut"), +0x128 upsample buffer, +0x130 input count,
 //   +0x134 input indices. render_once sets the ID by layout; when the first full command list has no command with that ID, its one 0x148-byte command with 1 to 6 inputs is the sink
 //   (without this, Link's Awakening rendered every frame and played silence: the music and sound effects never reached the output, only the movies' own AudioOut did)
-static int g_sink_id = 0x13;
+// SDK 6 (Fire Emblem: Three Houses, CommandListProcessor::Process at sdk+0xaaa00) lays out the command header differently: +0x04 size (s16), +0x06 command ID (s16), +0x10 enabled (u8),
+//   where SDK 8–20 have +0x04 enabled (u8), +0x05 ID (u8), +0x06 size (s16); DeviceSink is ID 16 there (its case in Process is a no-op). Walked with the newer header, the first command's ID
+//   was taken as its size, the second "command" had no magic and the game was silent. The first full command list decides the layout: the one whose walk finds the magic on every command
+static int g_sink_id = 0x13, g_hdr6;
+static int cmd_size(const uint8_t *q) { return g_hdr6 ? *(const int16_t *)(q + 4) : *(const int16_t *)(q + 6); }
+static int cmd_id(const uint8_t *q) { return g_hdr6 ? *(const int16_t *)(q + 6) : q[5]; }
+static int cmd_on(const uint8_t *q) { return g_hdr6 ? q[0x10] : q[4]; }
+static int cmd_walks(const uint8_t *cl, uint32_t ncmd) {
+    const uint8_t *q = cl + 0x20;
+    for (uint32_t i = 0; i < ncmd; i++) { if (*(const uint32_t *)q != 0xcafebabeu || cmd_size(q) <= 0) return 0; q += cmd_size(q); }
+    return 1;
+}
 static int capture(const uint8_t *cl, int16_t *dst) {
     uint32_t ncmd = *(const uint32_t *)(cl + 4), samples = *(const uint32_t *)(cl + 0x14), rate = *(const uint32_t *)(cl + 0x18);
     const int32_t *mix = *(const int32_t *const *)(cl + 8);
     static int logged, hist_logged;
-    if (!hist_logged && ncmd > 4) {   // first full command list: command ID histogram, and the sink ID check
+    if (!hist_logged && ncmd > 4) {   // first full command list: header layout, command ID histogram, and the sink ID check
         hist_logged = 1;
+        if (!cmd_walks(cl, ncmd)) { g_hdr6 = 1; if (cmd_walks(cl, ncmd)) { g_sink_id = 0x10; LOG("audren：命令头按 SDK 6 布局（+4 大小、+6 命令号、+0x10 开关），DeviceSink 为 0x10 号"); } else g_hdr6 = 0; }
         int hist[64] = {0}, cand = -1, ncand = 0; const uint8_t *q = cl + 0x20; char line[512]; size_t o = 0;
-        for (uint32_t i = 0; i < ncmd && *(const uint32_t *)q == 0xcafebabeu && *(const int16_t *)(q + 6) > 0; i++) {
-            int16_t sz = *(const int16_t *)(q + 6); hist[q[5] & 63]++;
-            if (sz == 0x148 && *(const uint32_t *)(q + 0x130) - 1 < 6) { cand = q[5]; ncand++; }
+        for (uint32_t i = 0; i < ncmd && *(const uint32_t *)q == 0xcafebabeu && cmd_size(q) > 0; i++) {
+            int sz = cmd_size(q); hist[cmd_id(q) & 63]++;
+            if (sz == 0x148 && *(const uint32_t *)(q + 0x130) - 1 < 6) { cand = cmd_id(q); ncand++; }
             q += sz;
         }
         for (int k = 0; k < 64; k++) if (hist[k]) o += snprintf(line + o, sizeof line - o, " %d×%d", k, hist[k]);
@@ -119,9 +133,9 @@ static int capture(const uint8_t *cl, int16_t *dst) {
     }
     const uint8_t *c = cl + 0x20;
     for (uint32_t i = 0; i < ncmd; i++) {
-        uint32_t magic = *(const uint32_t *)c; int16_t size = *(const int16_t *)(c + 6);
+        uint32_t magic = *(const uint32_t *)c; int size = cmd_size(c);
         if (magic != 0xcafebabeu || size <= 0) { if (!logged++) LOG("【红】audren：命令表第 %u 条格式不对（魔数 %#x 大小 %d）", i, magic, size); return 0; }
-        if (c[5] == g_sink_id && c[4]) {
+        if (cmd_id(c) == g_sink_id && cmd_on(c)) {
             uint32_t nin = *(const uint32_t *)(c + 0x130); const int16_t *in = (const int16_t *)(c + 0x134);
             const int32_t *up = *(const int32_t *const *)(c + 0x128);
             if (!logged++) LOG("audren：DeviceSink 输入 %u 个（%d %d …）采样率 %u 每帧 %u 混音缓冲 %p 上采样缓冲 %p", nin, nin ? in[0] : -1, nin > 1 ? in[1] : -1, rate, samples, (void *)mix, (void *)up);

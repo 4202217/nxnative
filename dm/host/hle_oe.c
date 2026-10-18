@@ -94,6 +94,11 @@ HLE_FORCE("_ZN2nn2oe23BeginBlockingHomeButtonEv", "暂时屏蔽 HOME 键（经 a
 HLE_FORCE("_ZN2nn2oe21EndBlockingHomeButtonEv", "恢复 HOME 键（经 am）", void, h_oe_UnblockHome, void) {}
 HLE_FORCE("_ZN2nn2oe29SetScreenShotImageOrientationENS_5album16ImageOrientationE", "截图方向（经 am）；宿主无系统截图", void, h_oe_ShotOrient, int o) { (void)o; }
 HLE_FORCE("_ZN2nn2oe37IsUserInactivityDetectionTimeExtendedEv", "无操作自动熄屏是否延长；宿主不熄屏，报否", unsigned, h_oe_InactivityExtQ, void) { return 0; }
+// Hyrule Warriors: Age of Calamity (SDK 9.6.0, main+0x8d1238): the copyright frame buffer, an overlay the system draws only into screenshots and recordings. The SDK hands the buffer to am as transfer memory
+// (svcCreateTransferMemory, then a null applet proxy). The host has no system capture, so it keeps nothing
+HLE_FORCE("_ZN2nn2oe30InitializeCopyrightFrameBufferEPvm", "版权叠加层缓冲（截图 / 录像用，经 am）；宿主无系统截图", void, h_oe_CopyrightInit, void *buf, size_t n) { (void)buf; (void)n; }
+HLE_FORCE("_ZN2nn2oe17SetCopyrightImageEPKvmiiiiNS0_16WindowOriginModeE", "版权叠加层图像；宿主无系统截图", void, h_oe_CopyrightImage, const void *p, size_t n, int x, int y, int w, int h, int origin) { (void)p; (void)n; (void)x; (void)y; (void)w; (void)h; (void)origin; }
+HLE_FORCE("_ZN2nn2oe22SetCopyrightVisibilityEb", "版权叠加层显示开关；宿主无系统截图", void, h_oe_CopyrightVisible, int on) { (void)on; }
 
 // OperationMode: 0 Handheld, 1 Console; PerformanceMode: 0 Normal, 1 Boost (one-to-one with the operation mode)
 HLE_FORCE("_ZN2nn2oe16GetOperationModeEv", "运行模式查询；按 DM_OPMODE 给固定值", int, h_oe_GetOpMode, void) { int u = g_ui_opmode; if (atomic_exchange(&g_ui_armed, 0)) atomic_fetch_add(&g_ui_reads, 1); return u >= 0 ? u : opmode(); }

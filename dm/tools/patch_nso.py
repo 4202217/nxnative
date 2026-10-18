@@ -169,6 +169,16 @@ CUTS = {
   '909e904af78ac1b8deefe97ab2ccdb51': [
     (0x10cd070, '080040f9', 'c0035fd6', '物理完成任务 release（自调析构）：ldr x8,[x0] → ret（不再析构；步进函数每步原地重建）', '仅宿主'),
   ],
+  # Hyrule Warriors: Age of Calamity 1.3.0 (v327680) main: the init (main+0x8d9610) hands the KTSL sound engine three heaps carved from one block: 15 MB engine memory, 2 MB, and
+  # 142 MB sound data (sizes built by mov x8,#0xf00000; movk x8,#0x20,lsl #48 and mov w9,#0x8e00000; constructor main+0x12647a0, heaps created at main+0x1a2ba58). The audio renderer
+  # work buffer in the 15 MB heap is 0x760000 (the SDK's AudioRenderSystem::GetWorkBufferSize, 0x40a9c8 of it command buffer), and the engine's setup asks for about 16.9 MB in
+  # all: the fourth 0x1b5860-byte player block (main+0x1a32f70; three of the four players mix 5.1) came back null, the setup released its memory pools and gave up (-51),
+  # the first sound archive (ASRS) never loaded and nnMain's resource wait (main+0x8d9bc8) spun forever. Where hardware differs is not known. The engine heap gets 4 MB from the
+  # sound data heap, so the block the three come from keeps its size
+  'c3cf52bf2b05d7310884971b50bcccb8': [
+    (0x8d9610, '081ea0d2', '0826a0d2', '声音引擎堆：mov x8,#0xf00000 → mov x8,#0x1300000（+4 MB）'),
+    (0x8d9618, '091ca152', '0914a152', '声音数据堆：mov w9,#0x8e00000 → mov w9,#0x8a00000（-4 MB，三个堆所在块的总尺寸不变）'),
+  ],
 }
 # ---- Registered observation gates: {NSO build ID: [(offset, number, original instruction word, reason)]}. Numbers match OBS_* in the host's hle.h;
 # the original instruction must be position independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns ----
@@ -751,7 +761,8 @@ for fa, fb in funcs:
                 if p.mnemonic == 'adr' and p.op_str.startswith('x18,'): base = p.operands[1].imm; break
             for p in reversed(ctx):
                 if p.mnemonic == 'add' and p.op_str.startswith('x18, x18,') and 'lsl #2' in p.op_str:
-                    idx = num(p.reg_name(p.operands[2].reg))
+                    # capstone names x30 'lr' (and x29 'fp'): Age of Calamity main+0x1382160 indexes with add x18,x18,x30,lsl #2 after ldrb w30,[x14,x12]
+                    rn = p.reg_name(p.operands[2].reg); idx = {'lr': 30, 'fp': 29}.get(rn, num(rn))
                     for q in reversed(ctx):
                         if q.mnemonic in ('ldrb', 'ldrsb') and num(q.reg_name(q.operands[0].reg)) == idx: width = 256
                         if q.mnemonic in ('ldrh', 'ldrsh') and num(q.reg_name(q.operands[0].reg)) == idx: width = 65536

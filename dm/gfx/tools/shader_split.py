@@ -14,6 +14,8 @@
 #       + code area, and the stage is not in the code but in the Shader's m_ParsedForm (unity_stages)
 #   · MSHD (MercurySteam, Metroid Dread system/shd/*.bshdat): each stage = a control section (+0x20 = control length; sometimes a small compiler option table follows) + the code area starting at the next code header;
 #       NV assembly text follows the first 0x880 bytes of the control section, and SASS disassembly text follows the code area. All 478 files hold "vertex, pixel" in pairs (1, 2 or 4 pairs), paired two by two in order
+#   · G2S (Koei Tecmo's KTGL, Hyrule Warriors: Age of Calamity): GLSLC compiler outputs inside the IDRK entries of the RDB data files (zlib in chunks), see idrk_shaders
+#   · SPKG (the older KTGL of Fire Emblem: Three Houses): shader packages of G2S containers, loose and inside the LINKDATA archive DATA0.bin / DATA1.bin, see kt_shaders and linkdata_jobs
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -31,6 +33,7 @@ GAME = _game.load()   # the current game profile (DM_GAME, required): source gro
 GROUPS, NOTE = GAME.pairs('shader_groups'), GAME.get('shader_note')
 GLSLC = GAME.get('shader_main_glslc', 'off') == 'on'   # GLSLC compiler outputs in main (glslc_shaders)
 SEPARABLE = GAME.get('shader_separable', 'off') == 'on'   # single-stage programs combined per stage at draw time (separable_pairs)
+CAPTURE = GAME.get('shader_glslc_capture', 'off') == 'on'   # GLSLC outputs the game compiles at run time, captured on the Mac (DM_GLSLC_CAPTURE, hle_glslc.c)
 
 CTL_MAGIC, GFX_MAGIC, CS_MAGIC = bytes.fromhex('34127698'), bytes.fromhex('78563412'), bytes.fromhex('79563412')
 STAGES = ['vs', 'hs', 'ds', 'gs', 'ps', 'cs']
@@ -107,22 +110,111 @@ def mshd_shaders(d, label):
     if len(out) % 2: red(f'{label} MSHD：{len(out)} 个阶段，不成对')
     return out
 
-def glslc_shaders(d, label):
+def glslc_shaders(d, label, need=True):
     """GLSLC compiler outputs (838 in 13 Sentinels' main read-only segment, one stage each): from the magic 0x19866891, +0x44 = the whole output's length; each output holds exactly one control section with the code area right after it (control +0x20 = control length).
-    The magic is only 4 bytes and other games' mains have it too (Fire Emblem Engage has 11), so this runs only when the profile's shader_main_glslc is on, and keeps only outputs that pass the triple check"""
+    The magic is only 4 bytes and other games' mains have it too (Fire Emblem Engage has 11), so this runs only when the profile's shader_main_glslc is on, and keeps only outputs that pass the triple check.
+    need: stop when there is none (main with shader_main_glslc on); a Koei Tecmo G2S container (idrk_shaders) may hold none.
+    SDK 6's GLSLC (output version 0x1d.2, Fire Emblem: Three Houses) writes 0x848- and 0x850-byte control sections (ctl_len's lower range) and compute code with no 0x12345679 header: the instructions
+    start at code +0 (the first word is a scheduling word), and the stage then comes from the control's thread group (+0x748), which only compute sections fill. Its few version-0x1d.0 outputs keep
+    something else at control +0x20 (odd values such as 0x136b), so a length that is not a multiple of 4 is not a control length"""
     out = []
     for m in re.finditer(b'\x91\x68\x86\x19', d):
         h = m.start(); size = struct.unpack_from('<I', d, h + 0x44)[0]
-        c = d.find(CTL_MAGIC, h, h + size) if 0x880 < size <= len(d) - h else -1
+        c = d.find(CTL_MAGIC, h, h + size) if 0x760 < size <= len(d) - h else -1
         if c < 0 or d.find(CTL_MAGIC, c + 4, h + size) >= 0: continue
         nctl, ncode = struct.unpack_from('<I', d, c + 0x20)[0], struct.unpack_from('<I', d, c + 0x704)[0]
-        if nctl < 0x880 or c + nctl + ncode > h + size: continue
+        if nctl < 0x760 or nctl & 3 or c + nctl + ncode > h + size: continue
         ctl, code = d[c:c + nctl], d[c + nctl:c + nctl + ncode]
-        st = 'cs' if code[:4] == CS_MAGIC else SPH_STAGE.get((struct.unpack_from('<I', code, 0x30)[0] >> 10) & 0xf) if code[:4] == GFX_MAGIC else None
+        headerless_cs = code[:4] not in (CS_MAGIC, GFX_MAGIC) and all(struct.unpack_from('<3I', ctl, 0x748))
+        st = 'cs' if code[:4] == CS_MAGIC or headerless_cs else SPH_STAGE.get((struct.unpack_from('<I', code, 0x30)[0] >> 10) & 0xf) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
         out.append((f'{label}#GLSLC@{h:#x}', st, ctl, code))
-    if not out: red(f'{label}：档案开了 shader_main_glslc，却没有一份 GLSLC 输出')
+    if not out and need: red(f'{label}：档案开了 shader_main_glslc，却没有一份 GLSLC 输出')
     return out
+
+IDRK, ZCHUNKED = b'IDRK0000', 0x100000
+def idrk_entries(d):
+    """Koei Tecmo RDB data files (Hyrule Warriors: Age of Calamity: asset/*.rdb.bin*, asset/data/*.file) are a run of IDRK entries: 'IDRK0000', u64 entry length, u64 stored length, u64 length,
+    u32 0, u32 file KTID, u32 type KTID, u32 flags, a few parameter words, and the stored data at the end of the entry. Entries follow each other directly, some after padding (to 64 KB).
+    → (start of the stored data, its end, flags) for each entry"""
+    o = 0
+    while o + 0x30 <= len(d):
+        if d[o:o + 8] != IDRK:
+            o = d.find(IDRK, o)
+            if o < 0: return
+        esz, csz = struct.unpack_from('<QQ', d, o + 8)
+        yield o + esz - csz, o + esz, struct.unpack_from('<I', d, o + 0x2c)[0]
+        o += esz
+
+def idrk_data(d, a, b, flags, head=None):
+    """An entry's data: flag 0x100000 = zlib in chunks (u32 stored length + a zlib stream each, a zero length ends; Age of Calamity's chunks inflate to at most 16 KB). head: only the first bytes"""
+    import zlib
+    if not flags & ZCHUNKED: return d[a:min(b, a + head) if head else b]
+    out = []
+    while a + 4 <= b:
+        cs = struct.unpack_from('<I', d, a)[0]; a += 4
+        if not cs: break
+        if head: return zlib.decompressobj().decompress(d[a:a + min(cs, 1024)], head)
+        out.append(zlib.decompress(d[a:a + cs])); a += cs
+    return b''.join(out)
+
+def idrk_shaders(path, label, out):
+    """Koei Tecmo's KTGL keeps its shaders in G2S containers ('_S2G3000', type KTID 0x7bcd279f in Age of Calamity: 23,108 entries in three RDB files, 2.3 GB inflated), each a material's variations
+    as GLSLC compiler outputs (glslc_shaders). One '_DOK0000' container (type KTID 0x20a6a0bb, the engine's system resources; once in system.rdb.bin and once in the update's .bin1) holds 151 bare
+    GLSLC outputs without a G2S wrapper, among them 21 shaders the first battle draws. No other entry type holds any. The RDB files are up to 3.8 GB, so they are mapped rather than read,
+    and only entries whose data starts with one of those two magics are inflated"""
+    import mmap
+    with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+        for a, b, flags in idrk_entries(d):
+            if idrk_data(d, a, b, flags, 4) in (b'_S2G', b'_DOK'): out.extend(glslc_shaders(idrk_data(d, a, b, flags), f'{label}#IDRK@{a:#x}', need=False))
+
+G2S, SPKG = b'_S2G3000', b'SPKG'
+def kt_gz(d):
+    """Koei Tecmo's older chunked zlib (Fire Emblem: Three Houses: the compressed entries of DATA1.bin and the patch*/…/*.gz files): u32 chunk size (0x10000), u32 chunk count, u32 inflated length,
+    u32 stored length of each chunk, then the chunks at 0x80 alignment, each a u32 length + one zlib stream, or the plain bytes when the stored length equals the chunk's inflated length (a short last
+    chunk, or one that does not compress). → the inflated data, or None when d is not in that form"""
+    import zlib
+    if len(d) < 16: return None
+    cs, n, tot = struct.unpack_from('<III', d)
+    if cs != 0x10000 or not n or n != (tot + cs - 1) // cs or 12 + 4 * n > len(d): return None
+    sizes = struct.unpack_from(f'<{n}I', d, 12); o = (12 + 4 * n + 0x7f) & ~0x7f; out = []
+    for i, s in enumerate(sizes):
+        if o + s > len(d): return None
+        if s == min(cs, tot - i * cs): out.append(bytes(d[o:o + s]))
+        else:
+            ln = struct.unpack_from('<I', d, o)[0]
+            try: out.append(zlib.decompress(d[o + 4:o + 4 + ln]))
+            except zlib.error: return None
+        o = (o + s + 0x7f) & ~0x7f
+    return b''.join(out)
+
+def kt_shaders(d, label, out):
+    """Three Houses' KTGL keeps its shaders in SPKG packages (patch*/nx/shader/*.spkg, and 132 entries of DATA1.bin), each holding G2S containers ('_S2G3000', as in Age of Calamity) of GLSLC outputs,
+    and in '_SPK4100' packages without G2S (DATA1.bin entry 549, the post effects: 27 outputs); map and model archives in DATA1.bin carry packages of their own. So every inflated file or entry is
+    searched for GLSLC outputs, and its SARC archives (the Nintendo layouts, 2D UI) for BNSH, as everywhere else"""
+    z = kt_gz(d)
+    if z is not None: d = z
+    if b'\x91\x68\x86\x19' in d: out.extend(glslc_shaders(d, label, need=False))
+    if d[:4] == b'SARC' or b'BNSH\0\0\0\0' in d: scan_blob(d, label, out)
+
+def linkdata_jobs(path, rel, parts=64):
+    """Three Houses' LINKDATA: DATA0.bin, beside DATA1.bin (6.9 GB), indexes it with 32-byte entries {u64 offset, u64 inflated length, u64 stored length, u64 compressed}. The entries are split into
+    ranges of about equal stored size, one scan job each. → [(path, rel, (first entry, end entry)), …], or None when there is no index beside the file"""
+    idx = os.path.join(os.path.dirname(path), 'DATA0.bin')
+    if os.path.basename(path) != 'DATA1.bin' or not os.path.exists(idx): return None
+    n = os.path.getsize(idx) // 32; step = os.path.getsize(path) / parts; jobs, lo = [], 0
+    with open(idx, 'rb') as f: ents = [struct.unpack('<QQQQ', f.read(32)) for _ in range(n)]
+    for i in range(1, n + 1):
+        if i == n or ents[i][0] >= (len(jobs) + 1) * step: jobs.append((path, rel, (lo, i))); lo = i
+    return jobs
+
+def linkdata_shaders(path, rel, rng, out):
+    import mmap
+    with open(os.path.join(os.path.dirname(path), 'DATA0.bin'), 'rb') as f: idx = f.read()
+    with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
+        for i in range(*rng):
+            off, n, stored, comp = struct.unpack_from('<QQQQ', idx, i * 32)
+            if n: kt_shaders(d[off:off + (stored if comp else n)], f'/{rel}#{i}', out)
 
 def yaz0(s):
     """Yaz0 decompression (Super Mario 3D World + Bowser's Fury: almost all of RomFS is .szs = SARC wrapped in Yaz0). Pure Python runs at about 20–45 MB/s per core, under a minute for the whole 4.7 GB RomFS in parallel, and needs no extra dependency.
@@ -268,22 +360,35 @@ def var_pairs(found):
 
 def scan_file(args):
     """→ (relative path, {key: …}, pairs, extra); extra = this file's Unity type trees, or 'defer' (no type tree, scanned again in the second pass)"""
-    path, rel = args
+    path, rel = args[:2]
+    with open(path, 'rb') as f: head = f.read(16)
+    found = []; trees = {}
+    if head[:8] == IDRK:
+        idrk_shaders(path, '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
+        linkdata_shaders(path, rel, args[2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == SPKG or head[:4] == b'\0\0\1\0' and path.endswith('.gz'):   # Three Houses' loose shader packages and chunked zlib files (kt_shaders)
+        kt_shaders(open(path, 'rb').read(), '/' + rel, found)
+        return rel, uniq_keys(found), var_pairs(found), trees
     d = unzs(path) if path.endswith('.zs') else open(path, 'rb').read()
     if d[:4] == b'Yaz0': d = yaz0(d)
-    found = []; trees = {}
     if d[:8] == b'UnityFS\0' or (d[8:11] == b'\0\0\0' and __import__('unityfs').is_serialized(d)):
         import unityfs
         try: unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
     elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and not (d[:4] == b'SARC' and b'Yaz0' in d): return rel, {}, set(), {}   # a SARC may hold Yaz0 members
     else: scan_blob(d, '/' + rel, found)
+    return rel, uniq_keys(found), var_pairs(found), trees
+
+def uniq_keys(found):
     uniq = {}
     for where, st, ctl, code in found:
         key = skey(ctl, code)
         if key in uniq and (uniq[key][2] != ctl or uniq[key][3] != code): red(f'键 {key} 相同而控制段或代码区不同（{where}）')
         uniq.setdefault(key, (where, st, ctl, code))
-    return rel, uniq, var_pairs(found), trees
+    return uniq
 
 def nso_image(path):
     import lz4.block
@@ -313,12 +418,20 @@ def main():
             except ValueError: common = None   # not a Unity game
         found = []; scan_blob(img, 'main' + ('@' + tag if tag else ''), found)
         if GLSLC: found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''))
+        if CAPTURE:   # GLSLC outputs the game compiles at run time, captured on the Mac (hle_glslc.c): <version dir>/glslc_capture, or DM_GLSLC_CAPTURE
+            cap = os.environ.get('DM_GLSLC_CAPTURE') or os.path.join(os.path.dirname(os.path.abspath(romfs)), 'glslc_capture')
+            names = sorted(f for f in os.listdir(cap) if f.endswith('.glslc')) if os.path.isdir(cap) else []
+            if not names: print(f'【红】档案开了 shader_glslc_capture，{cap} 却没有捕获的 GLSLC 输出：游戏运行时编译的着色器不会有翻译 | no captured GLSLC outputs in {cap}: the shaders the game compiles at run time will have no translation', flush=True)
+            for nm in names: found += glslc_shaders(open(os.path.join(cap, nm), 'rb').read(), f'/glslc_capture/{nm}')
         results.append(('main', {skey(c, k): (w, s, c, k) for w, s, c, k in found}, var_pairs(found), {}))
     zdicts = {k: v for r in romfs_v for k, v in zs_dicts(r).items()}   # Tears of the Kingdom's zstd dictionaries (zs_dicts)
     keys = {}
     # First pass: every file; Unity bundles carry type trees, and the Shader trees are collected on the way. Second pass: Unity serialized files without type trees are scanned again with the borrowed trees
     J = int(os.environ.get('J', '8'))
-    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex: results += list(ex.map(scan_file, files, chunksize=16))
+    big = [j for p, r in files for j in (linkdata_jobs(p, r) or [])]   # Three Houses' 6.9 GB DATA1.bin: one job per range of entries, not one read of the whole file
+    files = [(p, r) for p, r in files if not linkdata_jobs(p, r)]
+    with cf.ProcessPoolExecutor(J, initializer=_pool_init, initargs=(common, {}, zdicts)) as ex:
+        results += list(ex.map(scan_file, big)) + list(ex.map(scan_file, files, chunksize=16))
     trees, defer = {}, []
     for rel, uniq, pr, extra in results:
         if extra == 'defer': defer.append(rel)

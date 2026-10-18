@@ -12,7 +12,7 @@ The README covers packing and playing. This page is for working on nxnative itse
 | Audio | Games that carry the SDK's audio renderer (Mario) run it in-process; games that use AudioOut directly (Engage: Wwise) feed it straight. Output goes through Core Audio (default on iOS, `DM_AUDIO=1` on the Mac) |
 | Input | iOS: the touch gamepad and physical controllers. Mac: scripted input (`DM_KEYS=<seconds>:<button>,…`, with `DM_KBD=<text>` answering the system keyboard) or `DM_WINDOW=1` for a window with keyboard input |
 | iOS app | One unsigned IPA for iPhone and iPad. The rewritten code is embedded in the executable; the shader libraries, the RomFS and the game icon are inside the app |
-| Known gaps | Conditional render is always drawn; sparse virtual-pool mappings; `DrawElementsIndirect`. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. The bundled prewarm lists are empty. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
+| Known gaps | Conditional render is always drawn; sparse virtual-pool mappings; `MultiDraw*IndirectCount`. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. The bundled prewarm lists are empty. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
 
 ## The packing script in detail
 
@@ -170,6 +170,33 @@ Record on the game version you ship. At launch the log names each list it read a
 - **Online:** its `EOS_*` imports (Epic Online Services, an NRO it would load through `nn::ro`) stay offline.
 - **Mac input:** `DM_KEYS="f800:A,f1000:A,f1200:A,f1500:A,f1900:A"` goes through the title and the intro into Tartarus.
 - **Packing:** the NSP script does not translate Vulkan shaders yet. Run `vk_shaders.py` with `--ios <work folder>/build/ios/dmsh_b`, then `build_ipa.sh` (see [Build by hand](#build-by-hand-mac)).
+
+**Hyrule Warriors: Age of Calamity (`01002B00111A2000`), being ported**
+- **Engine:** Koei Tecmo's KTGL on NVN, SDK 9.6.0, update 1.3.0 (v327680), four DLC packages (one is only a licence). Modules main + subsdk0 (movie) + sdk.
+- **Files:** everything sits in RDB archives (`asset/*.rdb` index; `asset/*.rdb.bin*` and `asset/data/*.file` hold `IDRK` entries, zlib in 16 KB chunks) ([01](agents/01-extract.md)).
+- **Shaders:** 40,726 GLSLC outputs: KTGL's G2S containers and one `_DOK` container in `system.rdb.bin*`, plus 117 in `main`. Many have 0x850-byte controls and the compute ones no code header ([04](agents/04-graphics.md)). The game builds 8,705 programs during its first frame (about 10 s on the Mac).
+- **Heap:** its three modules take 66.6 MB, more than the 64 MB the host reported as used, so `SetHeapSize` failed and `nnMain` returned at once; the profile's `mem_used` reports 72 MB.
+- **Sound:** the engine's 15 MB heap was too small on the host (renderer work buffer plus four players, three of them 5.1). The sound setup then gave up quietly, the first sound archive never loaded and the main thread waited forever; a per-build cut moves 4 MB from the 142 MB sound data heap to it ([03](agents/03-bringup.md)). The multi-stream hardware Opus decoder is the SDK's software one.
+- **Graphics fixes it brought:** compute programs get their own binding in the replay (draws after a dispatch were dropped, so the intro movie stayed black), `nvnTexturePoolRegisterImage`, indirect draws (its GPU-driven effects are indirect quads, converted by a compute pass), and the movie planes (CPU-written, published with `nvnMemoryPoolFlushMappedRange`) through `tex_flush_upload`.
+- **Other games' saves:** it asks whether Breath of the Wild's (and `0100A2C01320E000`'s) save exists for bonus items; the host says no.
+- **Mac input:** with a save whose first-boot settings were made, `DM_KEYS="f300:A,f420:A,f540:A,f660:A,f780:A,f900:A,f1300:Plus,f1350:Plus"` confirms the settings, skips the intro movie and plays the opening into the first battle, The Battle of Hyrule Field (about frame 4000).
+
+**Fire Emblem: Three Houses (`010055D009F78000`), being ported**
+- **Engine:** Koei Tecmo's older KTGL (the game is co-developed with Intelligent Systems), SDK 6.5.0 (the oldest so far), update 1.2.0. Modules main + subsdk0 (GLSLC, NVN's runtime shader compiler) + subsdk1 (movie) + sdk. RomFS: the LINKDATA archive (`DATA0.bin` is the index, `DATA1.bin` holds 6.9 GB), loose overrides in `patch1`–`patch4`, WebM movies and KTSL sound banks; compressed entries and `*.gz` files are Koei Tecmo's chunked zlib ([01](agents/01-extract.md)).
+- **Shaders:** 1,364. `shader_split.py` reads the SPKG packages (G2S containers, as in Age of Calamity) in `DATA1.bin` and `patch*/nx/shader`, a `_SPK4100` post-effect package, and the BNSH and GLSLC outputs in `main`. SDK 6's GLSLC writes 0x848 / 0x850-byte control sections and compute code with no header, which the reader used to drop ([04](agents/04-graphics.md)).
+- **Shaders compiled at run time:** KTGL compiles 9 built-in GLSL shaders at boot with the game's own GLSLC (2D primitives, text, the loading quill). No game file holds their output, so they are captured once on the Mac: run the game for a few seconds with `DM_GLSLC_CAPTURE=<version dir>/glslc_capture` (`hle_glslc.c`); the profile key `shader_glslc_capture on` makes `shader_split.py` read that folder. The NSP script needs it beside the extracted RomFS (`<id>_build/extract/v327680/glslc_capture`): without it the split tables differ from the profile and the script stops.
+- **Host changes it needed** ([03](agents/03-bringup.md), [04](agents/04-graphics.md)):
+  - it submits on two NVN queues from two threads (submissions are serialized now);
+  - its command buffer records into one 16 MB ring chunk and frees the ring by `GetCommandMemoryUsed`, which now counts from the last `AddCommandMemory` as NVN does (frames stopped after about 15 s);
+  - its two texture pools and two sampler pools use the same IDs, now kept apart (menus showed plain bars or only the cursor);
+  - SDK 6's `account::OpenPreselectedUser` returns a Result (the save never mounted and the first loading screen never ended);
+  - SDK 6's audio command header has its own layout (no sound);
+  - its character shaders read Half2 UVs through integer-declared inputs, now converted to float32 bits at replay (black silhouettes, then flat tan characters);
+  - depth clamp is replayed.
+- **Open:** the river surface shows as flat blue in close-up battle cameras (the water writes no depth and the deferred lighting takes depth 0 for sky). One red line per run says a texture buffer is bound where a shader samples 2D.
+- **Memory:** about 3.5 GB resident and 2.8 GB of Metal allocations on the Mac; the game itself makes a 1.5 GB GPU-only memory pool.
+- **Frame rate:** 30 fps, as on the Switch.
+- **Mac input:** a fresh save needs `DM_KBD=<name>` for the name entry, and its confirm dialogs default to No. From a new game into the prologue battle (frame-based, about 6 minutes): `DM_KEYS="f360:A*185/45,f1200:Plus*35/219,f8700:A*120/250,f8760:Left~0.3*120/250,f8800:A*120/250,f9010:Plus*100/281"`; the game offers a save right before the battle.
 
 ## Tools (`dm/tools`)
 
