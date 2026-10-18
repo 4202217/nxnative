@@ -20,6 +20,7 @@ void *dm_pcmout_open(int ch);
 void dm_pcmout_start(void *k);
 int dm_pcmout_append(void *k, void *b);
 void *dm_pcmout_released(void *k);
+void dm_pcmout_wait(void *k, int ms);
 
 // P_SIZE: bytes of the game's AudioRendererParameter copied before the two fields are changed. SDK 16's struct is 0x38 bytes; SDK 8's (Link's Awakening) has one more word,
 // its revision at +0x38: copying only 0x38 left the revision uninitialized and the SDK rejected it (CheckValidRevision, Result 0x499). The SDK reads only its own size of the copy
@@ -58,10 +59,10 @@ static void render_main(void *arg) {
     dm_pcmout_start(out);
     LOG("audren：渲染线程开跑（%d 块缓冲在途，节奏跟输出端）", NBUF);
     while (atomic_load(&g_open)) {
-        while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms)
+        while (!nfree) {   // wait for the output to hand a block back (silent sink / sound card, one every 5 ms); it signals each release, so the thread sleeps until then (it used to poll every 1 ms)
             gbuf *b = dm_pcmout_released(out);
             if (b) { free_list[nfree++] = b; break; }
-            usleep(1000);
+            dm_pcmout_wait(out, 10);
             if (!atomic_load(&g_open)) return;
         }
         const int16_t *src; int got;

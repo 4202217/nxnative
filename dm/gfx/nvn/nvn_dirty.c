@@ -90,6 +90,22 @@ static int on_fault(void *addr, int is_write, void *uc) {
         { range_t *r = rg(i); if (live_at(i) && a >= r->base && a < r->end) ours |= release_page(r, (a - r->base) >> g_shift, &g_faults); }
     return ours;
 }
+// Unprotect pages p..q of a range with one mprotect per run of protected pages (a host write over a whole texture, e.g. WriteTexels, used to make one system call per 16 KB page:
+// Link's Awakening, about 275 a frame). Pages another thread is changing are handled one by one after the run so far is finished, so no BUSY page is held while waiting
+static void release_pages(range_t *r, uintptr_t p, uintptr_t q, _Atomic uint64_t *count) {
+    uintptr_t run = 0; int open = 0;
+    for (uintptr_t i = p; i <= q + 1; i++) {
+        uint8_t st = PG_PROT; int took = i <= q && atomic_compare_exchange_strong(&r->state[i], &st, PG_BUSY);
+        if (took) { if (!open) { run = i; open = 1; } continue; }
+        if (open) {
+            mp(r->base + (run << g_shift), (i - run) << g_shift, PROT_READ | PROT_WRITE);
+            for (uintptr_t k = run; k < i; k++) { atomic_store(&r->gen[k], atomic_fetch_add(&g_now, 1) + 1); atomic_store(&r->state[k], PG_NONE); }
+            if (count) atomic_fetch_add(count, i - run);
+            open = 0;
+        }
+        if (i <= q && st == PG_BUSY) release_page(r, i, count);   // another thread is changing it: wait, then unprotect it if it ended up protected
+    }
+}
 static void prep_write(void *addr, size_t len) {
     uintptr_t a = (uintptr_t)addr, e = a + len; int n = atomic_load(&g_nr);
     if (!len) return;
@@ -97,7 +113,7 @@ static void prep_write(void *addr, size_t len) {
         range_t *r = rg(i);
         if (!live_at(i) || e <= r->base || a >= r->end) continue;
         uintptr_t lo = a > r->base ? a : r->base, hi = e < r->end ? e : r->end;
-        for (uintptr_t p = (lo - r->base) >> g_shift, q = (hi - 1 - r->base) >> g_shift; p <= q; p++) release_page(r, p, &g_preps);
+        release_pages(r, (lo - r->base) >> g_shift, (hi - 1 - r->base) >> g_shift, &g_preps);
     }
 }
 
@@ -151,6 +167,8 @@ void nvn_dirty_remove_range(const void *mem) {
 int nvn_dirty_tracked(const void *addr, size_t len) {
     return find_span((uintptr_t)addr, len) != NULL;
 }
+// The tracked range holding [addr, addr+len), as a handle a caller keeps (packaged textures: the scan over every range ran twice per texture lookup). NULL = untracked
+const void *nvn_dirty_span(const void *addr, size_t len) { return len ? find_span((uintptr_t)addr, len) : NULL; }
 // Set read-only: mark the pages BUSY first and mark them PROT only after mprotect has landed (for the order and the invariant see the state notes at the top of the file)
 void nvn_dirty_protect(const void *addr, size_t len) {
     range_t *r = len ? find_span((uintptr_t)addr, len) : NULL;
@@ -167,14 +185,16 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     }
 }
 uint64_t nvn_dirty_now(void) { return atomic_load(&g_now); }
-int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) {
+int nvn_dirty_since_span(const void *span, const void *addr, size_t len, uint64_t stamp) {
     if (!len) return 0;
-    range_t *r = find_span((uintptr_t)addr, len);
+    range_t *r = (range_t *)span; uintptr_t a0 = (uintptr_t)addr;   // the kept handle still holds the span (a slot reused by another pool over the same memory is as good): no scan
+    if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || a0 < r->base || a0 + len > r->end) r = find_span(a0, len);
     if (!r) return 1;   // When untracked, conservatively treat as dirty: better to upload more than to show stale content
     uintptr_t a = (uintptr_t)addr, p = (a - r->base) >> g_shift, q = (a + len - 1 - r->base) >> g_shift;
     for (uintptr_t i = p; i <= q; i++) if (atomic_load(&r->gen[i]) > stamp) return 1;   // The generation of the last write before upload is <= the stamp; any later write must be > the stamp
     return 0;
 }
+int nvn_dirty_since(const void *addr, size_t len, uint64_t stamp) { return nvn_dirty_since_span(NULL, addr, len, stamp); }
 void nvn_dirty_slot_stats(int *live, int *used_slots, uint64_t *adds_total) {
     int n = atomic_load(&g_nr), active = 0;
     for (int i = 0; i < n; i++) active += live_at(i) != 0;

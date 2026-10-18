@@ -1050,6 +1050,9 @@ static uint64_t present_period(const win_t *o);
 static int present_itv(const win_t *o);
 __attribute__((weak)) void dm_main_yield_stats(uint64_t *n, uint64_t *ns) { *n = 0; *ns = 0; }   // The host's hle_thread.c provides the ground truth; 0 in graphics unit tests
 __attribute__((weak)) uint32_t dm_guest_work_qos(unsigned *count) { if (count) *count = 0; return QOS_CLASS_UNSPECIFIED; }
+__attribute__((weak)) void dm_yield_top(char *out, size_t n) { if (n) snprintf(out, n, "-"); }   // hle_thread.c: the threads that yielded most since the last call; none in graphics unit tests
+void mtl_res_stats(char *out, size_t n);
+void mtl_barrier_stats(uint64_t *skip, uint64_t *full);
 extern uint32_t mtl_present_qos(void);
 static uint64_t g_frame;
 static uint64_t g_acq_wait_ns, g_pq_wait_ns;   // Accumulated display-link wait / wait for the present queue to return inside acquire, recorded per frame at present (there can be several acquires within one frame)
@@ -1145,6 +1148,30 @@ void nvn_gpu_recent(double *avg, double *p95, unsigned *n) {
     qsort(v, c, sizeof *v, dcmp); *n = c; *avg = c ? s / c : -1; *p95 = c ? v[(c * 95) / 100 < c ? (c * 95) / 100 : c - 1] : -1;
 }
 static int dcmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }
+// Power over the window since the last summary, for the whole process: CPU energy (task_energy in nJ, Apple silicon), CPU time (100% = one core) and the share of it on performance cores,
+// wakeups per second (interrupt / out of platform idle), GPU time per second (task_gpu_utilisation), thermal state, and the guest threads that yielded most (hle_thread.c)
+static void power_line(uint64_t frame) {
+    static uint64_t pt, pe, pcpu, pp, piw, ppw, pg, pf; static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
+    task_power_info_v2_data_t pw; mach_msg_type_number_t n = TASK_POWER_INFO_V2_COUNT;
+    if (task_info(mach_task_self(), TASK_POWER_INFO_V2, (task_info_t)&pw, &n) != KERN_SUCCESS) return;
+    uint64_t t = now_ns(), cpu = (pw.cpu_energy.total_user + pw.cpu_energy.total_system) * tb.numer / tb.denom, p = pw.task_ptime * tb.numer / tb.denom;
+#if defined(__arm64__)
+    uint64_t e = pw.task_energy;
+#else
+    uint64_t e = 0;
+#endif
+    uint64_t iw = pw.cpu_energy.task_interrupt_wakeups, idw = pw.cpu_energy.task_platform_idle_wakeups, g = pw.gpu_energy.task_gpu_utilisation;
+    if (pt && t > pt) { double s = (t - pt) / 1e9; char yt[192]; dm_yield_top(yt, sizeof yt);
+        double nf = frame > pf ? (double)(frame - pf) : 1;   // per frame: the fair comparison when one build holds the frame rate better than another
+        LOG("[nvn] 功耗 至帧 %llu：CPU 能耗 %.2f W，每帧 %.1f mJ（%.1f 帧/秒）；CPU %.0f%%（100 = 一个核）其中性能核 %.0f%%；唤醒 %.0f 次/秒（其中出平台空闲 %.0f）；GPU %.1f ms/秒；温控 %d；让出最多：%s", frame,
+            (e - pe) / 1e9 / s, (e - pe) / 1e6 / nf, nf / s, (cpu - pcpu) / 1e7 / s, cpu > pcpu ? 100.0 * (double)(p - pp) / (double)(cpu - pcpu) : 0, (iw - piw) / s, (idw - ppw) / s, (g - pg) / 1e6 / s, dm_thermal_now(), yt);
+        char rs[400]; mtl_res_stats(rs, sizeof rs); static uint64_t pbs, pbf; uint64_t bs, bf; mtl_barrier_stats(&bs, &bf);
+        uint64_t mtl_cut_count(void), mtl_blit_splits(void); void mtl_ubd_stats(uint64_t *, uint64_t *); static uint64_t pcut, pbsp, pud, puc; uint64_t cut = mtl_cut_count(), bsp = mtl_blit_splits(), ud, uc; mtl_ubd_stats(&ud, &uc);
+        LOG("[nvn] 驻留集 至帧 %llu：%s；绘制通道开头屏障 全 %llu / 省 %llu；分段提交 %llu 次；拷贝 / 缓冲更新打断通道 %llu 次；通道内 uniform 更新推迟 %llu 次、因读取需要先落地结束通道 %llu 次", frame, rs, (unsigned long long)(bf - pbf), (unsigned long long)(bs - pbs),
+            (unsigned long long)(cut - pcut), (unsigned long long)(bsp - pbsp), (unsigned long long)(ud - pud), (unsigned long long)(uc - puc)); pbs = bs; pbf = bf; pcut = cut; pbsp = bsp; pud = ud; puc = uc; }
+    else { char yt[192], rs[400]; dm_yield_top(yt, sizeof yt); mtl_res_stats(rs, sizeof rs); }   // the first call only takes the baseline
+    pt = t; pe = e; pcpu = cpu; pp = p; piw = iw; ppw = idw; pg = g; pf = frame;
+}
 static void tsummary(uint64_t frame) {
     char line[1024]; size_t o = 0;
     for (int k = 0; k < 6; k++) {
@@ -1163,6 +1190,7 @@ static void tsummary(uint64_t frame) {
       double br = dm_brightness_now();   // footprint / brightness are carried on the on-screen present row: does not depend on the tick-entry observation gate (camp runs have it too)
       if (k) { qsort(v, k, sizeof *v, dcmp); LOG("[nvn] 上屏 至帧 %llu：%u 帧，掉帧 %u（丢弃 %u），p99 %.2f ms；footprint %.0f MiB；亮度 %.2f；温控 %d", frame, k + discard, drop, discard, v[(k * 99) / 100 < k ? (k * 99) / 100 : k - 1], fp, br, dm_thermal_now()); }
       g_presn = 0; }
+    power_line(frame);
     { static uint64_t pi, pc, pd, pf; uint64_t ci = atomic_load(&g_cum_sub_instr), cc = atomic_load(&g_cum_sub_cpu_ns), ps_, dr_; mtl_stats(&ps_, &dr_);   // translation layer
       if (pf && frame > pf && dr_ > pd) LOG("[nvn] 翻译 至帧 %llu：每次绘制 %.0f 条指令，每帧提交 %.2f M 条 / CPU %.3f ms，每帧绘制 %.0f", frame,
           (double)(ci - pi) / (double)(dr_ - pd), (ci - pi) / 1e6 / (double)(frame - pf), (cc - pc) / 1e6 / (double)(frame - pf), (double)(dr_ - pd) / (double)(frame - pf));
@@ -1219,7 +1247,10 @@ static void slow_emit(uint64_t f) {
 // The computation used to be hard-coded at 2 ms, while the game main thread (game logic + recording + submit replay) takes about 10 ms per frame when hot - a 5× gap between declared and actual:
 // a real-time thread that exceeds its declared computation gets demoted by the system, and the performance controller also sets frequency from the declaration (this declaration is how the system learns the frame deadline and the workload).
 // DM_RT_COMP=<ms> fixes the declaration; default auto = every 120 frames take the p90 of this thread's per-frame CPU time and re-declare if it differs from the declared value by > 15% (capped at 0.9 × period).
+// DM_RT=0 leaves the acquire thread on the standard policy (its QoS only), for power A/B: the real-time declaration is how the performance controller learns the frame deadline, and it may hold the clock up for it
+static int rt_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_RT"); v = !(e && !strcmp(e, "0")); if (!v) LOG("[nvn] DM_RT=0：出图线程不设时间约束策略（只按 QoS）"); } return v; }
 static void set_time_constraint_comp(uint64_t period_ns, uint64_t comp_ns) {
+    if (!rt_on()) return;
     static mach_timebase_info_data_t tb; if (!tb.denom) mach_timebase_info(&tb);
     if (comp_ns < 1000000ull) comp_ns = 1000000ull; if (comp_ns > period_ns * 9 / 10) comp_ns = period_ns * 9 / 10;
     thread_time_constraint_policy_data_t p = {

@@ -166,10 +166,11 @@ Comparison and testing:
 
 | Switch | Effect |
 |---|---|
-| `DM_NVN_TBDR=0` | Turns off all pass optimizations in the replay layer and takes the plainest path of "all attachments attached, all loaded, all stored", for equivalence comparison |
-| `DM_NVN_UNWRITTEN_DC=0` | Turns off the single item "attachments not written in this pass are not stored" |
+| `DM_NVN_TBDR=1` | Turns on the pass optimizations of the replay layer (store / load elision, pass merging). They are off by default: they infer which textures a draw reads from its bound slots, which bindless textures defeat ([docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 4) |
+| `DM_NVN_UNWRITTEN_DC=0` | With `DM_NVN_TBDR=1`, turns off the single item "attachments not written in this pass are not stored" |
 | `DM_NVN_FUSE_CHECK=1` | Same-frame check of pass merging; logs the comparison result every time |
 | `DM_FPS=30` or `60` | Pins the target frame rate |
+| `DM_NVN_BARRIER=game`, `DM_NVN_CUT` | Pass ordering and segment commits: see [docs/agents/04-graphics.md](../../docs/agents/04-graphics.md) section 7 |
 | `DM_PRESENT_HZ=N` | The frequency of presentation pacing (default 60); 0 means no frame limit and is for performance profiling only |
 
 ## Known limitations

@@ -26,6 +26,7 @@ typedef struct {
     pthread_t null_th; _Atomic int null_run;
     dispatch_semaphore_t notify_sem;
     pthread_t notify_th; _Atomic int notify_run, notify_pending, notify_armed;
+    dispatch_semaphore_t rel_sem;      // Host outputs only (dm_pcmout_open): signaled for each release, so the in-process audio renderer blocks instead of polling (dm_pcmout_wait)
     int id;                            // open sequence number (#N in the log; tells simultaneous outputs apart, e.g. Engage's Wwise and Unity's built-in FMOD)
     int nlog;                          // Start / Stop / Close lines logged so far (at most 32 per output)
     _Atomic uint64_t under_n, under_b; // underruns: times the pending queue was empty when the callback needed data / zero-filled bytes
@@ -95,7 +96,10 @@ static void pull(aout *a, uint8_t *dst, uint64_t n) {
             a->pos = 0; released = 1;
         }
     }
-    if (released) notify_release(a);
+    if (released) {
+        if (a->event) notify_release(a);   // the notify thread only signals the guest's event: outputs without one (the host's renderer output, games that poll) need no wake-up
+        if (a->rel_sem) dispatch_semaphore_signal(a->rel_sem);
+    }
 }
 
 static _Atomic uint64_t g_render_calls;   // Cumulative sound card callbacks (lifecycle verification: must keep growing after resume)
@@ -268,8 +272,11 @@ HLE_FORCE("_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE", "取已播�
 void *dm_pcmout_open(int ch) {
     void *key = calloc(1, 64); uint8_t param[8] = {0}; *(uint16_t *)(param + 4) = (uint16_t)ch;
     if (au_open_at(key, NULL, "AudioRenderer", param, NULL)) die("宿主 PCM 输出打不开");
+    ao(key)->rel_sem = dispatch_semaphore_create(0);
     return key;
 }
+// Wait until the output releases a block, at most ms milliseconds (spurious returns are fine: the caller checks dm_pcmout_released again)
+void dm_pcmout_wait(void *k, int ms) { dispatch_semaphore_wait(ao(k)->rel_sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * 1000000)); }
 void dm_pcmout_start(void *k) { au_start_at(k, NULL); }
 int dm_pcmout_append(void *k, void *b) { return (int)h_au_Append(k, b); }
 void *dm_pcmout_released(void *k) { return h_au_Released(k); }

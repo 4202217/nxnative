@@ -15,6 +15,7 @@ void front_ios_boot(void);
 int front_ios_boot_ok(void);
 
 static CAMetalLayer *g_layer;
+static void front_ios_power_watch(void);
 
 @interface DmGameView : UIView
 @end
@@ -44,6 +45,7 @@ static CAMetalLayer *g_layer;
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
+    front_ios_power_watch();
     if (!front_ios_boot_ok()) {   // No game files: show a hint and do not start the host
         UILabel *lb = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 40, 40)];
         lb.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -72,6 +74,19 @@ static CAMetalLayer *g_layer;
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
+
+// Thermal state and screen brightness for the power and present rows every 300 frames (hle_nvn.c; its weak defaults return -1 on the Mac). thermalState: 0 nominal, 1 fair, 2 serious, 3 critical.
+// Brightness is read on the main thread at start and on each change; every change of the thermal state is logged with the time since launch
+static _Atomic double g_brightness = -1;
+int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
+double dm_brightness_now(void) { return g_brightness; }
+static void front_ios_power_watch(void) {
+    g_brightness = UIScreen.mainScreen.brightness;
+    [NSNotificationCenter.defaultCenter addObserverForName:UIScreenBrightnessDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; g_brightness = UIScreen.mainScreen.brightness; }];
+    [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoThermalStateDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+        (void)n; LOG("前端：温控状态 → %d（启动后 %.0f s）", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
+    LOG("前端：温控状态 %d，亮度 %.2f", dm_thermal_now(), g_brightness);
+}
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
 uint64_t front_game_res(int docked) { return docked ? 900ull << 32 | 1600 : 720ull << 32 | 1280; }   // Same as Mac: the original 16:9 constants
