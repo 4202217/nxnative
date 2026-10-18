@@ -31,15 +31,16 @@ All of these are tested on an iPhone and playable:
 | Super Mario 3D World + Bowser's Fury | base game + update 1.2.2 | ~3 GB | |
 | The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | Upgraded to 60 fps (30 fps on Switch) |
 | The Legend of Zelda: Link's Awakening | base game + update 1.1.0 | ~6 GB | |
+| Super Mario Odyssey | base game + update 1.4.1 | ~6 GB | |
 
-Being ported: Super Mario Odyssey (base game + update 1.4.1) and Hades (base game + update 1.0.38233). Both play on the Mac; their iPhone builds are not tested yet, and the script cannot pack Hades yet.
+Being ported: Hades (base game + update 1.0.38233). It plays on the Mac; its iPhone build is not tested yet, and the script cannot pack it yet.
 
 | | |
 |:---:|:---:|
 | ![Super Mario Bros. Wonder](docs/images/super-mario-bros-wonder.jpg)<br>Super Mario Bros. Wonder | ![Fire Emblem Engage](docs/images/fire-emblem-engage.jpg)<br>Fire Emblem Engage |
 | ![Metroid Dread](docs/images/metroid-dread.jpg)<br>Metroid Dread | ![13 Sentinels: Aegis Rim](docs/images/13-sentinels.jpg)<br>13 Sentinels: Aegis Rim |
 | ![Super Mario 3D World + Bowser's Fury](docs/images/super-mario-3d-world.jpg)<br>Super Mario 3D World + Bowser's Fury | ![The Legend of Zelda: Breath of the Wild](docs/images/zelda-breath-of-the-wild.jpg)<br>The Legend of Zelda: Breath of the Wild |
-| ![The Legend of Zelda: Link's Awakening](docs/images/zelda-links-awakening.jpg)<br>The Legend of Zelda: Link's Awakening | |
+| ![The Legend of Zelda: Link's Awakening](docs/images/zelda-links-awakening.jpg)<br>The Legend of Zelda: Link's Awakening | ![Super Mario Odyssey](docs/images/super-mario-odyssey.jpg)<br>Super Mario Odyssey |
 
 Needs iOS / iPadOS 26 or later on an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later: the games' textures are BC-compressed, and older iPhones can't read that format. Other games aren't supported yet. For them the script writes a survey and still tries its best to pack an IPA, guessing the game's settings; such an IPA may not start.
 
@@ -74,7 +75,7 @@ The IPA appears in the same folder (here `~/Games/MarioWonder/SMBWMobile.ipa`). 
 
 ## Play
 
-**Touch controls.** Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice. 3D World and Breath of the Wild start in 3D, the other games in 2D.
+**Touch controls.** Tap **2D** / **3D** at the top to switch layouts; the app remembers your choice. 3D World, Breath of the Wild and Odyssey start in 3D, the other games in 2D.
 A connected game controller hides the touch controls and keeps every button.
 
 - **Game language** is English by default. For Chinese, add the line `DM_LANG=zh-Hans` to `Documents/env.txt`.
