@@ -101,6 +101,21 @@ static class SwshXlate
         // 作业 reduced = true：放宽精度——翻译器只给强制精确的运算打 NoContraction（缺省全部打：保持 Maxwell 分开舍入的逐位结果，代价是 MSL 里大量禁优化的 spvFMul 等）
         // Job reduced = true: relaxed precision - the translator marks NoContraction only on operations that must be exact (the default marks all: keeps the bit-exact results of Maxwell's separate rounding, at the cost of many optimization-disabled spvFMul etc. in the MSL)
         public bool QueryHostReducedPrecision() => _job["reduced"] is JsonNode n && (bool)n;
+        // Job softfloat64 = true: the host has no FP64, so Ryujinx's DoubleToFloat pass lowers double operations to float (Metal has no double type). Set only on the retry of a
+        // shader whose first translation declared a 64-bit float (see Main): answering "no" for every shader would also drop the Float64 capability from all the others
+        public bool QueryHostSupportsShaderFloat64() => !(_job["softfloat64"] is JsonNode n && (bool)n);
+    }
+
+    // True when the SPIR-V declares a 64-bit float type (OpTypeFloat 64): SPIRV-Cross then writes double, which the Metal compiler rejects
+    static bool UsesFloat64(byte[] spirv)
+    {
+        for (int i = 20; i + 12 <= spirv.Length; )
+        {
+            uint word = BitConverter.ToUInt32(spirv, i);
+            if ((word & 0xffff) == 22 && (word >> 16) == 3 && BitConverter.ToUInt32(spirv, i + 8) == 64) return true;
+            i += Math.Max(1, (int)(word >> 16)) * 4;
+        }
+        return false;
     }
 
     static int Main(string[] args)
@@ -126,7 +141,13 @@ static class SwshXlate
                 var flags = (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) | ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0);
                 var ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
                 ShaderProgram p = ctx.Translate();
-                File.WriteAllBytes(Path.Combine(outDir, key + ".spv"), p.BinaryCode);
+                if (UsesFloat64(p.BinaryCode))   // Tears of the Kingdom 1.4.3: 30 shaders used double and failed in the Metal compiler
+                {
+                    job["softfloat64"] = true; acc = new Accessor(code, job);
+                    ctx = Translator.CreateContext(0, acc, new TranslationOptions(TargetLanguage.Spirv, TargetApi.Vulkan, flags));
+                    p = ctx.Translate(); acc.Notes.Add("FP64 lowered to FP32 (DoubleToFloat)");
+                }
+                File.WriteAllBytes(Path.Combine(outDir, key + ".spv"), VertexCounterLowering.Apply(code, (string)job["stage"], p.BinaryCode, acc.Notes));
                 var res = new JsonObject
                 {
                     ["key"] = key, ["stage"] = (string)job["stage"], ["notes"] = new JsonArray(acc.Notes.ConvertAll(n => (JsonNode)n).ToArray()),
@@ -144,5 +165,50 @@ static class SwshXlate
         }
         Console.WriteLine($"翻译 {ok} 成功，{bad} 失败");
         return bad == 0 ? 0 : 1;
+    }
+}
+
+// Tears of the Kingdom 1.4.3 visibility counter (one vertex shader, exact code SHA-256 below): each invocation that passes its test joins a subgroup ballot, and the
+// highest active lane adds popcount(ballot) to s1[0]. SPIRV-Cross cannot give a Metal vertex function the subgroup builtins ("Subgroup builtins are not available in
+// this type of function"), so the shader never built and its draws were skipped. Lowered to singleton groups: lane id 0 and ballot(true) = (1, 0, 0, 0), so every passing
+// invocation adds one; the atomic's result is unused, so the final sum (mod 2^32) is the same. Not a general subgroup fallback: it runs only on these analysed bytes.
+// Adapted from MacNativeGames (games/totk/tools/totk_xlate/VertexCounterLowering.cs, https://github.com/ly05010419/MacNativeGames), MIT License: dm/third_party/macnativegames/LICENSE.
+static class VertexCounterLowering
+{
+    const string InstanceCodeHash = "F5F4D23149565ACD852F6B7091F64CC8CB3AA019CCB33BA3F88CED62C6D1FF7B";
+
+    internal static byte[] Apply(byte[] code, string stage, byte[] spirv, List<string> notes)
+    {
+        if (stage != "vs" || Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(code)) != InstanceCodeHash) return spirv;
+        uint[] w = new uint[spirv.Length / 4]; Buffer.BlockCopy(spirv, 0, w, 0, spirv.Length);
+        uint lane = 0, uintType = 0, vectorType = 0, trueId = 0; int ballots = 0, loads = 0;
+        for (int i = 5; i < w.Length; i += (int)(w[i] >> 16))
+        {
+            uint op = w[i] & 65535;
+            if (op == 71 && w[i + 2] == 11 && w[i + 3] == 41) lane = w[i + 1];   // OpDecorate BuiltIn SubgroupLocalInvocationId
+            if (op == 21 && w[i + 2] == 32 && w[i + 3] == 0) uintType = w[i + 1];   // OpTypeInt 32 unsigned
+            if (op == 41) trueId = w[i + 2];   // OpConstantTrue
+            if (op == 339) { vectorType = w[i + 1]; ballots++; if (w[i + 4] != trueId) throw new InvalidOperationException("visibility counter: ballot predicate changed"); }   // OpGroupNonUniformBallot
+        }
+        if (lane == 0 || uintType == 0 || vectorType == 0 || ballots != 1) throw new InvalidOperationException("visibility counter: SPIR-V shape changed");
+        uint zero = w[3]++, one = w[3]++, mask = w[3]++;   // new ids past the bound
+        var result = new List<uint>(w.Length + 16); result.AddRange(w.AsSpan(0, 5).ToArray());
+        bool constants = false;
+        for (int i = 5; i < w.Length; i += (int)(w[i] >> 16))
+        {
+            uint op = w[i] & 65535;
+            if (op == 54 && !constants)   // before the first OpFunction: uint 0, uint 1, uvec4(1, 0, 0, 0)
+            {
+                result.AddRange(new uint[] { (4u << 16) | 43, uintType, zero, 0, (4u << 16) | 43, uintType, one, 1, (7u << 16) | 44, vectorType, mask, one, zero, zero, zero });
+                constants = true;
+            }
+            if (op == 61 && w[i + 3] == lane) { result.AddRange(new uint[] { (4u << 16) | 83, w[i + 1], w[i + 2], zero }); loads++; }   // OpLoad lane id -> OpCopyObject 0
+            else if (op == 339) result.AddRange(new uint[] { (4u << 16) | 83, w[i + 1], w[i + 2], mask });   // ballot(true) -> OpCopyObject (1, 0, 0, 0)
+            else result.AddRange(w.AsSpan(i, (int)(w[i] >> 16)).ToArray());
+        }
+        if (loads != 1 || !constants) throw new InvalidOperationException("visibility counter: lane id use changed");
+        notes.Add("visibility counter lowered to singleton groups (one atomic add per passing vertex)");
+        byte[] output = new byte[result.Count * 4]; Buffer.BlockCopy(result.ToArray(), 0, output, 0, output.Length);
+        return output;
     }
 }
