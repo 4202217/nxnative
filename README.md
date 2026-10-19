@@ -22,22 +22,19 @@ This project is built on other people's work:
 
 All of these are tested on an iPhone and playable:
 
-| Game | IPA |
-|---|---|
-| Super Mario Bros. Wonder | ~4 GB |
-| Fire Emblem Engage | ~15 GB |
-| Metroid Dread | ~5 GB |
-| 13 Sentinels: Aegis Rim | ~5 GB |
-| Super Mario 3D World + Bowser's Fury | ~3 GB |
-| The Legend of Zelda: Breath of the Wild | ~16 GB |
-| The Legend of Zelda: Link's Awakening | ~6 GB |
-| Super Mario Odyssey | ~6 GB |
-| Hades | ~4 GB |
-| Hyrule Warriors: Age of Calamity | ~15 GB |
-| Fire Emblem: Three Houses | ~13 GB |
-
-- **Fire Emblem Engage and Breath of the Wild:** upgraded to 60 fps (30 fps on Switch).
-- **Fire Emblem: Three Houses:** while packing, the script starts the game on the Mac for a few seconds to collect the shaders it builds as it runs.
+| Game | IPA | Notes |
+|---|---|---|
+| Super Mario Bros. Wonder | ~4 GB | |
+| Fire Emblem Engage | ~15 GB | 60 fps<br>(30 fps on Switch) |
+| Metroid Dread | ~5 GB | |
+| 13 Sentinels: Aegis Rim | ~5 GB | |
+| Super Mario 3D World + Bowser's Fury | ~3 GB | |
+| The Legend of Zelda: Breath of the Wild | ~16 GB | 60 fps<br>(30 fps on Switch) |
+| The Legend of Zelda: Link's Awakening | ~6 GB | |
+| Super Mario Odyssey | ~6 GB | |
+| Hades | ~4 GB | |
+| Hyrule Warriors: Age of Calamity | ~15 GB | |
+| Fire Emblem: Three Houses | ~13 GB | Brief Mac launch<br>during packing to<br>collect runtime shaders |
 
 Being ported:
 
