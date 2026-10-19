@@ -22,19 +22,19 @@ This project is built on other people's work:
 
 All of these are tested on an iPhone and playable:
 
-| Game | NSPs to put in the folder | IPA | Notes |
-|---|---|---|---|
-| Super Mario Bros. Wonder | base game + update 1.2.1 | ~4 GB | |
-| Fire Emblem Engage | base game + update 2.0.0 (+ Expansion Pass DLC) | ~15 GB | Upgraded to 60 fps (30 fps on Switch) |
-| Metroid Dread | base game + update 2.1.0 | ~5 GB | |
-| 13 Sentinels: Aegis Rim | base game + update 1.10 | ~5 GB | |
-| Super Mario 3D World + Bowser's Fury | base game + update 1.2.2 | ~3 GB | |
-| The Legend of Zelda: Breath of the Wild | base game + update 1.9.0 (+ DLC) | ~16 GB | Upgraded to 60 fps (30 fps on Switch) |
-| The Legend of Zelda: Link's Awakening | base game + update 1.1.0 | ~6 GB | |
-| Super Mario Odyssey | base game + update 1.4.1 | ~6 GB | |
-| Hades | base game + update 1.0.38233 | ~4 GB | |
-| Hyrule Warriors: Age of Calamity | base game + update 1.3.0 (+ DLC) | ~15 GB | |
-| Fire Emblem: Three Houses | base game + update 1.2.0 (+ DLC) | ~13 GB | While packing, the script starts the game on the Mac for a few seconds to collect the shaders it builds as it runs |
+| Game | IPA | Notes |
+|---|---|---|
+| Super Mario Bros. Wonder | ~4 GB | |
+| Fire Emblem Engage | ~15 GB | Upgraded to 60 fps (30 fps on Switch) |
+| Metroid Dread | ~5 GB | |
+| 13 Sentinels: Aegis Rim | ~5 GB | |
+| Super Mario 3D World + Bowser's Fury | ~3 GB | |
+| The Legend of Zelda: Breath of the Wild | ~16 GB | Upgraded to 60 fps (30 fps on Switch) |
+| The Legend of Zelda: Link's Awakening | ~6 GB | |
+| Super Mario Odyssey | ~6 GB | |
+| Hades | ~4 GB | |
+| Hyrule Warriors: Age of Calamity | ~15 GB | |
+| Fire Emblem: Three Houses | ~13 GB | While packing, the script starts the game on the Mac for a few seconds to collect the shaders it builds as it runs |
 
 Being ported:
 
