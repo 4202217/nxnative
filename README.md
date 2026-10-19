@@ -24,17 +24,17 @@ All of these are tested on an iPhone and playable:
 
 | Game | IPA | Notes |
 |---|---|---|
-| Super Mario Bros. Wonder | ~4 GB | |
-| Fire Emblem Engage | ~15 GB | 60 fps<br>(30 fps on Switch) |
-| Metroid Dread | ~5 GB | |
-| 13 Sentinels: Aegis Rim | ~5 GB | |
-| Super Mario 3D World + Bowser's Fury | ~3 GB | |
-| The Legend of Zelda: Breath of the Wild | ~16 GB | 60 fps<br>(30 fps on Switch) |
-| The Legend of Zelda: Link's Awakening | ~6 GB | |
-| Super Mario Odyssey | ~6 GB | |
-| Hades | ~4 GB | |
-| Hyrule Warriors: Age of Calamity | ~15 GB | |
-| Fire Emblem: Three Houses | ~13 GB | Brief Mac launch<br>during packing to<br>collect runtime shaders |
+| Super&nbsp;Mario&nbsp;Bros.&nbsp;Wonder | ~4&nbsp;GB | |
+| Fire&nbsp;Emblem&nbsp;Engage | ~15&nbsp;GB | Upgraded to 60 fps (30 fps on Switch) |
+| Metroid&nbsp;Dread | ~5&nbsp;GB | |
+| 13&nbsp;Sentinels:&nbsp;Aegis&nbsp;Rim | ~5&nbsp;GB | |
+| Super&nbsp;Mario&nbsp;3D&nbsp;World&nbsp;+&nbsp;Bowser's&nbsp;Fury | ~3&nbsp;GB | |
+| The&nbsp;Legend&nbsp;of&nbsp;Zelda:&nbsp;Breath&nbsp;of&nbsp;the&nbsp;Wild | ~16&nbsp;GB | Upgraded to 60 fps (30 fps on Switch) |
+| The&nbsp;Legend&nbsp;of&nbsp;Zelda:&nbsp;Link's&nbsp;Awakening | ~6&nbsp;GB | |
+| Super&nbsp;Mario&nbsp;Odyssey | ~6&nbsp;GB | |
+| Hades | ~4&nbsp;GB | |
+| Hyrule&nbsp;Warriors:&nbsp;Age&nbsp;of&nbsp;Calamity | ~15&nbsp;GB | |
+| Fire&nbsp;Emblem:&nbsp;Three&nbsp;Houses | ~13&nbsp;GB | While packing, the script starts the game on the Mac for a few seconds to collect the shaders it builds as it runs |
 
 Being ported:
 
