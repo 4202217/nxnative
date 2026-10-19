@@ -565,13 +565,19 @@ void svc_thread_dump(void) {
 // On per the game profile's core_preempt (off by default: Mario's loader threads would wait for busy high-priority decompression threads, pushing its first frame from 0.6 s to 2.9 s); DM_PREEMPT=0 / 1 overrides the profile. Counts are in the thread state dump
 static int svc_thread_impl(int num, uint64_t *regs);
 // Yield back-off: on the Switch a yield with nothing else runnable costs nothing, but a guest loop that polls the tick and yields (Three Houses' frame limiter main+0x5be430 waits out each 33 ms frame this way:
-// 228,105 yields per frame on an iPhone, a P-core at full clock) becomes a host busy spin. A run of yields with no other SVC between them is let through as plain sched_yield for its first 200 µs
-// (short polls such as Mario's task graph wait, 139 yields a frame, are unchanged); after that each yield sleeps an eighth of the run so far, between 10 and 250 µs, so a wait ends at most an eighth late
-// (a 23 ms limiter wait: about 120 sleeps instead of 200k yields, ending at most 250 µs late). Returns the sleep for a yield whose run started `run_ns` ago (0 = plain yield).
-// DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<µs> sets the cap
+// 228,105 yields per frame on an iPhone, a P-core at full clock) becomes a host busy spin. A run of yields with no other SVC between them is let through as plain sched_yield for its first 2 ms;
+// after that each yield sleeps an eighth of the run so far, between 10 and 250 µs (a 23 ms limiter wait: about 90 sleeps instead of 200k yields, ending at most 250 µs late; idle workers polling for jobs the same).
+// The back-off used to start after 200 µs: that also caught Tears of the Kingdom's main thread waiting for its ModuleSystem workers (about 350 yields a frame, runs of a few hundred µs on the
+// frame's critical path). A sleep that overran the moment the workers finished pushed frames past 33 ms, and the game then drops itself to present interval 3 (20 fps) for a while:
+// Mac frame p95 34.5 → 41 ms with 7 drops per 300 frames; on the iPhone the threads also looked idle to the performance controller, which kept them on efficiency cores at 1.5 GHz.
+// Waits under 2 ms are handoffs between threads that do work; waits beyond it are limiters and idle polls. Returns the sleep for a yield whose run started `run_ns` ago (0 = plain yield).
+// DM_YIELD_BACKOFF=0 turns it off; DM_YIELD_BACKOFF=<cap µs>[:<start µs>] sets the cap and the run length after which it starts (default 250:2000)
 static uint64_t yield_backoff_ns(uint64_t run_ns) {
-    static int64_t cap = -1; if (cap < 0) { const char *e = getenv("DM_YIELD_BACKOFF"); cap = e && *e ? atoll(e) * 1000 : 250000; if (!cap) LOG("DM_YIELD_BACKOFF=0：连续让出不退避（原样 sched_yield 自旋）"); }
-    if (!cap || run_ns < 200000) return 0;
+    static int64_t cap = -1, start = 2000000;
+    if (cap < 0) { const char *e = getenv("DM_YIELD_BACKOFF"); cap = 250000;
+        if (e && *e) { cap = atoll(e) * 1000; const char *c = strchr(e, ':'); if (c) start = atoll(c + 1) * 1000; }
+        if (!cap) LOG("DM_YIELD_BACKOFF=0：连续让出不退避（原样 sched_yield 自旋）"); else if (e && *e) LOG("DM_YIELD_BACKOFF：连续让出 %lld µs 后退避，单次最多睡 %lld µs", (long long)(start / 1000), (long long)(cap / 1000)); }
+    if (!cap || run_ns < (uint64_t)start) return 0;
     uint64_t s = run_ns / 8; if (s < 10000) s = 10000;
     return s < (uint64_t)cap ? s : (uint64_t)cap;
 }
