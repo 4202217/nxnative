@@ -3,8 +3,10 @@
 // players 2..8 are full-key controllers on No2..No8 (ids 1..7) while the front end reports a controller for them (dm_pad_players; the Mac gives each physical controller a player
 // of its own, front_mac.m). A player whose npad the game does not support (SetSupportedNpadIdType) is not reported: in a one-player game it feeds player 1, otherwise it is not used.
 // Six-axis sensor: one per connected controller (two for handheld), at rest lying flat, player 1's shaken side to side while the front end holds DM_BTN_SHAKE (see the six-axis section below).
-// Vibration, mouse, keyboard: not provided by the host (device count 0 / not connected); the controller applet reports the connected players with player 1 selected.
+// Vibration goes to the haptics sink (hle_haptics.c); with no sink (the Mac host without DM_HAPTIC_FAKE) the host reports no devices, as before.
+// Mouse, keyboard: not provided by the host (not connected); the controller applet reports the connected players with player 1 selected.
 #include "hle.h"
+#include "hle_haptics.h"
 #include "dm_input.h"
 #include "front.h"
 #include <stdatomic.h>
@@ -328,15 +330,23 @@ HLE_FORCE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS
 HLE_FORCE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor; always sampling on the host", void, h_hid_SixStart, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", "six-axis sensor states: every requested entry, newest first",
           int, h_hid_SixStates, SixAxisState *out, int n, const uint32_t *h) { return six_states(out, n, *h); }
-// Vibration: no devices
-HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission; not supported by the host", unsigned, h_hid_VibPermit, void) { return 0; }
-HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "vibration devices: 0",
-          int, h_hid_VibHandles, void *h, int n, const uint32_t *id, uint32_t style) { (void)h; (void)n; (void)id; (void)style; return 0; }
-HLE_FORCE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", "vibration; not supported by the host", void, h_hid_InitVib, const void *h) { (void)h; }
-HLE_FORCE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", "vibration; not supported by the host", void, h_hid_SendVib, const void *h, const void *v) { (void)h; (void)v; }
+// Vibration: routed to the haptics sink (hle_haptics.c). With no sink the host reports no devices, which is what every game saw before haptics existed.
+HLE_FORCE("_ZN2nn3hid20IsVibrationPermittedEv", "vibration permission: true when a haptics sink is installed (iOS Core Haptics)", unsigned, h_hid_VibPermit, void) { return (unsigned)dm_haptics_supported(); }
+HLE_FORCE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "vibration devices: two motors per controller, handle (npad << 8) | motor",
+          int, h_hid_VibHandles, uint32_t *h, int n, const uint32_t *id, uint32_t style) {
+    (void)style;
+    if (!dm_haptics_supported() || n <= 0) return 0;
+    int k = n < 2 ? n : 2;
+    for (int i = 0; i < k; i++) h[i] = dm_haptics_handle((int)*id, i);
+    static int logged;
+    if (logged++ < 4) LOG("vibration: the game asked for %d device handles (npad %#x) -> %#x %#x", k, *id, h[0], k > 1 ? h[1] : 0);
+    return k;
+}
+HLE_FORCE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", "vibration: initialize one motor channel", void, h_hid_InitVib, const uint32_t *h) { dm_haptics_init_device(*h); }
+HLE_FORCE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", "vibration: hand a Switch vibration value to the haptics sink", void, h_hid_SendVib, const uint32_t *h, const dm_vib_value *v) { dm_haptics_send(*h, v); }
 // Values queued by the vibration graph (VibrationNode::Update) reach it from the sdk's internal FlushEnqueuedVibrationValues through the PLT, into the hid service proxy (sm abort). Metroid Dread
 // sets handles on its VibrationTargets even when the host reports 0 devices, so values get queued; return success and the flush clears its count as usual
-HLE_FORCE("_ZN2nn3hid6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", "vibration (batch, used by the vibration-pattern flush); not supported by the host", Result, h_hid_SendVibs, const void *h, const void *v, int n) { (void)h; (void)v; (void)n; return 0; }
+HLE_FORCE("_ZN2nn3hid6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", "vibration (batch, used by the vibration-pattern flush): each channel goes to the haptics sink", Result, h_hid_SendVibs, const uint32_t *h, const dm_vib_value *v, int n) { dm_haptics_send_many(h, v, n); return RES_OK; }
 // Mouse / keyboard: not connected
 HLE_FORCE("_ZN2nn3hid15InitializeMouseEv", "mouse; not provided by the host", void, h_hid_InitMouse, void) {}
 HLE_FORCE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", "mouse states: 0 entries", int, h_hid_MouseStates, void *out, int n) { (void)out; (void)n; return 0; }
@@ -445,6 +455,10 @@ HLE_FORCE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSens
 HLE_FORCE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", "six-axis sensor fusion parameters; ignored by the host", void, h_hid_FusionSet, const uint32_t *h, float a, float b) { (void)h; (void)a; (void)b; }
 HLE_FORCE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", "six-axis sensor fusion parameters; ignored by the host", void, h_hid_FusionReset, const uint32_t *h) { (void)h; }
 HLE_FORCE("_ZN2nn3hid41IsFirmwareUpdateAvailableForSixAxisSensorERKNS0_19SixAxisSensorHandleE", "six-axis sensor firmware update: none", unsigned, h_hid_SixFw, const uint32_t *h) { (void)h; return 0; }
-// Vibration device info / actual value: no device, zeroed
-HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", "vibration device info: none", void, h_hid_VibInfo, uint32_t *info, const void *h) { (void)h; info[0] = 0; info[1] = 0; }
-HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "actual vibration value: 0", void, h_hid_VibActual, float *v, const void *h) { (void)h; memset(v, 0, 16); }
+// Vibration device info / actual value: describe the two actuator channels, report the last accepted value
+HLE_FORCE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", "vibration device info: linear resonant actuator, 1 = left 2 = right", void, h_hid_VibInfo, uint32_t *info, const uint32_t *h) {
+    int on = dm_haptics_supported();
+    info[0] = on ? 1u : 0u;                                      // type: linear resonant actuator
+    info[1] = on ? (uint32_t)(dm_haptics_device(*h) + 1) : 0u;   // position: 1 left, 2 right
+}
+HLE_FORCE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", "actual vibration value: the last value the sink accepted", void, h_hid_VibActual, dm_vib_value *v, const uint32_t *h) { *v = dm_haptics_actual(*h); }

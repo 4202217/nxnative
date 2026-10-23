@@ -11,6 +11,7 @@
 
 UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_reset(void);
+void dm_haptics_ios_init(void);   // Haptics.m: the Core Haptics engines for the Switch HD vibration stream
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
@@ -78,6 +79,7 @@ static void launcher_done(void) { [g_root startGame]; }
     if (self.fps) [self.view addSubview:self.fps];
     [self.view setNeedsLayout]; [self.view layoutIfNeeded];
     UIApplication.sharedApplication.idleTimerDisabled = YES;
+    dm_haptics_ios_init();   // before boot: the guest must see the vibration devices when it initializes nn::hid
     front_ios_boot();
 }
 - (void)viewDidLayoutSubviews {
