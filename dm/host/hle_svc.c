@@ -20,6 +20,14 @@ static uint8_t *g_as;              // ASLR region base = the whole block
 static uint8_t *g_heap; static size_t g_heap_cur, g_heap_cap;
 // The address range lies entirely within the currently opened (readable and writable) part of the guest heap: such reads need no kernel trap to check, memcpy directly (used where guest memory is read every tick, such as diag.c tk_rd)
 int dm_guest_heap_readable(uint64_t a, size_t n) { uint64_t b = (uint64_t)(uintptr_t)g_heap; size_t cur = g_heap_cur; return g_heap && a >= b && n <= cur && a - b <= cur - n; }
+// 1 when [a, a+n) is guest memory the guest's own heap allocator owns (inside the heap the last SetHeapSize opened): such pages may be replaced
+// by fresh anonymous pages carrying the same bytes. Deliberately heap only: alias-region pages can be the same physical memory at a second
+// address (that is what MapPhysicalMemory is for), and stack-region mappings and module images belong to other bookkeeping -- none of those may
+// be replaced. Used by the graphics layer's pool page renew (D1, mtl_pool_del).
+int dm_guest_renewable(uint64_t a, size_t n) {
+    uint64_t b = (uint64_t)(uintptr_t)g_heap;
+    return g_heap && n && a >= b && a - b < g_heap_cur && n <= g_heap_cur - (a - b);
+}
 static uint8_t *g_alias; static size_t g_alias_cap;
 static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_pages)
 static uint8_t *g_stack; static size_t g_stack_cap;

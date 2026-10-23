@@ -25,6 +25,9 @@
 #include "nvn_cover.h"
 #include "dmsh_chain.h"   // DMSH_CHAIN: the translation chain version of the B shader library expected by this source tree, one for every game (beside this file, tools/dmsh_chain.py --header)
 #include "game_profile.h"   // game profile constants (profile id, the profile's switches)
+#ifndef DM_GAME_POOL_RENEW
+#define DM_GAME_POOL_RENEW 0    // off (profile key pool_renew on / off; see mtl_pool_del)
+#endif
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
 #define NTEX 256
 // The NVN driver's constant segments, one layout in every game (dm/gfx/tools/dmsh_build.py), byte offsets: c2 holds the combined handles at 0x20 + 8 r (41 slots up to the separate table:
@@ -232,7 +235,7 @@ void bf_want_note(const char *key) {
 }
 
 // ---------- Memory pools ----------
-typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu; const void *key; int res; } pool_ent;   // res: already in the residency set (on demand, see pool_res)
+typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu, buflen; const void *key; int res; } pool_ent;   // res: already in the residency set (on demand, see pool_res); buflen: the zero-copy buffer's length from base (the pool's page-expanded span)
 static pool_ent *g_pools; static int g_npool, g_cap;
 static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
 static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
@@ -416,22 +419,134 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     pthread_mutex_lock(&g_mu);
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc(g_pools, g_cap * sizeof *g_pools); }
     g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the address index and the per-thread caches are invalid (pool_find, pc_get)
-    g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, mem, 0};   // not in the residency set yet: put in the first time it is addressed (pool_res)
+    g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, b - a, mem, 0};   // not in the residency set yet: put in the first time it is addressed (pool_res)
     g_pool_adds++;
     [g_keep addObject:buf];
     pthread_mutex_unlock(&g_mu);
 }
 
+// D1: pool page renew. A zero-copy MTLBuffer is built on the guest's pool pages, and Metal keeps the buffer (and its GPU pages) alive for as long as
+// those pages stay mapped -- dropping every host reference is not enough: the guest never unmaps, because the heap is one mmap and a heap shrink is
+// only mprotect. So each "enter save -> quit to menu" left the dead buffers behind for good, and the next session's pools at the same guest addresses
+// overlapped the stale GPU pages. On Finalize the pool's interior pages (whole pages inside the pool storage; a boundary page may hold a neighbour)
+// are therefore replaced with fresh anonymous pages and the bytes copied across: the guest sees the same contents (its allocator may keep free-list
+// data inside the block), and Metal's old pages are orphaned and freed with the buffer.
+// Only guest heap memory that is open read-write (dm_guest_renewable; alias, stack and module pages are never touched), never a page another live
+// pool's buffer covers, and never a pool the source reclaim already emptied.
+// Profile key pool_renew (on / off); DM_POOL_RENEW=1 renews with the bytes copied back, =0 turns it off, =2 renews and leaves the pages zeroed
+// (MEASUREMENT ONLY: the game's allocator may keep free-list links inside a pool, so this can corrupt it; it exists to bound how much of the win is
+// the copy and how much is the remap).
+static int g_pool_renew = -1;
+static _Atomic uint64_t g_renew_pools, g_renew_bytes, g_renew_ns;
+static _Atomic uint64_t g_renew_skip_mem, g_renew_skip_overlap, g_renew_skip_gpu, g_renew_fail;
+static int pool_renew_on(void) {
+    if (g_pool_renew < 0) {
+        const char *e = getenv("DM_POOL_RENEW");
+        int v = e ? atoi(e) : DM_GAME_POOL_RENEW;
+        g_pool_renew = v <= 0 ? 0 : (v >= 2 ? 2 : 1);
+        if (g_pool_renew) MLOG("pool page renew (D1): on, %s", g_pool_renew >= 2 ? "renew only, pages left zeroed ([MEASUREMENT] this zeroes the pool and can corrupt the game's allocator)" : "pages renewed with their contents copied back");
+    }
+    return g_pool_renew;
+}
+// Replace [a, b) (page aligned) with fresh read-write anonymous pages, in 4 MB chunks so the bounce buffer stays small. copy: put the old bytes back
+// (all-zero pages are skipped -- the fresh pages are already zero, so an untouched page costs no footprint). Returns the bytes replaced. No lock held.
+static uint64_t pool_renew_pages(uintptr_t a, uintptr_t b, int copy) {
+    enum { CH = 4u << 20 };   // a multiple of every host page size
+    size_t pg = (size_t)getpagesize();
+    if (b <= a || ((a | b) & (pg - 1))) return 0;   // the range is page aligned by construction: refuse anything else rather than touch a neighbour
+    size_t tn = copy ? (b - a < CH ? (size_t)(b - a) : CH) : 0;
+    void *tmp = copy ? malloc(tn) : NULL;
+    if (copy && !tmp) return 0;
+    uint64_t done = 0;
+    for (uintptr_t p = a; p < b; ) {
+        size_t n = b - p < CH ? (size_t)(b - p) : CH;
+        if (copy) memcpy(tmp, (const void *)p, n);
+        void *m = mmap((void *)p, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+        if (m == MAP_FAILED) {
+            static _Atomic int nf;
+            if (atomic_fetch_add(&nf, 1) < 4) MLOG("[RED] pool page renew: replacing %#llx+%#zx failed errno=%d (the old mapping stays)", (unsigned long long)p, n, errno);
+            atomic_fetch_add(&g_renew_fail, 1);
+            break;
+        }
+        if (copy) for (size_t o = 0; o < n; o += pg) {
+            const uint64_t *w = (const uint64_t *)((const uint8_t *)tmp + o); size_t k = 0, nw = pg / sizeof *w;
+            while (k < nw && !w[k]) k++;
+            if (k < nw) memcpy((void *)(p + o), w, pg);
+        }
+        done += n; p += n;
+    }
+    free(tmp);
+    return done;
+}
 void mtl_pool_del(const void *mem) {
     g_reg_gen++;
+    int renew = pool_renew_on();
+    uintptr_t rlo = 0, rhi = 0; int rres = 0; id<MTLBuffer> rb = nil;   // D1: interior page range to renew, the pool's residency, its buffer
     pthread_mutex_lock(&g_mu);
     // The no-copy buffer goes through deferred release (out of the residency set and unreferenced after submitted commands complete). It used to be removed only from g_keep while the residency set still held a strong reference: after the pool was freed the buffer stayed alive wrapping that guest memory,
     // and a new pool at the same address wrapped it again. Engage's title demo cycles scenes; GPU allocated grew to 5.4 GB and resident memory to 3.6 GB in 850 s
     for (int i = 0; i < g_npool; i++)
-        if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; defer_obj_release(b); if (g_pools[i].res) g_pool_res_n--;
+        if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; if (g_pools[i].res) g_pool_res_n--;
+            // D1: renew only whole pages inside the pool's own storage (a boundary page may also hold a neighbour), and only guest memory the
+            // game's own allocator owns and that is open read-write (dm_guest_renewable). Elsewhere the buffer goes the ordinary way.
+            uintptr_t pg = (uintptr_t)getpagesize(), a = (g_pools[i].lo + pg - 1) & ~(pg - 1), e = g_pools[i].hi & ~(pg - 1);
+            if (renew && b && e > a && dm_guest_renewable(a, e - a)) { rb = b; rlo = a; rhi = e; rres = g_pools[i].res; }
+            else {
+                if (b && renew) atomic_fetch_add(e > a ? &g_renew_skip_mem : &g_renew_skip_overlap, 1);
+                if (b) { if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable]; [g_dead_pools addObject:b]; defer_obj_release(b); }
+            }
+            g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); break; }
+    if (rb) {   // a live pool whose buffer covers any page to renew would keep a stale (old-page) GPU mapping: then the pages stay as they are
+        for (int k = 0; k < g_npool; k++)
+            if (g_pools[k].base < rhi && rlo < g_pools[k].base + g_pools[k].buflen) { rlo = rhi = 0; atomic_fetch_add(&g_renew_skip_overlap, 1); break; }
+        if (rhi <= rlo) {
             if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable];
-            [g_dead_pools addObject:b]; g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); break; }
+            [g_dead_pools addObject:rb]; defer_obj_release(rb); rb = nil;
+        }
+    }
     pthread_mutex_unlock(&g_mu);
+    if (!rb) return;   // nothing to renew: the buffer is already queued for deferred release
+    // D1: wait (no lock held) until the GPU has completed every submission committed so far -- the point the deferred release would have waited for
+    // anyway. A no-copy buffer kept across a remap holds a STALE GPU mapping, so the pages must not be replaced while any submitted command may still
+    // read them. The game finalizes a whole batch of pools between two submissions, so g_fence does not move in between and the batch pays one wait.
+    uint64_t t0 = now_ns(), f = g_fence;
+    if (f && !mtl_wait(f, 2000000000ull)) {   // the GPU is stuck: fall back to the ordinary deferred release and leave the pages alone
+        static _Atomic int nto;
+        if (!atomic_fetch_add(&nto, 1)) MLOG("[RED] pool page renew: waiting for the GPU to reach fence %llu timed out; this pool is released the ordinary way, pages untouched", (unsigned long long)f);
+        defer_obj_release(rb); atomic_fetch_add(&g_renew_skip_gpu, 1);
+        return;
+    }
+    // D1: re-check the overlap now that the lock was dropped for the wait: another thread may have created a pool on this very guest block while we
+    // waited, and its buffer would wrap the pages about to be replaced. Under g_mu again, but briefly (no wait inside).
+    pthread_mutex_lock(&g_mu);
+    int taken = 0;
+    for (int k = 0; k < g_npool; k++)
+        if (g_pools[k].base < rhi && rlo < g_pools[k].base + g_pools[k].buflen) { taken = 1; break; }
+    pthread_mutex_unlock(&g_mu);
+    if (taken) {   // a live pool moved onto the range: leave the pages alone, release the buffer the ordinary way
+        static _Atomic int nre;
+        if (!atomic_fetch_add(&nre, 1)) MLOG("[RED] pool page renew: a new pool landed on pool %p's address while waiting for the GPU; this pool is released the ordinary way, pages untouched", mem);
+        defer_obj_release(rb); atomic_fetch_add(&g_renew_skip_overlap, 1);
+        return;
+    }
+    // The residency set's strong reference goes too, or the buffer could never die. Then the last host reference: the driver's view of the old pages
+    // goes before the mapping is replaced. (A view or texture over this buffer may still hold it for another frame on the deferred queue; that no
+    // longer blocks the remap: nothing submitted can read the pages any more, the bytes are kept, and the buffer dies when its own fence passes.)
+    if (rres) { res_remove(rb); res_commit(); }
+    rb = nil;
+    // The remap itself is synchronous inside the game's own Finalize call, and the guest cannot reuse the block before Finalize returns (NVN forbids
+    // touching a finalized pool), so no guest write can race the copy.
+    uint64_t done = (rhi > rlo) ? pool_renew_pages(rlo, rhi, renew < 2) : 0;
+    atomic_fetch_add(&g_renew_ns, now_ns() - t0);
+    if (done) {
+        uint64_t np = atomic_fetch_add(&g_renew_pools, 1) + 1, nb = atomic_fetch_add(&g_renew_bytes, done) + done;
+        if (np <= 8 || (np & (np - 1)) == 0)   // the first few, then powers of two
+            MLOG("pool page renew: pool %p renewed %llu KB (total %llu pools, %llu MB; skipped non-heap %llu / overlapping a live pool %llu / GPU timeout %llu, failed %llu, %.1f ms spent in total)", mem,
+                 (unsigned long long)(done >> 10), (unsigned long long)np, (unsigned long long)(nb >> 20),
+                 (unsigned long long)atomic_load(&g_renew_skip_mem), (unsigned long long)atomic_load(&g_renew_skip_overlap),
+                 (unsigned long long)atomic_load(&g_renew_skip_gpu),
+                 (unsigned long long)atomic_load(&g_renew_fail), atomic_load(&g_renew_ns) / 1e6);
+    }
 }
 
 // Address → pool: the last hit first, then a binary search over indices sorted by start address, and a full linear scan only when that fails (pools overlapping).

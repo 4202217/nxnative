@@ -65,6 +65,8 @@ enum { OBS_MOVIE_RING_LINK = 19, OBS_MOVIE_RING_UNLINK = 20,   // Metroid Dread 
        OBS_MAX = 22 };
 void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
 int gate_obs_present(int id);
+// hle_svc.c: 1 when [a, a+n) is guest heap the host may replace pages in (the pool page renew, D1: nvn_mtl.m's mtl_pool_del)
+int dm_guest_renewable(uint64_t a, size_t n);
 uint64_t now_ns(void);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
 int dm_detclock_enabled(void);
