@@ -13,9 +13,12 @@ void bf_want_note(const char *key);
 
 // Memory pool: [mem, mem+size) is expanded outward to page boundaries to build a zero-copy buffer; look up the buffer and offset by GPU address (= CPU address)
 void mtl_pool_add(const void *mem, uint64_t size);
+void mtl_pool_add_ex(const void *mem, uint64_t size, uint32_t flags, const void *obj);   // also records the pool's NVN flags and object: the pool page renew needs the object, the static-source reclaim both
 void mtl_pool_del(const void *mem);   // also renews the pool's interior guest pages when the page renew is on (D1, see nvn_mtl.m)
-// memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table
-void mtl_alias_drop_pool(const void *pool);
+// memory pool Finalize: evict the textures built on this pool (pool object address) from the storage-sharing table; returns the number of views dropped
+int mtl_alias_drop_pool(const void *pool);
+// Low-memory hint: let the static-texture source reclaim (T5) run at the next submit-thread safe point. One atomic store; a no-op when the feature is off
+void mtl_tex_reclaim_hint(void);
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off);   // 1 on success; buf is a (__bridge) id<MTLBuffer>
 
 typedef struct {

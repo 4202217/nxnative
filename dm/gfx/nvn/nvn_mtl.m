@@ -28,6 +28,9 @@
 #ifndef DM_GAME_POOL_RENEW
 #define DM_GAME_POOL_RENEW 0    // off (profile key pool_renew on / off; see mtl_pool_del)
 #endif
+#ifndef DM_GAME_TEX_RECLAIM
+#define DM_GAME_TEX_RECLAIM 0   // off (profile key tex_reclaim off / dryrun / on; see the static-source reclaim below)
+#endif
 // Texture slot table per stage: 0-127 the combined handles (nvnCommandBufferBindTexture), 128-255 the separate texture binds (NVN_SEPTEX_SLOT0, nvn_obj.h)
 #define NTEX 256
 // The NVN driver's constant segments, one layout in every game (dm/gfx/tools/dmsh_build.py), byte offsets: c2 holds the combined handles at 0x20 + 8 r (41 slots up to the separate table:
@@ -235,12 +238,189 @@ void bf_want_note(const char *key) {
 }
 
 // ---------- Memory pools ----------
-typedef struct { uintptr_t lo, hi; uintptr_t base; __unsafe_unretained id<MTLBuffer> buf; uint64_t gpu, buflen; const void *key; int res; } pool_ent;   // res: already in the residency set (on demand, see pool_res); buflen: the zero-copy buffer's length from base (the pool's page-expanded span)
+typedef struct {
+    uintptr_t lo, hi; uintptr_t base;
+    __unsafe_unretained id<MTLBuffer> buf;
+    uint64_t gpu, buflen;
+    const void *key; int res;      // res: already in the residency set (on demand, see pool_res); buflen: the zero-copy buffer's length from base (the pool's page-expanded span)
+    uint32_t flags;                // NVN memory pool flags from nvnMemoryPoolInitialize (mtl_pool_add_ex)
+    uint64_t size;                 // guest size the game asked for
+    const void *obj;               // NVNmemoryPool object address (tex_t.pool points at it); NULL when unknown
+    uint64_t hits, last_hit_frame; // address lookups that resolved to this pool / frame of the last one: the static-source reclaim treats any use after an upload as a disqualifier
+    // Static-source reclaim state (see "Static-source reclaim" below). It lives in this struct so the reclaim tick reads it under the same lock as the ranges.
+    uint8_t rc_state;              // RC_* of this pool
+    uint8_t rc_no_reclaim;         // permanent: invalidated after a reclaim, or rejected for a hard reason
+    uint8_t rc_queued;             // a reclaim evaluation is pending for this pool
+    uint8_t rc_rejected;           // this pool has been counted once in the cumulative rejection counters
+    uint64_t rc_hits_at_upload;    // pool.hits at the last source upload of one of its textures
+    uint64_t rc_last_upload_frame; // frame of that upload
+    uint64_t rc_stamp;             // nvn_dirty_now() when the pool's source pages were reclaimed
+    uint64_t rc_bytes;             // guest bytes actually reclaimed (returned to the budget when the pool is finalized)
+    uint64_t rc_next_eval;         // next frame at which this pool may be evaluated again (throttle)
+    uint64_t rc_up_gen, rc_done_gen;   // source upload batches started for this pool / completed on the GPU: the reclaim waits until they are equal
+    uint64_t rc_nontex_hits;       // address uses that were not the texture-source upload (buffer bind / copy / share view)
+    uint8_t rc_up_state;           // upload record: bit0 dynamic descriptor, bit1 serial re-uploaded, bit2 record full
+    uint8_t rc_up_nser, rc_up_nrg; // distinct uploaded serials / distinct source ranges recorded
+    uint64_t rc_up_bytes;          // sum of source bytes seen for this pool (diagnostic)
+    uint64_t rc_up_ser[12];        // distinct uploaded texture serials (re-upload detection)
+    struct { uintptr_t mem; uint64_t size, stamp; } rc_up_rg[12];   // distinct source ranges + content stamp at upload
+} pool_ent;
 static pool_ent *g_pools; static int g_npool, g_cap;
 static int g_pidx_ok, g_plast = -1;   // whether the address→pool index is valid, the last hit (pool_find)
 static NSMutableArray *g_keep;                  // Holds the buffer references (pool_ent has non-owning pointers)
 static uint64_t g_pool_adds;
 static int g_pool_res_n;   // registered pools already in the residency set (for the memory readout; under g_mu)
+
+// ================= Static-source reclaim =================
+// The port keeps packaged (has_layout) textures twice: the block-linear source bytes in the game's memory pool, and a GPU-private MTLTexture built
+// from them by pkg_upload_. Once the upload batch that consumed a source pool has completed on the GPU, the guest copy is dead: everything samples
+// the private copy. The pool is referenced again only by a re-upload of the same storage (which makes it dynamic, see rc_note_upload_src) or by an
+// engine buffer binding (an address use, which disqualifies it). Those source pools are also put into the MTLResidencySet by the on-demand residency
+// path, so they pin guest pages as well as GPU memory.
+// Reclaim = evict the pool from the residency set and replace its guest pages. What actually returns pages on Darwin is NOT madvise(MADV_DONTNEED)
+// (a no-op on anonymous memory there): mmap(MAP_FIXED | MAP_ANON) over the page-aligned interior runs replaces them with fresh zero pages and the
+// footprint drops. A no-copy MTLBuffer kept across such a remap holds a stale GPU mapping (probed), so the buffer is released first and rebuilt on
+// demand if the pool is ever addressed again (rc_unreclaim_pool through pool_res).
+// Safety: CPU_NO_ACCESS pools only (the game cannot dereference them); pool storage inside the guest heap (dm_guest_heap_range: alias and stack
+// pages must never be replaced); pages fully covered by the union of eligible registered-texture ranges, never boundary pages; only after the upload
+// command buffers completed, with no address use since the upload and an optional grace window; every later write or use invalidates the pool.
+// Profile key tex_reclaim (off / dryrun / on); DM_TEX_RECLAIM=1 / 0 overrides, DM_TEX_RECLAIM_DRYRUN=1 only reports. Off by default, so every other
+// game is unaffected.
+enum { RC_NONE = 0, RC_WAIT, RC_EVICTING, RC_RECLAIMED };
+enum { RC_R_NONE = 0, RC_R_HIT, RC_R_DIRTY, RC_R_COVER, RC_R_ALIAS, RC_R_OVERLAP, RC_R_NOTREADY, RC_R_HEAP, RC_R_BUDGET, RC_R_WRITEUSE,
+       RC_R_ALIGN, RC_R_UNTRACKED, RC_R_REUPLOAD, RC_R_OBJ, RC_R_N };
+static int g_tex_reclaim, g_tex_reclaim_dry;   // switches, read once in mtl_init (rc_env_init)
+static int g_rc_min_mb = 8, g_rc_purity = 90, g_rc_backlog_mb = 64, g_rc_grace = 0, g_rc_max_pools = 16, g_rc_max_mb = 128;
+static int g_rc_view_idle = 300;   // frames a zero-copy view must go unused before the reclaim may take the pool behind it (0 = never)
+static uint64_t g_rc_views_dropped;   // zero-copy views dropped with their pool so far
+// The per-tick cap actually used: with a big backlog of candidate pools the cap is raised, because a fixed 16-pool / 128 MB cap retires a loading
+// phase's few hundred pools too slowly to keep the peak resident down (the cap still bounds the work of one tick).
+static int g_rc_max_pools_eff = 16; static uint64_t g_rc_max_mb_eff = 128u << 20;
+static uint64_t g_rc_budget_mb = 1536;   // DM_TEX_RECLAIM_MB overrides
+static uint64_t g_rc_pools, g_rc_bytes;   // pools / guest bytes reclaimed so far (cumulative, for the readout)
+// Bytes reclaimed RIGHT NOW: + when a pool's pages are replaced, - when that pool is finalized (its block goes back to the game's allocator, so the
+// budget frees up and a later level may reclaim again). The budget bounds this, not the cumulative total: with the cumulative total the reclaim
+// switched itself off for good once a session had reclaimed g_rc_budget_mb in sum, and memory climbed for the rest of the run with nothing reclaiming.
+static _Atomic uint64_t g_rc_live_bytes;
+static uint64_t g_rc_cand_pools, g_rc_cand_bytes;   // candidate pool appearances / source bytes seen (dry-run opportunity)
+static uint64_t g_rc_invalid, g_rc_suppress_reup, g_rc_ticks, g_rc_tick_ns;
+static uint64_t g_rc_block[RC_R_N];   // rejections by reason, cumulative over the run (each pool counted once, at its first rejection)
+static uint64_t g_rc_events, g_rc_last_print_frame;
+static uint64_t g_rc_acc_now_pools, g_rc_acc_now_bytes;   // in-batch would-reclaim bytes accumulated between prints (dry-run)
+static uint64_t g_rc_batch_prints;   // immediate in-batch dry-run lines (a device run can die inside the transition frame)
+static uint64_t g_rc_log_seen[256]; static int g_rc_log_n;   // per-pool candidate log dedupe (hash of pool address + last upload frame)
+static _Atomic int g_rc_tick_wanted;   // a finished upload batch waits for a submit-thread safe point (set from the feedback handler / up_wait)
+static _Atomic int g_rc_addr_tx;       // 1 while pkg_upload_ resolves its source address: an address use then is the upload itself, not an engine use
+// Reclaimed ranges, for lock-free "is this source gone?" checks on the texture creation and readback paths. Entries are immutable once published; a
+// finalized pool's entry is tombstoned by setting lo = hi. Appends happen under g_mu. Tombstoned entries are never reused, so a long session fills
+// the table: 4096 entries (16 bytes each) push that wall far out, and the scan runs per texture creation, not per frame.
+#define RC_RG_MAX 4096
+static struct { _Atomic uintptr_t lo, hi; } g_rc_rg[RC_RG_MAX];
+static _Atomic uint64_t g_rc_rg_n;
+static int rc_src_reclaimed(uintptr_t a, uint64_t n) {   // was any byte of [a, a+n) inside a reclaimed pool range?
+    uint64_t m = atomic_load_explicit(&g_rc_rg_n, memory_order_acquire);
+    if (!m) return 0;
+    if (m > RC_RG_MAX) m = RC_RG_MAX;
+    uintptr_t e = a + (n ? n : 1);
+    for (uint64_t i = 0; i < m; i++) {
+        uintptr_t lo = atomic_load_explicit(&g_rc_rg[i].lo, memory_order_relaxed), hi = atomic_load_explicit(&g_rc_rg[i].hi, memory_order_relaxed);
+        if (lo < e && a < hi) return 1;
+    }
+    return 0;
+}
+// Candidate pools of the upload batch being built (submit thread only): deduped by pool storage address, handed to the feedback handler in up_flush.
+typedef struct { uintptr_t lo; uint64_t size; uint64_t bytes; uint64_t gen; } rc_src;   // gen: the pool's upload generation when this batch flushed (feedback marks it completed)
+static rc_src *g_up_rc; static int g_up_rc_n, g_up_rc_cap;
+// Completed upload batches waiting for the submit thread to evaluate them (cross-thread: the feedback handler appends, the tick drains).
+static rc_src *g_rc_que; static int g_rc_nque, g_rc_quecap; static pthread_mutex_t g_rc_que_mu = PTHREAD_MUTEX_INITIALIZER;
+static void rc_que_add(const rc_src *e, int n) {
+    if (n <= 0) return;
+    pthread_mutex_lock(&g_rc_que_mu);
+    if (g_rc_nque + n > g_rc_quecap) { int nc = (g_rc_nque + n) * 2 + 16; rc_src *p = realloc(g_rc_que, (size_t)nc * sizeof *p); if (p) { g_rc_que = p; g_rc_quecap = nc; } }
+    for (int i = 0; i < n && g_rc_nque < g_rc_quecap; i++) g_rc_que[g_rc_nque++] = e[i];
+    pthread_mutex_unlock(&g_rc_que_mu);
+    atomic_store_explicit(&g_rc_tick_wanted, 1, memory_order_relaxed);   // the next submit-thread safe point evaluates this batch
+}
+// Write-use tracker: a texture used as a render-target attachment, copy destination or clear destination can change after its upload, so a pool that
+// holds one is not a static source. serial -> use count, fixed open addressing; only touched when the feature is on.
+#define RC_WU_MAX 8192
+static _Atomic uint64_t g_rc_wu_key[RC_WU_MAX];
+static _Atomic uint32_t g_rc_wu_cnt[RC_WU_MAX];
+static void rc_write_use(uint64_t serial) {
+    if (!serial || (!g_tex_reclaim && !g_tex_reclaim_dry)) return;
+    uint64_t h = (serial * 0x9E3779B97F4A7C15ull) >> 40;
+    for (unsigned k = 0; k < 64; k++) {
+        uint64_t idx = (h + k) & (RC_WU_MAX - 1);
+        uint64_t cur = atomic_load_explicit(&g_rc_wu_key[idx], memory_order_relaxed);
+        if (cur == serial) { atomic_fetch_add_explicit(&g_rc_wu_cnt[idx], 1, memory_order_relaxed); return; }
+        if (!cur) { uint64_t exp = 0; if (atomic_compare_exchange_strong(&g_rc_wu_key[idx], &exp, serial)) { atomic_fetch_add(&g_rc_wu_cnt[idx], 1); return; } if (exp == serial) { atomic_fetch_add(&g_rc_wu_cnt[idx], 1); return; } }
+    }
+}
+static int rc_write_used(uint64_t serial) {
+    if (!serial) return 0;
+    uint64_t h = (serial * 0x9E3779B97F4A7C15ull) >> 40;
+    for (unsigned k = 0; k < 64; k++) {
+        uint64_t idx = (h + k) & (RC_WU_MAX - 1);
+        uint64_t cur = atomic_load_explicit(&g_rc_wu_key[idx], memory_order_relaxed);
+        if (!cur) return 0;
+        if (cur == serial) return 1;
+    }
+    return 0;
+}
+// DM_MADV_SELFTEST=1: settle on the actual machine which Darwin mechanism returns anonymous pages. madvise(MADV_DONTNEED) is a no-op on Darwin
+// anonymous memory, so the reclaim path uses a MAP_FIXED remap; this line proves it on a device before the reclaim is turned on.
+static unsigned long long rc_footprint_mb(void) {
+    task_vm_info_data_t vi; mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vi, &c) != KERN_SUCCESS) return 0;
+    return (unsigned long long)(vi.phys_footprint >> 20);
+}
+static unsigned long long rc_rss_mb(void) {
+    mach_task_basic_info_data_t bi; mach_msg_type_number_t c = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&bi, &c) != KERN_SUCCESS) return 0;
+    return (unsigned long long)(bi.resident_size >> 20);
+}
+static void rc_madv_selftest(void) {
+    if (!getenv("DM_MADV_SELFTEST")) return;
+    size_t pg = (size_t)getpagesize(), sz = 64u << 20;
+    unsigned char *m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (m == MAP_FAILED) { MLOG("[RED] page-return self-test: mmap failed errno=%d", errno); return; }
+    memset(m, 0xAB, sz);
+    unsigned long long r0 = rc_rss_mb(), f0 = rc_footprint_mb();
+    int rc1 = madvise(m, sz / 2, MADV_DONTNEED);
+    unsigned long long r1 = rc_rss_mb(), f1 = rc_footprint_mb();
+    void *mr = mmap(m + sz / 4, sz / 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+    unsigned long long r2 = rc_rss_mb(), f2 = rc_footprint_mb();
+    int zero_ok = m[sz / 4] == 0 && m[sz / 4 + pg] == 0;
+    MLOG("page-return self-test (%zu MB, page %zu bytes): MADV_DONTNEED rc=%d resident %llu -> %llu MB footprint %llu -> %llu MB; after replacing %zu MB with MAP_FIXED resident %llu MB footprint %llu MB, replaced area reads back zero %d (returned %p)",
+         sz >> 20, pg, rc1, r0, r1, f0, f1, (sz / 2) >> 20, r2, f2, zero_ok, mr);
+    munmap(m, sz);
+}
+static void rc_env_init(void) {
+    // Profile default (tex_reclaim off / dryrun / on = 0 / 1 / 2), then the environment: DM_TEX_RECLAIM=1 / 0 forces on / off,
+    // DM_TEX_RECLAIM_DRYRUN=1 selects the dry run (device verification cycles, tests).
+    int rcmode = DM_GAME_TEX_RECLAIM;
+    { const char *er = getenv("DM_TEX_RECLAIM"); if (er) rcmode = atoi(er) ? 2 : 0; }
+    { const char *ed = getenv("DM_TEX_RECLAIM_DRYRUN"); if (ed && atoi(ed)) rcmode = 1; }
+    g_tex_reclaim = (rcmode == 2);
+    g_tex_reclaim_dry = (rcmode == 1);
+    const char *e;
+    if ((e = getenv("DM_TEX_RECLAIM_MB")) && atoi(e) > 0) g_rc_budget_mb = (uint64_t)atoi(e);
+    if ((e = getenv("DM_TEX_RECLAIM_MIN_MB")) && atoi(e) >= 0) g_rc_min_mb = atoi(e);
+    if ((e = getenv("DM_TEX_RECLAIM_PURITY")) && atoi(e) >= 1 && atoi(e) <= 100) g_rc_purity = atoi(e);
+    if ((e = getenv("DM_TEX_RECLAIM_BACKLOG_MB")) && atoi(e) > 0) g_rc_backlog_mb = atoi(e);
+    if ((e = getenv("DM_TEX_RECLAIM_GRACE_FRAMES")) && atoi(e) >= 0) g_rc_grace = atoi(e);
+    if ((e = getenv("DM_TEX_RECLAIM_MAX_POOLS")) && atoi(e) > 0) g_rc_max_pools = atoi(e);
+    if ((e = getenv("DM_TEX_RECLAIM_MAX_MB")) && atoi(e) > 0) g_rc_max_mb = atoi(e);
+    if (g_tex_reclaim || g_tex_reclaim_dry)
+        MLOG("static-source reclaim: %s (budget %llu MB, smallest pool %d MB, purity %d%%, grace %d frames, batch backlog %d MB)",
+             g_tex_reclaim_dry && !g_tex_reclaim ? "dry run" : "on", (unsigned long long)g_rc_budget_mb, g_rc_min_mb, g_rc_purity, g_rc_grace, g_rc_backlog_mb);
+}
+static _Atomic uint64_t g_cur_frame;   // the frame counter (defined with the timing state further down): the address-hit and upload records keep frames
+static int pool_renew_on(void);           // D1 pool page renew switch (defined with mtl_pool_del)
+static int rc_unreclaim_pool(int i);      // under g_mu: recreate the buffer of a reclaimed pool that is addressed again
+static int rc_note_upload_src(const tex_t *t);   // remember a packaged-texture source pool for this batch (0 = not a candidate)
+static void rc_reclaim_tick(void);        // submit thread: evaluate upload-batch candidates, reclaim when enabled
+static void rc_reclaim_maybe(void);       // cheap per-pass gate for the replay safe points
 
 #define C1_BANK_SIZE (4u << 20)
 #define C1_DECL_SIZE (64u << 10)
@@ -282,6 +462,8 @@ static void udc_selftest(void) {
 }
 void mtl_init(void) {
     if (g_dev) return;
+    rc_env_init();   // read the static-source reclaim switches before any pool or texture exists
+    pool_renew_on();   // likewise for the pool page renew, so the log says whether it is on before the first pool is finalized
     const char *vbc = getenv("DM_NVN_VBUF_CACHE"); g_vbuf_cache = !(vbc && !strcmp(vbc, "0"));
     const char *link = getenv("DM_PRESENT_LINK");
     g_dm_present_link = link ? atoi(link) : 1; if (g_dm_present_link < 0 || g_dm_present_link > 2) g_dm_present_link = 1;   // Default 1 (real-device same-process alternation: when load exceeds one display-link period, long frames 15% → 0 and frame intervals even out; no difference from 0 at a steady 60); DM_PRESENT_LINK=0 turns it off   // 1 = present on every tick of a 60 Hz display link; 2 = 120 Hz display link, the game presents a frame every other display-link tick (when behind, it can present on the next 8.33 ms display-link tick)
@@ -391,11 +573,14 @@ static _Atomic uint64_t g_reg_gen = 1;   // Change generation of memory pool / t
 // (they measured on a 17 Pro Max a 512 MB render-target pool addressed 0 times in a run, with about 530 MB more device wired memory; a 4 GB A14 was ended by the system within seconds of launch because of it).
 // So a pool is not put into the residency set when created; it is put in, and the residency set committed on the spot, the first time the GPU gets its address through mtl_addr / mtl_gpu_addr -- these are the only two ways the GPU gets pool addresses,
 // and committing on the spot is earlier than any command buffer commit that uses it. CPU-side reads of pool contents through mtl_addr trigger it too (conservative, never misses). Caller holds g_mu
-static void pool_res(int i) {
-    if (g_pools[i].res) return;
+static int pool_res(int i) {   // 1 = the pool has a usable buffer in the residency set
+    if (g_pools[i].res) return 1;
+    if (g_pools[i].rc_state == RC_RECLAIMED) return rc_unreclaim_pool(i);   // addressed again after the reclaim: recreate the buffer (which re-adds the residency)
+    if (!g_pools[i].buf) return 0;
     res_add(g_pools[i].buf); res_commit(); g_pools[i].res = 1; g_pool_res_n++;
+    return 1;
 }
-void mtl_pool_add(const void *mem, uint64_t size) {
+void mtl_pool_add_ex(const void *mem, uint64_t size, uint32_t flags, const void *obj) {   // flags / obj: the NVN pool's flags and object address (the static-source reclaim needs both, see pool_ent)
     mtl_init(); g_reg_gen++;
     uintptr_t pg = (uintptr_t)getpagesize(), lo = (uintptr_t)mem, hi = lo + size;
     uintptr_t a = lo & ~(pg - 1), b = (hi + pg - 1) & ~(pg - 1);
@@ -419,11 +604,14 @@ void mtl_pool_add(const void *mem, uint64_t size) {
     pthread_mutex_lock(&g_mu);
     if (g_npool == g_cap) { g_cap = g_cap ? g_cap * 2 : 64; g_pools = realloc(g_pools, g_cap * sizeof *g_pools); }
     g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1);   // the address index and the per-thread caches are invalid (pool_find, pc_get)
-    g_pools[g_npool++] = (pool_ent){lo, hi, a, buf, buf.gpuAddress, b - a, mem, 0};   // not in the residency set yet: put in the first time it is addressed (pool_res)
+    pool_ent *e = &g_pools[g_npool++];
+    memset(e, 0, sizeof *e);   // every field the reclaim reads starts at 0 (rc_state = RC_NONE, no upload record)
+    e->lo = lo; e->hi = hi; e->base = a; e->buf = buf; e->gpu = buf.gpuAddress; e->buflen = b - a; e->key = mem; e->flags = flags; e->size = size; e->obj = obj;   // not in the residency set yet: put in the first time it is addressed (pool_res)
     g_pool_adds++;
     [g_keep addObject:buf];
     pthread_mutex_unlock(&g_mu);
 }
+void mtl_pool_add(const void *mem, uint64_t size) { mtl_pool_add_ex(mem, size, 0, NULL); }   // unit tests / callers without NVN pool flags
 
 // D1: pool page renew. A zero-copy MTLBuffer is built on the guest's pool pages, and Metal keeps the buffer (and its GPU pages) alive for as long as
 // those pages stay mapped -- dropping every host reference is not enough: the guest never unmaps, because the heap is one mmap and a heap shrink is
@@ -489,11 +677,21 @@ void mtl_pool_del(const void *mem) {
         if (g_pools[i].key == mem) { id<MTLBuffer> b = g_pools[i].buf; [g_keep removeObject:b]; if (g_pools[i].res) g_pool_res_n--;
             // D1: renew only whole pages inside the pool's own storage (a boundary page may also hold a neighbour), and only guest memory the
             // game's own allocator owns and that is open read-write (dm_guest_renewable). Elsewhere the buffer goes the ordinary way.
+            // A pool the static-source reclaim already emptied has no buffer and its pages were replaced already: nothing to renew.
             uintptr_t pg = (uintptr_t)getpagesize(), a = (g_pools[i].lo + pg - 1) & ~(pg - 1), e = g_pools[i].hi & ~(pg - 1);
-            if (renew && b && e > a && dm_guest_renewable(a, e - a)) { rb = b; rlo = a; rhi = e; rres = g_pools[i].res; }
+            if (renew && b && g_pools[i].rc_state != RC_RECLAIMED && e > a && dm_guest_renewable(a, e - a)) { rb = b; rlo = a; rhi = e; rres = g_pools[i].res; }
             else {
                 if (b && renew) atomic_fetch_add(e > a ? &g_renew_skip_mem : &g_renew_skip_overlap, 1);
                 if (b) { if (!g_dead_pools) g_dead_pools = [NSHashTable weakObjectsHashTable]; [g_dead_pools addObject:b]; defer_obj_release(b); }
+            }
+            {   // Static-source reclaim: tombstone the pool's range (a "source gone" check must stop matching a freed pool), and give back what it
+                // still counted against the budget -- the block goes back to the game's allocator, so the next level may reclaim again.
+                if (g_pools[i].rc_state == RC_RECLAIMED) {
+                    int rgn = (int)atomic_load_explicit(&g_rc_rg_n, memory_order_relaxed);
+                    for (int r = 0; r < rgn && r < RC_RG_MAX; r++)
+                        if (atomic_load(&g_rc_rg[r].lo) == g_pools[i].lo) { atomic_store(&g_rc_rg[r].lo, (uintptr_t)0); atomic_store(&g_rc_rg[r].hi, (uintptr_t)0); }
+                }
+                if (g_pools[i].rc_bytes) { atomic_fetch_sub(&g_rc_live_bytes, g_pools[i].rc_bytes); g_pools[i].rc_bytes = 0; }
             }
             g_pools[i] = g_pools[--g_npool]; g_pidx_ok = 0; g_plast = -1; atomic_fetch_add(&g_pool_gen, 1); break; }
     if (rb) {   // a live pool whose buffer covers any page to renew would keep a stale (old-page) GPU mapping: then the pages stay as they are
@@ -566,13 +764,25 @@ static int pool_find(uint64_t addr, uint64_t len) {
     for (int i = 0; i < g_npool; i++) if (addr >= g_pools[i].lo && addr + len <= g_pools[i].hi) return g_plast = i;
     return -1;
 }
+// One address use of pool i, recorded under g_mu. The static-source reclaim reads its own source pool's bytes exactly once (the upload, marked by
+// g_rc_addr_tx); every other use means the pool also holds live data (a vertex / uniform buffer, a copy target, a view's backing), so the pool is not
+// a dead source. It must not be reclaimed, and the counters below are what tells the tick so -- they are kept even with the reclaim off, because
+// they are one increment on the pool lookup's slow path. NOTE: a hit served by the per-thread cache (pc_get) is not counted here; the reclaim's own
+// caches are invalidated whenever it drops a buffer (g_pool_gen), so a cached entry can never hand out a reclaimed pool's buffer, but a pool only ever
+// addressed through the cache can read as unused. The other guards (dirty tracking, the write-use tracker, the zero-copy views) carry that case.
+static void pool_note_hit(int i) {
+    pool_ent *p = &g_pools[i];
+    p->hits++;
+    p->last_hit_frame = atomic_load_explicit(&g_cur_frame, memory_order_relaxed);
+    if (!atomic_load_explicit(&g_rc_addr_tx, memory_order_relaxed)) p->rc_nontex_hits++;
+}
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
     const pc_ent *c = pc_get(addr, len);
     if (c) { *buf = (__bridge void *)c->buf; *off = addr - c->base; return 1; }
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; }
+    if (i >= 0) { pool_note_hit(i); if (pool_res(i) && g_pools[i].buf) { pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; ok = 1; } }
     pthread_mutex_unlock(&g_mu);
     return ok;
 }
@@ -582,9 +792,93 @@ int mtl_gpu_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off, uint64_
     int ok = 0;
     pthread_mutex_lock(&g_mu);
     int i = pool_find(addr, len);
-    if (i >= 0) { pool_res(i); pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; }
+    if (i >= 0) { pool_note_hit(i); if (pool_res(i) && g_pools[i].buf) { pc_put(i, addr); *buf = (__bridge void *)g_pools[i].buf; *off = addr - g_pools[i].base; *gpu = g_pools[i].gpu + *off; ok = 1; } }
     pthread_mutex_unlock(&g_mu);
     return ok;
+}
+
+// Static-source reclaim: a packaged texture was just uploaded into its private copy, so record its source pool as a candidate of this upload batch.
+// The per-pool record (distinct serials, source ranges and content stamps) is the evidence the eligibility scan uses, so pools whose textures are not
+// in the texture-ID registry (used as render targets only, say) are covered too. No lock held; called on the submit thread after the upload address was
+// resolved. 0 = not a candidate.
+static int tex_cpu_written(uint64_t serial);   // defined with the CPU-written texture set further below
+static int rc_note_upload_src(const tex_t *t) {
+    if (!g_tex_reclaim && !g_tex_reclaim_dry) return 0;   // off for titles without the feature: no per-upload bookkeeping at all
+    if (!t || !t->mem || !t->L.size || !t->pool || !t->pool->mem) return 0;
+    if (!(t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS)) return 0;   // CPU-inaccessible sources only (the game cannot read or write them itself)
+    int noted = 0;
+    pthread_mutex_lock(&g_mu);
+    int i = pool_find((uintptr_t)t->mem, t->L.size);
+    if (i >= 0) {
+        pool_ent *p = &g_pools[i];
+        p->rc_up_gen++;                                    // a new source upload started; rc_done_gen only catches up when its batch completes
+        p->rc_hits_at_upload = p->hits;                    // the upload's own address use is included; any later use disqualifies the pool
+        p->rc_last_upload_frame = atomic_load(&g_cur_frame);
+        p->rc_up_bytes += t->L.size;
+        // A dynamic descriptor (storage-write target, linear / zero-copy, CPU-written, multisample, unsupported target) means the pool can never be a static source.
+        if (!t->has_layout || tex_cpu_written(t->serial)) p->rc_up_state |= 1;
+        if ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && !t->has_layout) p->rc_up_state |= 1;
+        if (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_DISPLAY |
+                          NVN_TEXTURE_FLAGS_VIDEO_DECODE | NVN_TEXTURE_FLAGS_SPARSE)) p->rc_up_state |= 1;
+        if (t->d.samples > 1) p->rc_up_state |= 1;
+        switch (t->d.target) { case 0: case 1: case 3: case 4: case 8: case 9: break; default: p->rc_up_state |= 1; break; }
+        // The same serial uploaded again means the content changed (streamed re-upload): the pool is dynamic.
+        int seen = 0;
+        for (int k = 0; k < (int)p->rc_up_nser; k++) if (p->rc_up_ser[k] == t->serial) { seen = 1; break; }
+        if (seen) p->rc_up_state |= 2;
+        else if (p->rc_up_nser < 12) p->rc_up_ser[p->rc_up_nser++] = t->serial;
+        else p->rc_up_state |= 4;                          // record full: registered-texture evidence may still qualify the pool
+        // Distinct source ranges (ten views over the same storage must count once): they carry coverage and the dirty stamp.
+        int rseen = 0;
+        for (int k = 0; k < (int)p->rc_up_nrg; k++) if (p->rc_up_rg[k].mem == (uintptr_t)t->mem && p->rc_up_rg[k].size == t->L.size) { rseen = 1; break; }
+        if (!rseen) {
+            if (p->rc_up_nrg < 12) { int k = p->rc_up_nrg++; p->rc_up_rg[k].mem = (uintptr_t)t->mem; p->rc_up_rg[k].size = t->L.size; p->rc_up_rg[k].stamp = nvn_dirty_now(); }
+            else p->rc_up_state |= 4;
+        }
+        int first_pool = (p->rc_up_nser == 1 && !seen);   // this note added the pool's first serial: count the pool once
+        if (!rseen) g_rc_cand_bytes += t->L.size;         // a distinct source range: count its bytes once
+        if (first_pool) g_rc_cand_pools++;
+        // Batch list, deduped by the pool's storage address.
+        uintptr_t key = p->lo;
+        for (int k = 0; k < g_up_rc_n; k++) if (g_up_rc[k].lo == key) { g_up_rc[k].bytes += t->L.size; g_up_rc[k].gen = p->rc_up_gen; noted = 1; break; }
+        if (!noted) {
+            if (g_up_rc_n == g_up_rc_cap) { g_up_rc_cap = g_up_rc_cap ? g_up_rc_cap * 2 : 32; rc_src *n = realloc(g_up_rc, (size_t)g_up_rc_cap * sizeof *n); if (n) g_up_rc = n; else g_up_rc_cap = g_up_rc_n; }
+            if (g_up_rc && g_up_rc_n < g_up_rc_cap) { g_up_rc[g_up_rc_n++] = (rc_src){key, p->size, t->L.size, p->rc_up_gen}; noted = 1; }
+        }
+    }
+    pthread_mutex_unlock(&g_mu);
+    return noted;
+}
+// Static-source reclaim: recreate the no-copy buffer of a pool and put it back into the residency set. Caller holds g_mu. 1 = usable again.
+// Used by the invalidation path (a pool addressed after its reclaim) and by rc_act when replacing its pages failed completely.
+static int rc_buf_restore_locked(int i) {
+    pool_ent *p = &g_pools[i];
+    id<MTLBuffer> b = [g_dev newBufferWithBytesNoCopy:(void *)p->base length:p->buflen options:MTLResourceStorageModeShared deallocator:nil];
+    if (!b) return 0;
+    p->buf = b; p->gpu = b.gpuAddress;
+    atomic_fetch_add_explicit(&g_pool_gen, 1, memory_order_relaxed);   // the per-thread pool caches hold the old buffer: they are stale now
+    [g_keep addObject:b];
+    res_add(b); res_commit();
+    p->res = 1; g_pool_res_n++;
+    p->rc_state = RC_WAIT;
+    return 1;
+}
+// Static-source reclaim: recreate the buffer of a reclaimed pool that is addressed again, and give up reclaiming that pool.
+// Caller holds g_mu. 1 = the pool has a usable buffer again.
+static int rc_unreclaim_pool(int i) {
+    if (!rc_buf_restore_locked(i)) {
+        MLOG("[RED] static-source reclaim: recreating the zero-copy buffer of pool %p (%llu MB) failed; this address use fails", (void *)(uintptr_t)g_pools[i].lo, (unsigned long long)(g_pools[i].buflen >> 20));
+        g_pools[i].rc_state = RC_WAIT;
+        return 0;
+    }
+    pool_ent *p = &g_pools[i];
+    p->rc_state = RC_NONE;
+    if (!p->rc_no_reclaim) {
+        p->rc_no_reclaim = 1; g_rc_invalid++;
+        MLOG("[RED] static-source reclaim: the reclaimed pool %p (%llu MB) was addressed again; its zero-copy buffer is recreated and made resident, and the pool is not reclaimed again (%llu invalidated in total)",
+             (void *)(uintptr_t)p->lo, (unsigned long long)(p->size >> 20), (unsigned long long)g_rc_invalid);
+    }
+    return 1;
 }
 
 // ---------- Submission ----------
@@ -745,6 +1039,7 @@ void mtl_sub_begin(void) {
     defer_drain();
     defer_reset();
     warm_claim();
+    rc_reclaim_tick();   // static-source reclaim: safe point (no encoder running, no lock held)
     if (g_cb) MDIE("submit re-entered");
     g_sub_thread = pthread_self(); atomic_store(&g_sub_thread_set, 1);
     atomic_store(&g_last_commit_error, 0);
@@ -1432,12 +1727,68 @@ static nvn_hmap g_alias_seen = {.klen = sizeof(alias_key)};   // key → g_fence
 static CFMutableSetRef g_alias_set;   // Textures in the sharing table (non-owning; used to ask "is this shared")
 static uint64_t g_alias_evicted;   // shared textures evicted on pool Finalize so far (for the memory report)
 static int alias_has(id o) { return g_alias_set && o && CFSetContainsValue(g_alias_set, (__bridge const void *)o); }
+// The last frame each shared view was used, keyed by the view's pointer: a view can be shared by several serials, and the game drawing it through
+// any of them is a use. A view the game has not drawn for a long time belongs to a scene the player has left; the sharing table keeps it alive, and
+// with it the pool's buffer. The static-source reclaim may therefore take such a pool and drop its views with it (see rc_pool_views_idle).
+// It is only touched when the reclaim is on: with it off, view_use_obj is one atomic load and a branch.
+#define VU_MAX 4096
+static _Atomic uintptr_t g_vu_key[VU_MAX];
+static _Atomic uint64_t g_vu_frame[VU_MAX];
+static void view_use_obj(id view) {
+    if (!view || (!g_tex_reclaim && !g_tex_reclaim_dry)) return;
+    uintptr_t p = (uintptr_t)view;
+    uint64_t h = (p * 0x9E3779B97F4A7C15ull) >> 40, f = atomic_load_explicit(&g_cur_frame, memory_order_relaxed);
+    for (unsigned k = 0; k < 64; k++) {
+        uint64_t idx = (h + k) & (VU_MAX - 1);
+        uintptr_t cur = atomic_load_explicit(&g_vu_key[idx], memory_order_relaxed);
+        if (cur == p) { atomic_store_explicit(&g_vu_frame[idx], f, memory_order_relaxed); return; }
+        if (!cur) {
+            uintptr_t zero = 0;
+            if (atomic_compare_exchange_strong(&g_vu_key[idx], &zero, p)) { atomic_store_explicit(&g_vu_frame[idx], f, memory_order_relaxed); return; }
+            if (zero == p) { atomic_store_explicit(&g_vu_frame[idx], f, memory_order_relaxed); return; }
+        }
+    }
+}
+static uint64_t view_last_use_obj(id view) {
+    if (!view) return 0;
+    uintptr_t p = (uintptr_t)view;
+    uint64_t h = (p * 0x9E3779B97F4A7C15ULL) >> 40;
+    for (unsigned k = 0; k < 64; k++) {
+        uint64_t idx = (h + k) & (VU_MAX - 1);
+        uintptr_t cur = atomic_load_explicit(&g_vu_key[idx], memory_order_relaxed);
+        if (!cur) return 0;
+        if (cur == p) return atomic_load_explicit(&g_vu_frame[idx], memory_order_relaxed);
+    }
+    return 0;
+}
+static void vu_forget_obj(id view) {   // a dropped view's slot is cleared so a new view at the same address starts unused
+    if (!view) return;
+    uintptr_t p = (uintptr_t)view;
+    uint64_t h = (p * 0x9E3779B97F4A7C15ull) >> 40;
+    for (unsigned k = 0; k < 64; k++) {
+        uint64_t idx = (h + k) & (VU_MAX - 1);
+        uintptr_t cur = atomic_load_explicit(&g_vu_key[idx], memory_order_relaxed);
+        if (cur == p) { atomic_store_explicit(&g_vu_key[idx], (uintptr_t)0, memory_order_relaxed); return; }
+        if (!cur) return;
+    }
+}
 // On memory pool Finalize, evict the textures built on that pool from the sharing table (collect the keys first, then delete: deletion shifts entries back). The sharing table used not to evict: Mario's pools stay for good, so entries are bounded;
 // Engage frees pools on scene changes and rebuilds on new ones, so the old pools' render targets and other private textures stayed in the table forever (about 0.8 GB more GPU memory over 850 s of the title demo), and linear textures built directly on a pool also kept the whole pool buffer alive.
 // Also, when a pool object's address is reused, old entries would hand a texture on the old storage to the new pool's texture at the same offset and description. Evicted textures go through deferred release; if the serial table still holds one, that is just one more reference
+// Returns how many views were dropped (the static-source reclaim adds it to its readout). A view leaves the residency set here: the pool's buffer is
+// about to go, and a view of it can never be drawn again. The serial entries that point at the dropped views go too, so the game cannot draw a view
+// that is no longer resident (a later use rebuilds it over the pool's bytes, which pool_res restores first).
 static void treg_drop_pool_views(const void *pool);
-void mtl_alias_drop_pool(const void *pool) {
-    if (!pool) return;
+static void serial_sweep_view(id o) {   // caller holds g_smu
+    for (uint32_t i = 0; i < g_by_serial.cap; i++) {
+        if (!g_by_serial.vals[i] || (__bridge id)g_by_serial.vals[i] != o) continue;
+        uint64_t key; memcpy(&key, g_by_serial.keys + (size_t)i * g_by_serial.klen, sizeof key);
+        void *sv = nvn_hm_del(&g_by_serial, &key);
+        if (sv) { CFRelease(sv); i--; }   // deletion shifts the following entries back (several serials can share one view)
+    }
+}
+int mtl_alias_drop_pool(const void *pool) {
+    if (!pool) return 0;
     pthread_mutex_lock(&g_smu);
     uint32_t n = 0; alias_key *ks = NULL;
     for (uint32_t i = 0; i < g_alias.cap; i++) {
@@ -1452,12 +1803,16 @@ void mtl_alias_drop_pool(const void *pool) {
         nvn_hm_del(&g_alias_seen, &ks[j]);
         id o = CFBridgingRelease(old);
         if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+        serial_sweep_view(o);   // the serial entries of this view: a later lookup rebuilds the view
+        if ([o conformsToProtocol:@protocol(MTLResource)]) res_remove((id<MTLResource>)o);   // out of the residency set: the view's GPU memory goes back
+        vu_forget_obj(o);
         defer_obj_release(o);
     }
     if (n) { g_ser_gen++; g_alias_evicted += n; }
     pthread_mutex_unlock(&g_smu);
     free(ks);
     treg_drop_pool_views(pool);   // outside g_smu: the texture ID registry lock g_rmu is taken before g_smu
+    return (int)n;
 }
 // A new shared texture takes over storage: entries of the same pool whose storage overlaps the new texture's under another description go, unless a live texture object still resolves
 // to them (an object rebuilt over the same storage with the same description must keep finding it: SMBW's transient render targets) or a lookup found them in the last ALIAS_IDLE submissions
@@ -1526,7 +1881,7 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
 // spare: the texture the last re-upload replaced, kept resident and written by the next re-upload once the GPU has passed spare_fence (a texture the CPU rewrites every frame, a movie frame,
 // alternates between two textures instead of allocating one per frame: Link's Awakening's title movie made and freed an 8 MB texture a frame)
-@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen; const void *span; int sparse, vbase; } @end   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
+@interface NvPkg : NSObject { @public id<MTLTexture> tex, spare, view; uint64_t stamp, seen, hash, spare_fence, vgen, vseen; const void *span; int sparse, vbase; uint64_t reuploads; } @end   // reuploads: how many times its content was uploaded again (the static-source reclaim will not take a source that was re-uploaded)   // hash: full hash of the uploaded content under DM_NVN_DIRTYCHECK; span: its tracked range (nvn_dirty_span, NULL = untracked);
 // sparse: in a sparse virtual pool, read through its page table (hle_nvn.c nvn_sparse_*), vgen the page table's generation at the upload and vseen at the last look; view: what it is bound as (sparse_view)
 @implementation NvPkg
 - (void)dealloc { res_remove(tex); if (spare) res_remove(spare); }
@@ -1669,8 +2024,13 @@ static void up_flush(void) {
     NSMutableArray *dsts = [NSMutableArray arrayWithCapacity:(NSUInteger)g_nup_blits]; for (int i = 0; i < g_nup_blits; i++) if (g_up_blits[i].dst) [dsts addObject:g_up_blits[i].dst];
     static int lost_at = -2; static uint64_t batch_n; if (lost_at == -2) { const char *e = getenv("DM_TEST_UP_LOST"); lost_at = e ? atoi(e) : -1; } int fake_lost = dsts.count && lost_at > 0 && (int)++batch_n == lost_at;
     MTL4CommitOptions *o = [MTL4CommitOptions new];
+    // Static-source reclaim: the candidate source pools of this batch were recorded when the upload was encoded. Hand them to the feedback handler,
+    // and let the submit thread evaluate them once the GPU has finished the upload (the only GPU reader of those pools).
+    rc_src *rcb = NULL; int nrcb = g_up_rc_n;
+    if (nrcb > 0) { rcb = malloc((size_t)nrcb * sizeof *rcb); if (rcb) memcpy(rcb, g_up_rc, (size_t)nrcb * sizeof *rcb); else nrcb = 0; g_up_rc_n = 0; }
     atomic_fetch_add(&g_up_pending, 1);
     [o addFeedbackHandler:^(id<MTL4CommitFeedback> f) {
+        if (rcb) { if (!f.error && !fake_lost) rc_que_add(rcb, nrcb); free(rcb); }
         if (f.error) MLOG("[RED] upload command buffer execution error: %s", f.error.description.UTF8String);
         if (f.error || fake_lost) {
             os_unfair_lock_lock(&g_up_lost_lk); if (!g_up_lost) g_up_lost = [NSHashTable weakObjectsHashTable]; for (id d in dsts) [g_up_lost addObject:d]; int n = (int)g_up_lost.allObjects.count; atomic_store(&g_up_lost_n, n); os_unfair_lock_unlock(&g_up_lost_lk);
@@ -1836,7 +2196,10 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
     }
     g_bp_up_bytes += total;
     void *mb; uint64_t mo;
-    int use_gpu = !sparse && g_nvn_deswz_gpu && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);   // a sparse pool's texture is gathered through its page table on the CPU
+    atomic_store_explicit(&g_rc_addr_tx, 1, memory_order_relaxed);   // static-source reclaim: the address use below is this upload itself, not an engine use
+    // A source pool whose pages the reclaim already replaced reads as zeros: build the upload from the CPU copy of it instead (which re-wires the pool, and the reclaim gives that pool up).
+    int use_gpu = !sparse && g_nvn_deswz_gpu && !rc_src_reclaimed((uintptr_t)t->mem, t->L.size) && mtl_addr((uint64_t)t->mem, t->L.size, &mb, &mo);   // a sparse pool's texture is gathered through its page table on the CPU
+    atomic_store_explicit(&g_rc_addr_tx, 0, memory_order_relaxed);
     if (g_nvn_deswz_gpu && !use_gpu && !sparse) RED_ONCE(40, "swizzled texture storage is not in a memory pool; falling back to the CPU");
     if (use_gpu) {
         // The GPU reads the memory pool at execution time, which is closer to a real Switch than a snapshot at CPU upload time; the dirty-page stamp is still taken before encoding, and later writes still trigger a re-upload.
@@ -1856,6 +2219,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         }
         if (enc_ok) {
             [g_up_texs addObject:mt];
+            rc_note_upload_src(t);   // static-source reclaim: this batch's source pool is now a candidate
             if (!g_cb) up_flush();
             return mt;
         }
@@ -1888,6 +2252,7 @@ static id<MTLTexture> pkg_upload_(const tex_t *t, uint64_t *stamp, id<MTLTexture
         }
     }
     free(part);
+    rc_note_upload_src(t);   // static-source reclaim: the CPU path read the same source bytes, so the pool is a candidate too (no address use was made)
     up_flush();
     return mt;
 }
@@ -2065,6 +2430,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     if (packaged) {
         NvPkg *pk = [have isKindOfClass:[NvPkg class]] ? have : nil;   // resolved as GPU-only before the CPU wrote it: dropped and rebuilt as packaged
         if (pk) {   // Already uploaded: check the covered pages only if there has been a guest write since the last check
+            view_use_obj(pk->view ? pk->view : pk->tex);   // static-source reclaim: this view is still drawn
             uint64_t now = nvn_dirty_now();
             int tracked = pk->span != NULL;   // kept from the upload: a texture's pool stays registered while the texture lives
             int clean = tracked && (now == pk->seen || !nvn_dirty_since_span(pk->span, t->mem, t->L.size, pk->stamp));
@@ -2072,8 +2438,14 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
             pk->seen = now;
             if (clean && atomic_load_explicit(&g_up_lost_n, memory_order_relaxed) && up_lost_take(pk->tex)) { clean = 0; uint64_t k = atomic_load(&g_up_lost_redo); if (k <= 3 || !atomic_load(&g_up_lost_n)) MLOG("re-uploading a texture whose upload was dropped ser=%llu (%llu in total, %d left in the record)", (unsigned long long)t->serial, (unsigned long long)k, atomic_load(&g_up_lost_n)); }
             if (clean) {
-                if (dirtycheck() && !pk->sparse && full_hash(t->mem, t->L.size) != pk->hash && !g_pkg_miss++)
+                if (!rc_src_reclaimed((uintptr_t)t->mem, t->L.size) && dirtycheck() && !pk->sparse && full_hash(t->mem, t->L.size) != pk->hash && !g_pkg_miss++)
                     MLOG("[RED] dirty-page miss: texture ser=%llu pool content changed but was not detected", t->serial);
+                return pk->view ? pk->view : pk->tex;
+            }
+            if (rc_src_reclaimed((uintptr_t)t->mem, t->L.size)) {   // static-source reclaim: the source pages are gone (zeros), so the private copy is the only content left -- keep it
+                pk->stamp = pk->seen = nvn_dirty_now();
+                if (++g_rc_suppress_reup <= 8 || (g_rc_suppress_reup % 500) == 0)
+                    MLOG("static-source reclaim: the source of texture ser=%llu was reclaimed, so this re-upload is suppressed (the private copy is kept; %llu suppressed so far)", t->serial, (unsigned long long)g_rc_suppress_reup);
                 return pk->view ? pk->view : pk->tex;
             }
             // Pool content changed (streamed assets written into the same storage, a movie frame): switch to another texture, as in-flight draws still read the old one. That is the spare
@@ -2085,7 +2457,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
                 if (pk->spare && pk->spare != nt) defer_obj_release(pk->spare);   // still in use, or of another shape: retired as before
                 if (pk->sparse) sparse_view(pk, t);
                 zb_report(t, pk->sparse ? (unsigned)pk->vbase : 0, "re-upload");
-                pk->spare = old; pk->spare_fence = g_fence + 1; g_ser_gen++; pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = nvn_dirty_now(); g_pkg_reuploads++; if (dirtycheck() && !pk->sparse) pk->hash = full_hash(t->mem, t->L.size); }
+                pk->spare = old; pk->spare_fence = g_fence + 1; g_ser_gen++; pk->stamp = st; pk->vgen = pk->vseen = vg; pk->span = nvn_dirty_span(t->mem, t->L.size); pk->seen = nvn_dirty_now(); g_pkg_reuploads++; pk->reuploads++; if (dirtycheck() && !pk->sparse) pk->hash = full_hash(t->mem, t->L.size); }
             return pk->view ? pk->view : pk->tex;
         }
         pk = [NvPkg new];
@@ -2099,7 +2471,12 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
         tex_put(t->serial, pk);
         return pk->view ? pk->view : pk->tex;
     }
-    if (have) return have;
+    if (have) {
+        // The fast path: the texture is already resolved, so the sharing table is not consulted. A shared view must still be marked as used here,
+        // or the reclaim would think a view the game binds every frame is idle and take the pool behind it.
+        if (alias_has(have)) view_use_obj(have);
+        return have;
+    }
     if (t->d.target == 10) {   // Buffer texture (TARGET_BUFFER): create the texture-buffer view directly on the memory pool buffer (zero copy; the GPU reads the pool's current content at execution time, same as NVN semantics)
         uint32_t pf = 0; uint8_t swz[4]; int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
         void *mb; uint64_t mo;
@@ -2125,7 +2502,7 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
     }
     alias_key ak; memset(&ak, 0, sizeof ak); ak.pool = (uint64_t)(uintptr_t)t->pool; ak.off = t->off; ak.d = t->d;
     pthread_mutex_lock(&g_smu); __unsafe_unretained id shared = hm_get_id(&g_alias, &ak); if (shared) nvn_hm_put(&g_alias_seen, &ak, (void *)(uintptr_t)(g_fence + 1)); pthread_mutex_unlock(&g_smu);
-    if (shared) { tex_put(t->serial, shared); return shared; }
+    if (shared) { tex_put(t->serial, shared); view_use_obj(shared); return shared; }
     id<MTLTexture> mt = tex_linear(t);
     if (!mt) {
         MTLTextureDescriptor *d = tex_desc(t, 0);
@@ -2169,7 +2546,13 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     // os_proc_available_memory: how far this process is from being terminated by the system for memory, iOS only; the Mac writes "none". On a phone, a crash with no log is most likely this number reaching 0
     char avail[32] = "none";
 #if TARGET_OS_IPHONE
-    snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
+    { unsigned long long av = os_proc_available_memory() >> 20;
+      snprintf(avail, sizeof avail, "%llu MB", av);
+      // Static-source reclaim: the system gives no notice before it kills a process for memory, so the readout is also the only low-memory
+      // warning there is. Below the threshold, ask the reclaim for a pass at the next submit-thread safe point (source pools are the biggest
+      // dead guest bytes); the hint is one atomic store, so it is safe from this guest thread
+      static int low_mb = -1; if (low_mb < 0) { const char *e = getenv("DM_TEX_RECLAIM_LOW_MB"); low_mb = e ? atoi(e) : 384; if (low_mb < 0) low_mb = 0; }
+      if (low_mb && av < (unsigned long long)low_mb) mtl_tex_reclaim_hint(); }
 #endif
     MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total, finalized textures still referenced %u (small table, %llu put in total); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, nghost, (unsigned long long)ghost_puts, avail);
     { void mtl_vc_stats(unsigned *, uint64_t *, uint64_t *), mtl_tb2_stats(uint64_t *, uint64_t *, uint64_t *); uint64_t mtl_tex_mis_count(void); unsigned vn; uint64_t vh, vm, tb, tm, tf;
@@ -2628,6 +3011,7 @@ static int rt_dup_slot(const p_set_rt *r, int i) {
     return 0;
 }
 static void attach(MTLRenderPassAttachmentDescriptor *a, const tex_t *t, const view_t *v, int has_v) {
+    if (t) rc_write_use(t->serial);   // static-source reclaim: an attached texture can be written after its upload
     id<MTLTexture> base = tex_mtl(t); a.texture = base;
     if (has_v && v->set_levels) a.level = v->base_level;
     if (has_v && v->set_layers) { if (t->d.target == 2) a.depthPlane = v->min_layer; else a.slice = v->min_layer; }
@@ -2656,6 +3040,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex(int clear_only) { AP_B; id<MTL4R
 static void bare_dims(NSUInteger *w, NSUInteger *h);
 static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
     if (g_enc) return g_enc;
+    rc_reclaim_maybe();   // static-source reclaim: between passes of a long transition frame (cheap gate; no-op unless an upload batch is waiting)
     memset(g_zskip_cand_ok, 0, sizeof g_zskip_cand_ok);
     g_enc_mode = clear_only; g_pass_swrite = 0;
     if (!R.has_rt) { RED_ONCE(3, "no render target set before the draw"); return nil; }
@@ -3265,6 +3650,432 @@ typedef struct { tex_t t; int ok; view_t v; int has_v; void *view; uint64_t view
                  void *ar, *ar_of; uint64_t ar_rid;                         // ar: the alpha-from-red view for the profile's alpha_from_red shaders (tex_alpha_red), ar_of = the view it was built from
                  void *im, *im_of; uint64_t im_rid; } treg_t;              // im: the view an image slot reads in the shader's pixel class (img_fit), im_of = the view it was built from
 static treg_t *g_treg; static int g_ntreg;
+
+// ---------- Static-source reclaim core (submit thread only) ----------
+// One snapshot per tick: registered textures (g_treg), memory pools (g_pools, including the per-pool upload record) and the sharing-table pool objects
+// (g_alias). The eligibility scan runs outside all locks on these copies; acting re-validates the pool under g_mu.
+typedef struct {
+    uintptr_t mem; uint64_t size, serial; const void *pool; uint32_t flags; int32_t target, samples;
+    uint8_t has_layout, pkg, cpu_written;
+    uint64_t pk_stamp, pk_up_frame, pk_reups;
+} rc_tsnap;
+typedef struct {
+    uintptr_t lo, hi; uint64_t size, buflen, hits, hits_at_upload, last_up_frame, last_hit_frame, stamp, next_eval;
+    const void *obj; uint32_t flags; uint8_t state, no_reclaim, queued;
+    uint64_t nontex_hits, up_bytes, up_gen, done_gen; uint8_t up_state, up_nser, up_nrg;
+    uint64_t up_ser[12];
+    struct { uintptr_t mem; uint64_t size, stamp; } up_rg[12];
+} rc_psnap;
+typedef struct {
+    uintptr_t lo, hi; uint64_t hits, coverage, up_bytes, last_up_frame, last_hit_frame;
+    int nreg, nup, nruns, nviews; uint8_t why, unattributed;
+    struct { uintptr_t addr; uint64_t len; } runs[96];
+} rc_plan;
+static rc_tsnap *g_rc_ts; static int g_rc_nts, g_rc_cts;
+static rc_psnap *g_rc_ps; static int g_rc_nps, g_rc_cps;
+static uintptr_t *g_rc_ak; static int g_rc_nak, g_rc_cak;   // pool object addresses of the sharing-table entries (sorted)
+static uint64_t g_rc_next_scan, g_rc_scan_prints;
+static uint64_t g_rc_frame(void) { return atomic_load(&g_cur_frame); }
+static int rc_cmp_ts(const void *a, const void *b) { const rc_tsnap *x = a, *y = b; return x->mem < y->mem ? -1 : x->mem > y->mem ? 1 : 0; }
+static int rc_cmp_uptr(const void *a, const void *b) { uintptr_t x = *(const uintptr_t *)a, y = *(const uintptr_t *)b; return x < y ? -1 : x > y; }
+static int rc_cmp_iv(const void *a, const void *b) { const uintptr_t *x = a, *y = b; return x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0; }
+// The zero-copy views over a pool, and whether the game has stopped drawing all of them. A view the game has not drawn for a while belongs to a scene
+// the player has left: the sharing table keeps it alive, and with it the pool's buffer, so the Metal memory never comes back. The reclaim may take such
+// a pool, dropping the views with it (the views show the pool's bytes, and the reclaim replaces those bytes with zeros, so they are stale either way).
+static int rc_pool_views_idle(const void *pool_obj, uint64_t idle_frames, int *nviews) {
+    uintptr_t want = (uintptr_t)pool_obj;
+    uint64_t now = atomic_load(&g_cur_frame);
+    int n = 0, idle = 1;
+    pthread_mutex_lock(&g_smu);
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        if (!g_alias.vals[i]) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        if (k.pool != (uint64_t)want) continue;
+        n++;
+        id o = (__bridge id)g_alias.vals[i];
+        uint64_t lu = view_last_use_obj(o);
+        if (lu && now - lu < idle_frames) idle = 0;   // drawn recently: the game may still use it
+    }
+    pthread_mutex_unlock(&g_smu);
+    if (nviews) *nviews = n;
+    return idle;
+}
+static int rc_ak_has(uintptr_t obj) { int lo = 0, hi = g_rc_nak - 1; while (lo <= hi) { int m = (lo + hi) / 2; if (g_rc_ak[m] < obj) lo = m + 1; else if (g_rc_ak[m] > obj) hi = m - 1; else return 1; } return 0; }
+static int rc_desc_static(const rc_tsnap *t) {   // can this texture's source storage be dead after its upload?
+    if (!t->has_layout || t->cpu_written) return 0;
+    // The IMAGE (shader-write) flag is NOT a disqualifier for a packaged texture: a game can set it on imported compressed assets that have a packaged
+    // layout and are only ever sampled. GPU writes go to the private copy and never change the source bytes, so they do not affect reclaiming the source.
+    // For non-packaged (zero-copy) textures the flag means real shader writes, but those are excluded by the has_layout check above anyway.
+    if ((t->flags & NVN_TEXTURE_FLAGS_IMAGE) && !t->has_layout) return 0;
+    if (t->flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_DISPLAY |
+                    NVN_TEXTURE_FLAGS_VIDEO_DECODE | NVN_TEXTURE_FLAGS_SPARSE | NVN_TEXTURE_FLAGS_ADAPTIVE_ZCULL | NVN_TEXTURE_FLAGS_MINIMAL_LAYOUT)) return 0;
+    if (t->samples > 1) return 0;
+    switch (t->target) { case 0: case 1: case 3: case 4: case 8: case 9: return 1; default: return 0; }
+}
+// Refresh the per-tick snapshots. Called on the submit thread; each table is read under its own lock (never nested: the established g_rmu -> g_smu order is kept).
+static int rc_snapshot(void) {
+    if (pthread_mutex_trylock(&g_rmu)) return 0;   // a texture upload may be inside tex_by_id right now (g_rmu held): retry at the next safe point
+    int need = 0;
+    for (int i = 0; i < g_ntreg; i++) if (g_treg[i].ok && g_treg[i].t.mem) need++;
+    if (need > g_rc_cts) { int nc = need + 256; rc_tsnap *n = realloc(g_rc_ts, (size_t)nc * sizeof *n); if (n) { g_rc_ts = n; g_rc_cts = nc; } }
+    g_rc_nts = 0;
+    if (g_rc_ts) for (int i = 0; i < g_ntreg; i++) {
+        const treg_t *r = &g_treg[i];
+        if (!r->ok || !r->t.mem || r->t.magic != MAGIC('T', 'E', 'X', 0)) continue;
+        if (g_rc_nts >= g_rc_cts) break;
+        rc_tsnap *o = &g_rc_ts[g_rc_nts++];
+        o->mem = (uintptr_t)r->t.mem; o->size = r->t.L.size; o->serial = r->t.serial; o->pool = r->t.pool;
+        o->flags = (uint32_t)r->t.d.flags; o->target = (int32_t)r->t.d.target; o->samples = (int32_t)r->t.d.samples;
+        o->has_layout = r->t.has_layout; o->pkg = 0; o->cpu_written = 0; o->pk_stamp = o->pk_up_frame = o->pk_reups = 0;
+    }
+    pthread_mutex_unlock(&g_rmu);
+    if (g_rc_ts) qsort(g_rc_ts, (size_t)g_rc_nts, sizeof *g_rc_ts, rc_cmp_ts);
+    pthread_mutex_lock(&g_smu);
+    for (int i = 0; i < g_rc_nts; i++) {
+        void *v = nvn_hm_get(&g_by_serial, &g_rc_ts[i].serial);
+        if (!v) continue;
+        id o = (__bridge id)v;
+        if ([o isKindOfClass:[NvPkg class]]) { NvPkg *pk = (NvPkg *)o; g_rc_ts[i].pkg = 1; g_rc_ts[i].pk_stamp = pk->stamp; g_rc_ts[i].pk_reups = pk->reuploads; }
+    }
+    {   // sharing-table pool objects: any zero-copy view on a pool disqualifies it unless the views have gone idle
+        uint32_t cap = g_alias.cap;
+        if ((int)cap > g_rc_cak) { int nc = (int)cap + 64; uintptr_t *n = realloc(g_rc_ak, (size_t)nc * sizeof *n); if (n) { g_rc_ak = n; g_rc_cak = nc; } }
+        g_rc_nak = 0;
+        if (g_rc_ak) for (uint32_t i = 0; i < cap; i++) if (g_alias.vals[i] && g_rc_nak < g_rc_cak) {
+            alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+            g_rc_ak[g_rc_nak++] = (uintptr_t)k.pool;
+        }
+    }
+    pthread_mutex_unlock(&g_smu);
+    if (g_rc_ak) qsort(g_rc_ak, (size_t)g_rc_nak, sizeof *g_rc_ak, rc_cmp_uptr);
+    pthread_mutex_lock(&g_cpu_tex_mu);
+    for (int i = 0; i < g_rc_nts; i++) if (g_cpu_tex && CFSetContainsValue(g_cpu_tex, (const void *)(uintptr_t)g_rc_ts[i].serial)) g_rc_ts[i].cpu_written = 1;
+    pthread_mutex_unlock(&g_cpu_tex_mu);
+    pthread_mutex_lock(&g_mu);
+    if (g_npool > g_rc_cps) { int nc = g_npool + 64; rc_psnap *n = realloc(g_rc_ps, (size_t)nc * sizeof *n); if (n) { g_rc_ps = n; g_rc_cps = nc; } }
+    g_rc_nps = 0;
+    if (g_rc_ps) for (int i = 0; i < g_npool; i++) {
+        const pool_ent *p = &g_pools[i];
+        rc_psnap *o = &g_rc_ps[g_rc_nps++];
+        memset(o, 0, sizeof *o);
+        o->lo = p->lo; o->hi = p->hi; o->size = p->size; o->buflen = p->buflen; o->hits = p->hits; o->hits_at_upload = p->rc_hits_at_upload;
+        o->last_up_frame = p->rc_last_upload_frame; o->last_hit_frame = p->last_hit_frame; o->stamp = p->rc_stamp; o->next_eval = p->rc_next_eval;
+        o->obj = p->obj; o->flags = p->flags; o->state = p->rc_state; o->no_reclaim = p->rc_no_reclaim; o->queued = p->rc_queued;
+        o->nontex_hits = p->rc_nontex_hits; o->up_bytes = p->rc_up_bytes; o->up_state = p->rc_up_state; o->up_nser = p->rc_up_nser; o->up_nrg = p->rc_up_nrg;
+        o->up_gen = p->rc_up_gen; o->done_gen = p->rc_done_gen;
+        memcpy(o->up_ser, p->rc_up_ser, sizeof o->up_ser); memcpy(o->up_rg, p->rc_up_rg, sizeof o->up_rg);
+    }
+    pthread_mutex_unlock(&g_mu);
+    return 1;
+}
+// Count a pool once, at its first rejection. The cumulative counter is about pools, not evaluations: a pool rejected again on a later tick (the same
+// reason or another) must not be counted twice. The flag lives in the pool (rc_rejected), so a pool that is freed and a new pool that reuses the
+// address starts over.
+static int rc_pool_count_reject(uintptr_t lo, uintptr_t hi, uint8_t why) {
+    int first = 0;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) if (g_pools[i].lo == lo && g_pools[i].hi == hi) {
+        if (!g_pools[i].rc_rejected) { g_pools[i].rc_rejected = 1; first = 1; }
+        break;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return first;
+}
+// Update one pool's reclaim bookkeeping after an evaluation. Under g_mu, matched by storage range (indices move when a pool is finalized).
+static void rc_pool_update(uintptr_t lo, uintptr_t hi, int set_no_reclaim, int set_queued, uint64_t next_eval) {
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) if (g_pools[i].lo == lo && g_pools[i].hi == hi) {
+        if (set_no_reclaim) g_pools[i].rc_no_reclaim = 1;
+        g_pools[i].rc_queued = (uint8_t)set_queued;
+        if (set_queued && g_pools[i].rc_state == RC_NONE) g_pools[i].rc_state = RC_WAIT;
+        g_pools[i].rc_next_eval = next_eval;
+        break;
+    }
+    pthread_mutex_unlock(&g_mu);
+}
+// Eligibility of one pool; fills the plan (coverage, page runs) when it returns RC_R_NONE. No lock held (works on the tick snapshots).
+static uint8_t rc_eval_pool(const rc_psnap *p, rc_plan *pl) {
+    memset(pl, 0, sizeof *pl); pl->lo = p->lo; pl->hi = p->hi; pl->hits = p->hits; pl->last_up_frame = p->last_up_frame; pl->last_hit_frame = p->last_hit_frame;
+    uintptr_t pg = (uintptr_t)getpagesize(), rlo = (p->lo + pg - 1) & ~(pg - 1), rhi = p->hi & ~(pg - 1);
+    uint64_t minb = (uint64_t)g_rc_min_mb << 20;
+    uint64_t fr = g_rc_frame();
+    if (p->state == RC_RECLAIMED) return RC_R_NONE;   // handled by the invalidation watch
+    if (rhi <= rlo || rhi - rlo < minb) return RC_R_ALIGN;
+    {   // heap-region only: alias and stack pages belong to the host's mapping bookkeeping and must never be replaced
+        uint8_t *hb = NULL; size_t hs = 0;
+        if (!dm_guest_heap_range(&hb, &hs) || p->lo < (uintptr_t)hb || p->hi > (uintptr_t)hb + hs) return RC_R_HEAP;
+    }
+    for (int q = 0; q < g_rc_nps; q++) {   // never touch a range that overlaps another live pool
+        const rc_psnap *o = &g_rc_ps[q];
+        if (o->lo == p->lo && o->hi == p->hi) continue;
+        if (o->lo < rhi && rlo < o->hi) return RC_R_OVERLAP;
+    }
+    if (p->up_gen != p->done_gen) return RC_R_NOTREADY;         // a source upload batch for this pool has not completed yet (its GPU deswizzle may still read the pool)
+    if (p->hits != p->hits_at_upload) return RC_R_HIT;          // an address use after the source upload: not a static source any more
+    if (p->nontex_hits) return RC_R_HIT;                        // the pool is also used as data (buffer bind / copy / share view), not only as upload source
+    if (p->up_state & 1) return RC_R_OBJ;                       // a dynamic descriptor was uploaded from it
+    if (p->up_state & 2) return RC_R_REUPLOAD;                  // a texture was re-uploaded through it: content streamed through the pool
+    if (!p->up_nrg && !p->up_nser) return RC_R_OBJ;             // no upload evidence at all
+    if (fr < p->last_up_frame + (uint64_t)g_rc_grace) return RC_R_NOTREADY;
+    uintptr_t iv[128][2]; int niv = 0, nup = 0;
+    for (int k = 0; k < (int)p->up_nrg && niv < 128; k++) {     // upload-record ranges: the bytes that were read to build private copies
+        uintptr_t m = p->up_rg[k].mem; uint64_t sz = p->up_rg[k].size;
+        if (!sz) continue;
+        nup++;
+        if (!nvn_dirty_tracked((const void *)m, (size_t)sz)) return RC_R_UNTRACKED;
+        if (nvn_dirty_since((const void *)m, (size_t)sz, p->up_rg[k].stamp)) return RC_R_DIRTY;
+        uintptr_t a = m > rlo ? m : rlo, b = m + sz; if (b > rhi) b = rhi;
+        if (b > a) { iv[niv][0] = a; iv[niv][1] = b; niv++; }
+    }
+    for (int k = 0; k < (int)p->up_nser; k++) if (rc_write_used(p->up_ser[k])) return RC_R_WRITEUSE;
+    // Registered textures on the pool are the completeness superset: every one of them must be static, uploaded and clean.
+    int nreg = 0;
+    int lo = 0, hi = g_rc_nts - 1, first = g_rc_nts;
+    while (lo <= hi) { int m = (lo + hi) / 2; if (g_rc_ts[m].mem < p->lo) lo = m + 1; else { first = m; hi = m - 1; } }
+    for (int i = first; i < g_rc_nts && g_rc_ts[i].mem < p->hi; i++) {
+        const rc_tsnap *t = &g_rc_ts[i];
+        nreg++;
+        if (!rc_desc_static(t)) return RC_R_OBJ;
+        if (!t->pkg) return RC_R_NOTREADY;                     // not uploaded yet: retry after the next batch
+        if (t->pk_reups) return RC_R_REUPLOAD;
+        if (!nvn_dirty_tracked((const void *)t->mem, (size_t)(t->size ? t->size : 1))) return RC_R_UNTRACKED;
+        if (nvn_dirty_since((const void *)t->mem, (size_t)(t->size ? t->size : 1), t->pk_stamp)) return RC_R_DIRTY;
+        if (rc_write_used(t->serial)) return RC_R_WRITEUSE;
+        uintptr_t a = t->mem > rlo ? t->mem : rlo, b = t->mem + (t->size ? t->size : 1); if (b > rhi) b = rhi;
+        if (b > a && niv < 128) { iv[niv][0] = a; iv[niv][1] = b; niv++; }
+    }
+    pl->nreg = nreg; pl->nup = nup; pl->up_bytes = p->up_bytes; pl->unattributed = (uint8_t)(nreg == 0);
+    if (!niv) return RC_R_COVER;
+    {   // DM_RC_VIEW_IDLE=<frames>: how long a zero-copy view must go unused before the reclaim may take the pool behind it
+        static int vs = -1;
+        if (vs < 0) { const char *e = getenv("DM_RC_VIEW_IDLE"); vs = e ? atoi(e) : g_rc_view_idle; if (vs < 0) vs = 0; }
+        g_rc_view_idle = vs;
+    }
+    if (!p->obj) return RC_R_ALIAS;   // no pool object: nothing to key the views on
+    if (rc_ak_has((uintptr_t)p->obj)) {
+        int nv = 0;
+        if (!rc_pool_views_idle(p->obj, (uint64_t)g_rc_view_idle, &nv)) return RC_R_ALIAS;   // the game still draws one of them
+        pl->nviews = nv;
+    }
+    // Merge the ranges; only pages fully covered by the union are ever replaced (boundary pages and holes stay resident).
+    qsort(iv, (size_t)niv, 2 * sizeof(uintptr_t), rc_cmp_iv);
+    uint64_t cov = 0; int nr = 0;
+    for (int i = 0; i < niv;) {
+        uintptr_t a = iv[i][0], b = iv[i][1]; int j = i + 1;
+        while (j < niv && iv[j][0] <= b) { if (iv[j][1] > b) b = iv[j][1]; j++; }
+        cov += (uint64_t)(b - a);
+        uintptr_t pa = (a + pg - 1) & ~(pg - 1), pb = b & ~(pg - 1);
+        if (pb > pa && nr < 96) { pl->runs[nr].addr = pa; pl->runs[nr].len = (uint64_t)(pb - pa); pl->coverage += (uint64_t)(pb - pa); nr++; }
+        i = j;
+    }
+    pl->nruns = nr;
+    if (cov * 100 < (uint64_t)g_rc_purity * p->size) return RC_R_COVER;   // purity: the pool is (nearly) all uploaded texture-source storage
+    if (!nr || pl->coverage < minb) return RC_R_COVER;
+    return RC_R_NONE;
+}
+// Perform one reclaim. Runs on the submit thread: the upload command buffers that read this pool already completed (up_wait) and no address use was
+// recorded since; any later use goes through pool_res -> rc_unreclaim_pool. Under g_mu so a concurrent pool_res cannot recreate the buffer while the
+// pages are being replaced.
+static void rc_act(const rc_plan *pl) {
+    pthread_mutex_lock(&g_mu);
+    int i = -1;
+    for (int k = 0; k < g_npool; k++) if (g_pools[k].lo == pl->lo && g_pools[k].hi == pl->hi) { i = k; break; }
+    if (i < 0 || (g_pools[i].rc_state != RC_WAIT && g_pools[i].rc_state != RC_NONE) || g_pools[i].hits != pl->hits || g_pools[i].rc_no_reclaim) { pthread_mutex_unlock(&g_mu); return; }
+    if ((int)atomic_load_explicit(&g_rc_rg_n, memory_order_relaxed) >= RC_RG_MAX) {   // no room to remember the range: do not reclaim (the safety checks need it)
+        // The table is full for now, not because this pool is bad: it stays a candidate and is retried later (the table drains as ranges are tombstoned).
+        static _Atomic int nfull; if (!atomic_fetch_add(&nfull, 1)) MLOG("[RED] static-source reclaim: the reclaimed-range table is full (%d entries; nothing is reclaimed while live entries remain); this pool is not reclaimed; raise RC_RG_MAX or compact the table", RC_RG_MAX);
+        g_rc_block[RC_R_BUDGET]++;
+        g_pools[i].rc_queued = 1; g_pools[i].rc_next_eval = g_rc_frame() + 30;
+        pthread_mutex_unlock(&g_mu);
+        return;
+    }
+    pool_ent *p = &g_pools[i];
+    p->rc_state = RC_EVICTING;
+    // The zero-copy views over this pool: the game has stopped drawing them, so they are dropped with the pool. They would stay in the residency set
+    // otherwise, and with them the pool's buffer, so the Metal memory would never come back.
+    if (pl->nviews > 0 && p->obj) {
+        int dropped = mtl_alias_drop_pool(p->obj);
+        if (dropped) g_rc_views_dropped += (uint64_t)dropped;
+    }
+    id<MTLBuffer> b = p->buf;
+    if (p->res) { res_remove(b); res_commit(); p->res = 0; g_pool_res_n--; }
+    [g_keep removeObject:b];
+    p->buf = nil; p->gpu = 0;
+    atomic_fetch_add_explicit(&g_pool_gen, 1, memory_order_relaxed);   // the per-thread pool caches hold this pool's buffer: they are stale now
+    b = nil;   // release the driver's view of the pages before the mapping is replaced (a kept no-copy buffer holds a stale GPU mapping)
+    uint64_t done = 0, psize = p->size;
+    for (int r = 0; r < pl->nruns; r++) {
+        void *m = mmap((void *)pl->runs[r].addr, (size_t)pl->runs[r].len, PROT_READ, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+        if (m == MAP_FAILED) { RED_ONCE(90, "static-source reclaim: replacing the pages of pool %p failed (%#llx+%#llx, errno=%d)", (void *)(uintptr_t)p->lo, (unsigned long long)pl->runs[r].addr, (unsigned long long)pl->runs[r].len, errno); continue; }
+        done += pl->runs[r].len;
+    }
+    if (!done) {   // nothing was replaced: the source is still valid, so do not mark it reclaimed; restore the buffer and retry much later
+        p->rc_state = RC_WAIT; p->rc_queued = 0; p->rc_next_eval = g_rc_frame() + 300;
+        if (!rc_buf_restore_locked(i)) {
+            p->rc_no_reclaim = 1;
+            MLOG("[RED] static-source reclaim: every page replacement in pool %p failed and the zero-copy buffer could not be recreated either; the pool is treated as unreclaimable", (void *)(uintptr_t)pl->lo);
+        } else MLOG("[RED] static-source reclaim: every page replacement in pool %p failed; the buffer and residency are restored and the pool stays a candidate for later", (void *)(uintptr_t)pl->lo);
+        pthread_mutex_unlock(&g_mu);
+        return;
+    }
+    // At least one page run was replaced: the source is no longer reliable, so publish the reclaim and the range (checked by the texture paths).
+    p->rc_state = RC_RECLAIMED; p->rc_stamp = nvn_dirty_now(); p->rc_queued = 0; p->rc_no_reclaim = 0;
+    uint64_t slot = atomic_load_explicit(&g_rc_rg_n, memory_order_relaxed);
+    atomic_store_explicit(&g_rc_rg[slot].lo, (uintptr_t)p->lo, memory_order_relaxed);
+    atomic_store_explicit(&g_rc_rg[slot].hi, (uintptr_t)p->hi, memory_order_relaxed);
+    atomic_store_explicit(&g_rc_rg_n, slot + 1, memory_order_release);
+    nvn_dirty_protect((const void *)p->lo, (size_t)p->size);   // fresh pages are mapped read-only; sync any tracker page that was not in PROT state
+    p->rc_bytes = done;
+    g_rc_pools++; g_rc_bytes += done; atomic_fetch_add(&g_rc_live_bytes, done);
+    uint64_t np = g_rc_pools, nb = g_rc_bytes, frame = g_rc_frame();
+    pthread_mutex_unlock(&g_mu);
+    if (g_rc_events++ < 40)
+        MLOG("static-source reclaim: pool #%d %p %llu MB -> out of the residency set, %llu MB reclaimed (coverage %llu MB, %d registered textures / %d upload ranges over %llu MB, frame %llu; %llu pools / %llu MB in total)",
+             i, (void *)(uintptr_t)pl->lo, (unsigned long long)(psize >> 20), (unsigned long long)(done >> 20),
+             (unsigned long long)(pl->coverage >> 20), pl->nreg, pl->nup, (unsigned long long)(pl->up_bytes >> 20), (unsigned long long)frame,
+             (unsigned long long)np, (unsigned long long)(nb >> 20));
+}
+// Invalidate a reclaimed pool when a guest write into its source range is seen after the reclaim: the static proof no longer holds.
+static int rc_check_invalid(const rc_psnap *p) {
+    int dirty = 0;
+    for (int k = 0; k < (int)p->up_nrg && !dirty; k++)
+        if (p->up_rg[k].size && nvn_dirty_tracked((const void *)p->up_rg[k].mem, (size_t)p->up_rg[k].size) && nvn_dirty_since((const void *)p->up_rg[k].mem, (size_t)p->up_rg[k].size, p->stamp)) dirty = 1;
+    for (int i = 0; i < g_rc_nts && !dirty; i++) {
+        const rc_tsnap *t = &g_rc_ts[i];
+        if (t->mem < p->lo || t->mem >= p->hi || !t->size) continue;
+        if (!nvn_dirty_tracked((const void *)t->mem, (size_t)t->size)) continue;
+        if (nvn_dirty_since((const void *)t->mem, (size_t)t->size, p->stamp)) dirty = 1;
+    }
+    if (!dirty) return 0;
+    pthread_mutex_lock(&g_mu);
+    for (int i = 0; i < g_npool; i++) if (g_pools[i].lo == p->lo && g_pools[i].hi == p->hi && !g_pools[i].rc_no_reclaim) {
+        g_pools[i].rc_no_reclaim = 1; g_rc_invalid++;
+        MLOG("[RED] static-source reclaim: the source memory of the already reclaimed pool %p (%llu MB) was written; this pool is not reclaimed again (invalidated %llu in total; its textures' source is zero pages, so a re-upload of them starts from that)",
+             (void *)(uintptr_t)p->lo, (unsigned long long)(p->size >> 20), (unsigned long long)g_rc_invalid);
+        pthread_mutex_unlock(&g_mu);
+        return 1;
+    }
+    pthread_mutex_unlock(&g_mu);
+    return 0;
+}
+// Cheap gate for per-pass safe points in the replay: only enter the expensive tick when a finished upload batch is waiting.
+static void rc_reclaim_maybe(void) {
+    if ((!g_tex_reclaim && !g_tex_reclaim_dry) || !atomic_load_explicit(&g_rc_tick_wanted, memory_order_relaxed)) return;
+    rc_reclaim_tick();
+}
+// Submit-thread tick: drain finished upload batches into "queued" pools, evaluate, reclaim (or only report in the dry run).
+static void rc_reclaim_tick(void) {
+    if (!g_tex_reclaim && !g_tex_reclaim_dry) return;
+    uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC), fr = g_rc_frame();
+    pthread_mutex_lock(&g_rc_que_mu);
+    int npend = g_rc_nque; rc_src *pend = g_rc_que; g_rc_que = NULL; g_rc_nque = g_rc_quecap = 0;
+    pthread_mutex_unlock(&g_rc_que_mu);
+    if (!npend && fr < g_rc_next_scan) { free(pend); return; }
+    if (!npend) {   // steady-state re-evaluation cadence; a finished batch is consumed immediately
+        static uint64_t last_ns;
+        uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+        if (last_ns && now - last_ns < 1000000ull) { free(pend); return; }   // per-pass safe points call this: at most ~1 tick/ms
+        last_ns = now;
+    }
+    // The re-evaluation cadence follows the backlog: a loading phase can queue hundreds of pools in a few dozen frames, and a fixed 30-frame cadence
+    // with a 16-pool cap retires them too slowly for the peak resident to stay down. A big backlog is scanned every frame, and the per-tick pool cap and
+    // byte cap are raised to match (they still bound the work of one tick).
+    uint32_t backlog = 0;
+    { pthread_mutex_lock(&g_mu); for (int i = 0; i < g_npool; i++) if (g_pools[i].rc_state == RC_WAIT) backlog++; pthread_mutex_unlock(&g_mu); }
+    g_rc_next_scan = fr + (backlog > 64 ? 1 : backlog > 16 ? 4 : 30);
+    g_rc_max_pools_eff = backlog > 64 ? 64 : backlog > 16 ? 32 : g_rc_max_pools;
+    g_rc_max_mb_eff = backlog > 64 ? 512u << 20 : backlog > 16 ? 256u << 20 : (uint64_t)g_rc_max_mb << 20;
+    if (npend) {   // a finished upload batch: mark its pools for evaluation (the upload record is already in the pool table)
+        pthread_mutex_lock(&g_mu);
+        for (int k = 0; k < npend; k++)
+            for (int i = 0; i < g_npool; i++) if (g_pools[i].lo == pend[k].lo && g_pools[i].size == pend[k].size) {
+                if (pend[k].gen > g_pools[i].rc_done_gen) g_pools[i].rc_done_gen = pend[k].gen;   // this batch's upload of the pool completed on the GPU
+                g_pools[i].rc_queued = 1; g_pools[i].rc_next_eval = 0; if (g_pools[i].rc_state == RC_NONE) g_pools[i].rc_state = RC_WAIT; break;
+            }
+        pthread_mutex_unlock(&g_mu);
+    }
+    free(pend);
+    if (!rc_snapshot()) {   // g_rmu busy (a texture upload inside tex_by_id): retry at the next safe point; the pool table keeps rc_queued
+        atomic_store_explicit(&g_rc_tick_wanted, 1, memory_order_relaxed);
+        g_rc_next_scan = fr;
+        return;
+    }
+    atomic_store_explicit(&g_rc_tick_wanted, 0, memory_order_relaxed);
+    rc_plan plans[8]; int nplans = 0;
+    int neval = 0, n_now = 0, n_steady = 0, n_unattr = 0, nreclaim = 0;
+    uint64_t eval_b = 0, b_now = 0, b_steady = 0, reclaim_b = 0;
+    uint64_t block[RC_R_N]; memset(block, 0, sizeof block);
+    for (int pi = 0; pi < g_rc_nps; pi++) {
+        const rc_psnap *p = &g_rc_ps[pi];
+        if (p->state == RC_RECLAIMED) { rc_check_invalid(p); continue; }
+        if (!p->queued || p->no_reclaim || fr < p->next_eval) continue;
+        neval++; eval_b += p->size;
+        rc_plan pl; uint8_t why = rc_eval_pool(p, &pl);
+        if (why == RC_R_NONE) {
+            int in_batch = fr <= p->last_up_frame + 2;
+            if (in_batch) { n_now++; b_now += pl.coverage; g_rc_acc_now_pools++; g_rc_acc_now_bytes += pl.coverage; } else { n_steady++; b_steady += pl.coverage; }
+            if (pl.unattributed) n_unattr++;
+            if (g_tex_reclaim_dry) {
+                if (nplans < 8) plans[nplans++] = pl;
+                rc_pool_update(p->lo, p->hi, 0, 1, fr + 60);
+            } else if (atomic_load(&g_rc_live_bytes) + pl.coverage <= (g_rc_budget_mb << 20) && nreclaim < g_rc_max_pools_eff && reclaim_b + pl.coverage <= g_rc_max_mb_eff) {
+                rc_act(&pl); nreclaim++; reclaim_b += pl.coverage;
+            } else why = RC_R_BUDGET;
+        }
+        if (why == RC_R_NOTREADY) rc_pool_update(p->lo, p->hi, 0, 1, fr + 10);
+        else if (why == RC_R_BUDGET) {
+            // The budget is full (or this tick's per-tick cap is reached): the pool is still a good candidate, it just has to wait. It must NOT be
+            // marked rc_no_reclaim, or it would never be looked at again and its source pages would stay resident for the rest of the level.
+            block[why]++;
+            g_rc_block[why]++;   // the budget is a shared limit, so this counts events, not pools
+            rc_pool_update(p->lo, p->hi, 0, 1, fr + 10);
+        }
+        else if (why != RC_R_NONE) {
+            block[why]++;
+            int first = rc_pool_count_reject(p->lo, p->hi, why);   // a hard rejection (rc_no_reclaim) is permanent: count the pool once
+            if (first) g_rc_block[why]++;
+            rc_pool_update(p->lo, p->hi, 1, 0, 0);
+        }
+    }
+    uint64_t dt = clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0;
+    g_rc_ticks++; g_rc_tick_ns += dt;
+    if (g_tex_reclaim_dry && n_now && g_rc_batch_prints < 16) {   // immediate: the process may die inside this frame
+        g_rc_batch_prints++;
+        MLOG("static-source reclaim (dry run), in-batch: %d pools %llu MB could be reclaimed (this tick, up to frame %llu; %llu pools / %llu MB in total)", n_now, (unsigned long long)(b_now >> 20),
+             (unsigned long long)fr, (unsigned long long)g_rc_acc_now_pools, (unsigned long long)(g_rc_acc_now_bytes >> 20));
+    }
+    if ((g_tex_reclaim_dry || g_rc_events || (g_tex_reclaim && neval)) && (nplans || neval) && fr >= g_rc_last_print_frame + 30 && g_rc_scan_prints < 24) {
+        g_rc_scan_prints++; g_rc_last_print_frame = fr;
+        MLOG("static-source reclaim (%s) up to frame %llu: %llu pools / %llu MB reclaimable in-batch since the last line; %d pools / %llu MB are candidates after the quiet period (%d of them with no registered source); %d pools / %llu MB evaluated this tick; %llu pools / %llu MB seen in total; %llu zero-copy views dropped with their pool. Budget in use %llu/%llu MB, range table %llu/%d. Blocked (hard rejections count pools once; the budget counts events): hit %llu dirty %llu cover %llu shared-view %llu overlap %llu not-uploaded %llu outside-heap %llu write-use %llu untracked %llu re-upload %llu object %llu budget %llu; this tick %llu; %.2f ms this tick",
+             g_tex_reclaim_dry ? "dry run" : "on", (unsigned long long)fr, (unsigned long long)g_rc_acc_now_pools, (unsigned long long)(g_rc_acc_now_bytes >> 20), n_steady, (unsigned long long)(b_steady >> 20), n_unattr,
+             neval, (unsigned long long)(eval_b >> 20), (unsigned long long)g_rc_cand_pools, (unsigned long long)(g_rc_cand_bytes >> 20), (unsigned long long)g_rc_views_dropped,
+             (unsigned long long)(atomic_load(&g_rc_live_bytes) >> 20), (unsigned long long)g_rc_budget_mb,
+             (unsigned long long)atomic_load(&g_rc_rg_n), RC_RG_MAX,
+             (unsigned long long)g_rc_block[RC_R_HIT], (unsigned long long)g_rc_block[RC_R_DIRTY], (unsigned long long)g_rc_block[RC_R_COVER],
+             (unsigned long long)g_rc_block[RC_R_ALIAS], (unsigned long long)g_rc_block[RC_R_OVERLAP], (unsigned long long)g_rc_block[RC_R_NOTREADY],
+             (unsigned long long)g_rc_block[RC_R_HEAP], (unsigned long long)g_rc_block[RC_R_WRITEUSE], (unsigned long long)g_rc_block[RC_R_UNTRACKED],
+             (unsigned long long)g_rc_block[RC_R_REUPLOAD], (unsigned long long)g_rc_block[RC_R_OBJ], (unsigned long long)g_rc_block[RC_R_BUDGET],
+             (unsigned long long)(block[RC_R_HIT] + block[RC_R_DIRTY] + block[RC_R_COVER] + block[RC_R_ALIAS] + block[RC_R_OVERLAP] + block[RC_R_NOTREADY] + block[RC_R_HEAP] + block[RC_R_WRITEUSE] + block[RC_R_UNTRACKED] + block[RC_R_REUPLOAD] + block[RC_R_OBJ] + block[RC_R_BUDGET]), (double)dt / 1e6);
+        g_rc_acc_now_pools = g_rc_acc_now_bytes = 0;
+    }
+    for (int k = 0, shown = 0; k < nplans && shown < 10; k++) {
+        const rc_plan *pl = &plans[k];
+        uint64_t span = pl->hi - pl->lo;
+        uint64_t h = (uint64_t)pl->lo * 0x9E3779B97F4A7C15ull ^ (pl->last_up_frame + 1) * 0xC2B2AE3D27D4EB4Full;
+        int seen = 0; for (int i = 0; i < g_rc_log_n; i++) if (g_rc_log_seen[i] == h) { seen = 1; break; }
+        if (seen) continue;
+        if (g_rc_log_n < 256) g_rc_log_seen[g_rc_log_n++] = h;
+        shown++;
+        MLOG("  static-source candidate #%d: %p %llu MB %s coverage %llu%% (%llu MB of pages), %d registered textures / %d upload ranges over %llu MB, last upload frame %llu, last hit frame %llu -> %llu MB reclaimable%s",
+             k + 1, (void *)(uintptr_t)pl->lo, (unsigned long long)(span >> 20), (g_rc_frame() <= pl->last_up_frame + 2 ? "in this frame's batch" : "quiet"),
+             (unsigned long long)(pl->coverage * 100 / (span ? span : 1)), (unsigned long long)(pl->coverage >> 20), pl->nreg, pl->nup,
+             (unsigned long long)(pl->up_bytes >> 20), (unsigned long long)pl->last_up_frame, (unsigned long long)pl->last_hit_frame,
+             (unsigned long long)(pl->coverage >> 20), pl->unattributed ? " (no registered source)" : "");
+    }
+}
+// Low-memory guard -> static-source reclaim: ask the next submit-thread safe point to evaluate the reclaim again. Callable from any thread (it only sets
+// the atomic flag the submit thread already watches); a no-op when the reclaim switches are off.
+void mtl_tex_reclaim_hint(void) { if (g_tex_reclaim || g_tex_reclaim_dry) atomic_store_explicit(&g_rc_tick_wanted, 1, memory_order_relaxed); }
 // Lock-free copy of texture ID → serial (the replay hot path only needs the serial: store lookahead index, binding set of the clear-only hoist): texture IDs are 20 bits, fixed 1M entries (BSS, only touched pages are used),
 // release write at registration, relaxed atomic read on the reader side, without entering g_rmu (the former h_ser locked and unlocked on every lookup, thousands of times per frame in the camp)
 static _Atomic uint64_t g_tser[1 << 20];
@@ -7185,7 +7996,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
     // textures from the CPU, reads them back with ReadTexels on its own thread before any draw uses them, and copies the blocks into its 5120x5120 roughness atlas. Read from the
     // never-uploaded host texture they were zeros, the atlas stayed empty, and the opening cave's stone blocks got roughness 0 and no torch light
     int nvn_ft_written(const tex_t *);
-    if ((t->has_layout || tex_cpu_written(t->serial) || (DM_GAME_TEX_DIRTY_UPLOAD && nvn_ft_written(t))) && t->mem) {
+    if ((t->has_layout || tex_cpu_written(t->serial) || (DM_GAME_TEX_DIRTY_UPLOAD && nvn_ft_written(t))) && t->mem && !rc_src_reclaimed((uintptr_t)t->mem, t->L.size)) {   // static-source reclaim: a reclaimed source is read back from the private copy below
         uint32_t lw = MAX(t->d.width >> level, 1u), lh = MAX(t->d.height >> level, 1u), lz = is3d ? MAX(t->d.depth >> level, 1u) : 1;
         size_t lp = (size_t)((lw + bw - 1) / bw) * bpb, lr = (lh + bh - 1) / bh;
         uint8_t *lin = malloc(lp * lr * lz);
@@ -7211,6 +8022,7 @@ void mtl_read_texels(const tex_t *t, unsigned level, unsigned layer0, const NVNc
 }
 static void copy_b2t(const p_copy_b2t *c) {
     if (c->tex) zskip_del(c->tex->serial);
+    rc_write_use(c->tex ? c->tex->serial : 0);   // static-source reclaim: buffer -> texture destination
     id<MTLTexture> t = tex_mtl(c->tex);
     if (!t) { PD("C ser=%llu (no host texture)", c->tex->serial); return; }
     int bw, bh, bpb = nvn_fmt_bpb(c->tex->d.format, &bw, &bh);
@@ -7336,6 +8148,7 @@ static void copy_t2t(const p_copy_t2t *c) {
         int ss = c->has_sv && c->sv.set_layers ? c->sv.min_layer : 0, ds = c->has_dv && c->dv.set_layers ? c->dv.min_layer : 0;
         if (zskip_has(c->src->serial, sl, ss)) zskip_add(c->dst->serial, dl, ds);
     }
+    if (c->dst) rc_write_use(c->dst->serial);   // static-source reclaim: the copy destination can change after its upload
     id<MTLTexture> s = tex_mtl(c->src), d = tex_mtl(c->dst);
     PD("T src=%llu dst=%llu %dx%dx%d→%dx%dx%d flags=%#x", c->src->serial, c->dst->serial, c->sr.width, c->sr.height, c->sr.depth, c->dr.width, c->dr.height, c->dr.depth, c->flags);
     if (!s || !d) return;
@@ -7420,6 +8233,7 @@ static unsigned mtl_pf_chmask(MTLPixelFormat pf) {
 // view with changed format: clear on a view of that format; partial region, partial channels, compressed / packaged textures (no render target usage): report a failure, to be implemented
 static void clear_tex(const p_clear_tex *c) {
     if (c->tex) zskip_del(c->tex->serial);
+    rc_write_use(c->tex ? c->tex->serial : 0);   // static-source reclaim
     id<MTLTexture> t = tex_mtl(c->tex);
     PD("X ser=%llu view format %#x region %d,%d,%d %dx%dx%d mask %#x %s %g,%g,%g,%g", c->tex->serial, c->has_view && c->view.set_format ? c->view.format : -1, c->r.xoffset, c->r.yoffset, c->r.zoffset, c->r.width, c->r.height, c->r.depth, c->mask,
        c->is_uint ? "ui" : "f", c->is_uint ? (double)c->c.u[0] : c->c.f[0], c->is_uint ? (double)c->c.u[1] : c->c.f[1], c->is_uint ? (double)c->c.u[2] : c->c.f[2], c->is_uint ? (double)c->c.u[3] : c->c.f[3]);

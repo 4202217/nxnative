@@ -115,6 +115,10 @@ def header(g):
     if tdu not in ('on', 'off') or (tdu == 'on' and tfu != 'on'): sys.exit(f'{g.id}: tex_dirty_upload must be on or off, and needs tex_flush_upload on: {tdu}')
     tds = g.get('tex_dyn_slots', 'off')   # shaders whose texture handle the translator could not trace to one slot: slot indices in c2, the bound slots in the fallback arrays (nvn_mtl.m): on / off
     if tds not in ('on', 'off'): sys.exit(f'{g.id}: tex_dyn_slots must be on or off: {tds}')
+    trc = g.get('tex_reclaim', 'off')   # reclaim the guest source pages of static packaged textures once a GPU-private copy exists (nvn_mtl.m, DM_TEX_RECLAIM overrides): off / dryrun / on
+    if trc not in ('off', 'dryrun', 'on'): sys.exit(f'{g.id}: tex_reclaim must be off, dryrun or on: {trc}')
+    prn = g.get('pool_renew', 'off')   # on memory-pool Finalize, replace the pool's interior guest pages (same bytes) so Metal can free the dead zero-copy buffer (nvn_mtl.m mtl_pool_del, DM_POOL_RENEW overrides): on / off
+    if prn not in ('on', 'off'): sys.exit(f'{g.id}: pool_renew must be on or off: {prn}')
     vcr = g.get('vconv_range', 'off')   # vertex attributes converted on the CPU only over the vertices each draw reads (nvn_mtl.m vc_draw_range): on / off
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
@@ -146,6 +150,8 @@ def header(g):
          f'#define DM_GAME_ARGS {q(g.get("game_args", ""))}',   # game arguments when the command line gives none (main.c; Octopath Traveler 0: Unreal's -SwitchVirtualAddressSpaceSize=)
          f'#define DM_GAME_ENV {q(g.get("game_env", ""))}',   # KEY=VALUE pairs getenv answers (hle_os.c; Absolum: .NET's DOTNET_GCRegionRange)
          f'#define DM_GAME_MEM_MAP_LIMIT {int(mml == "on")}',
+         f'#define DM_GAME_TEX_RECLAIM {0 if trc == "off" else (1 if trc == "dryrun" else 2)}',   # nvn_mtl.m: static packaged-texture source page reclaim
+         f'#define DM_GAME_POOL_RENEW {int(prn == "on")}',   # nvn_mtl.m: pool page renew on Finalize
          f'#define DM_GAME_DISPLAY_VERSIONS {vers}',
          f'#define DM_GAME_PRESENT_DISPLAY {int(pi == "display")}',
          f'#define DM_GAME_CORE_PREEMPT {int(cp == "on")}',

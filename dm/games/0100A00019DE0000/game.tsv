@@ -36,6 +36,13 @@ mem_stack	0x10000000
 app_pool	0xCD500000
 mem_used	0x6c00000
 
+# Static packaged-texture source page reclaim (nvn_mtl.m): once a texture has a GPU-private copy, the guest pool pages that only held its source go
+# back to the system (out of the residency set, replaced by zero pages). Quality-neutral. Measured on the Mac from this tree (v0, title -> save,
+# 70 s of play): resident 2480 MB / GPU 2459 MB at frame 1200 with it on against 3460 MB / 2860 MB with it off, same picture. DM_TEX_RECLAIM=0 / 1 overrides it.
+tex_reclaim	on
+# Pool page renew (D1) is left off here: its effect on this title (a few MB, measured while developing it) does not pay for the GPU wait per batch
+# of pool finalizes. DM_POOL_RENEW=1 turns it on.
+
 # ---- Shader split ----
 shader_groups	/Shaders/=shaders
 shader_note	Hades II shaders (Shaders/NVN/bin)

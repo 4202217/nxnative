@@ -28,6 +28,12 @@ int dm_guest_renewable(uint64_t a, size_t n) {
     uint64_t b = (uint64_t)(uintptr_t)g_heap;
     return g_heap && n && a >= b && a - b < g_heap_cur && n <= g_heap_cur - (a - b);
 }
+// The range the last SetHeapSize opened, for the same reason: a caller that must refuse everything outside it needs both ends. 0 = no heap yet.
+int dm_guest_heap_range(uint8_t **base, size_t *size) {
+    if (!g_heap || !g_heap_cur) return 0;
+    *base = g_heap; *size = g_heap_cur;
+    return 1;
+}
 static uint8_t *g_alias; static size_t g_alias_cap;
 static _Atomic uint64_t *g_alias_bits;   // alias region page bitmap (alias_pages)
 static uint8_t *g_stack; static size_t g_stack_cap;
