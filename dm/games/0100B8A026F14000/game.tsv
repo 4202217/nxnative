@@ -27,8 +27,12 @@ romfs_marker	FFRS/Content/Paks/FFRS-Switch.ucas
 zip_store	.pak:.ttf:.txt:.ucas:.utoc:.metallib
 
 # ---- Graphics ----
-# The JP release's setting (same engine build and shader libraries): 60 fps (30 on the Switch) by the host's write of rhi.SyncInterval (hle_fpslock.c); DM_FPS_TARGET=30 keeps the game's 30
+# The JP release's setting (same engine build and shader libraries): 60 fps (30 on the Switch). The JP profile gets it by the host's write of rhi.SyncInterval
+# (hle_fpslock.c, registered for its main build); this build's row is not there yet, so the game keeps the 30 its Switch device profile asks for and `display`
+# paces one frame per display tick instead. Unreal steps by the time that really passed, so the speed does not follow the frame rate. DM_PRESENT_INTERVAL=game
+# or DM_FPS_TARGET=30 in Documents/env.txt restores the Switch behaviour without a rebuild
 fps_target	60
+present_interval	display
 
 # ---- Memory ----
 # The JP release's layout, verified on this build: the engine's page allocator never returns address space, so the region is capped at 4064 MB (game_args) in Engage's 5 GB block

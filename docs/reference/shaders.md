@@ -724,6 +724,20 @@ Cross/helper lowering and the optional Metal checks. Shader acceptance does not
 imply admission of every native host layout. None of these tests executes a
 shader on a GPU.
 
+### A call argument that the AST optimizer turned into a constant
+
+- **Symptom:** `[RED] <key>: KeyNotFoundException: The given key 'Ryujinx.Graphics.Shader.StructuredIr.AstOperand' was not present in the dictionary`, and the shader is missing from the library. Across a game's compute shaders the failures are a mix of this and `InvalidCastException: Unable to cast object of type 'AstOperation'`, both looking unrelated to the shader being translated.
+- **Cause:** `GenerateCall` (`CodeGen/Spirv/Instructions.cs`) cast every call argument to `AstOperand` and passed it to `GetLocalPointer`, which looks the operand up in the function's local table. The AST optimizer propagates a single-use argument into its source at the call site (`AstOptimizer.PropagateExpression`), so an argument can arrive as a constant or an expression instead. The type check in front of the lookup was a `Debug.Assert`, which a Release build compiles out, so the lookup ran with the wrong operand and threw.
+- **Fix:** an argument that is not a local is stored in a `Function`-storage temporary of its own, and that temporary's pointer is passed, the callee taking every argument by pointer. The GLSL backend already did this by routing every argument through `GetSourceExpr`.
+- **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100606026F12000/README.md), whose `GlobalDistanceFieldCompositeObjects.usf` compute shaders pass a page index of 1 this way. Over the game's 2,934 compute shaders the change took translation from 1,102 to 2,096: 816 `KeyNotFoundException` and 212 `InvalidCastException` failures gone, and all 2,096 then compiled for iphoneos.
+
+### The image extent of a bound texture, against a declared guess
+
+- **Symptom:** `[RED] image atomics: unsupported or overflowing IMG extent (shader <key> stage 5 slot 2 texture <id>)`, and the run aborts (`CRASH sig=6`) at the first dispatch that uses the image, after the scene has already played for minutes.
+- **Cause:** `imga_extent` (`nvn_mtl.m`) required the bound texture's `MTLTextureType` to equal the `nvn_rbind`'s `dtt`. `dtt` is the type of the dummy texture an unbound slot falls back to, and for a shader that queries an image handle its answer table has no type for, it carries the translator's guess — FINAL FANTASY RESONANCE's `cs_global.bin#1070` has 34 "no type in the answer table, using 2D" notes and declares `texture_buffer`, while the game binds another kind. The comparison failed, and the run aborted rather than binding.
+- **Fix:** the extent that must be backed is the bound texture's own, because the atomics index the image through the view SPIRV-Cross built and `dmsh_atomic.py` rewrote that view's coordinate helper to address it with 64-bit layer-aware arithmetic. The supported shapes stay buffer, 2D and 2D-array images; multisampled images are still refused, and the capacity checks below (`atom_scratch`, `nvn_imga_direct_ok`) still reject a binding whose storage does not cover the extent.
+- **Found on:** [FINAL FANTASY RESONANCE](../../dm/games/0100B8A026F14000/README.md) on an iPhone Air, entering the first scene after the difficulty choice.
+
 ## Shaders compiled at run time
 
 ### Built-in shaders compiled with the game's own GLSLC
