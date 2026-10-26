@@ -316,9 +316,26 @@ namespace Ryujinx.Graphics.Shader.CodeGen.Spirv
             {
                 IAstNode operand = operation.GetSource(i + 1);
 
-                AstOperand local = (AstOperand)operand;
-                Debug.Assert(local.Type == OperandType.LocalVariable);
-                args[i] = context.GetLocalPointer(local);
+                if (operand is AstOperand local && local.Type == OperandType.LocalVariable)
+                {
+                    args[i] = context.GetLocalPointer(local);
+                }
+                else
+                {
+                    // The AST optimizer propagates a single-use argument into its constant or
+                    // expression at the call site (AstOptimizer.PropagateExpression), so a call
+                    // argument is not always a local variable. The callee takes every argument by
+                    // Function-storage pointer, so materialise the value in a temporary of its own.
+                    // FINAL FANTASY RESONANCE's GlobalDistanceFieldCompositeObjects.usf compute
+                    // shaders reach this with an integer constant (a page index of 1) and aborted
+                    // the whole translation with KeyNotFoundException before this branch existed.
+                    AggregateType argType = function.GetArgumentType(i);
+                    SpvInstruction argPointerType = context.TypePointer(StorageClass.Function, context.GetType(argType));
+                    SpvInstruction tmp = context.Variable(argPointerType, StorageClass.Function);
+                    context.AddLocalVariable(tmp);
+                    context.Store(tmp, context.Get(argType, operand));
+                    args[i] = tmp;
+                }
             }
 
             AggregateType retType = function.ReturnType;
