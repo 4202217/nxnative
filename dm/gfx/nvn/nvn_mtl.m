@@ -5877,7 +5877,14 @@ static id<MTLTexture> img_binding(int tid, const nvn_rbind *b, uint64_t *rid, in
     return t;
 }
 static int imga_extent(id<MTLTexture> t, const nvn_rbind *b, uint64_t *bytes) {
-    if (!t || t.textureType != (MTLTextureType)b->dtt || t.sampleCount > 1) return 0;
+    // The atomics index the image through the view SPIRV-Cross built, whose shape is the bound
+    // texture's own (dmsh_atomic.py rewrote its coordinate helper to use 64-bit layer-aware
+    // addressing), so the extent that has to be backed is the bound texture's, not the one the
+    // translator declared. A shader that queries an image handle the answer table has no type for
+    // declares the guess (texture_buffer here: FINAL FANTASY RESONANCE's GlobalDistanceField
+    // compute shaders carry 34 "using 2D" notes) while the game binds another kind, and the strict
+    // comparison to that guess aborted the run on the first dispatch of the first scene.
+    if (!t || t.sampleCount > 1) return 0;
     if (t.textureType != MTLTextureTypeTextureBuffer && t.textureType != MTLTextureType2D && t.textureType != MTLTextureType2DArray) return 0;
     return nvn_imga_bytes(t.width, t.textureType == MTLTextureTypeTextureBuffer ? 1 : t.height,
                           t.textureType == MTLTextureType2DArray ? t.arrayLength : 1, bytes);
