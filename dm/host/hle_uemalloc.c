@@ -45,6 +45,9 @@ static const struct { const char *build, *what; int layout; uint64_t obj, vtable
     { "0a4f14a5c12f470a4d3168a8f2ae6005", "SHIN MEGAMI TENSEI V: Vengeance 1.0.3", UE4_27, 0, 0x5a7f0a8, 0x1f2f63c },
     // FINAL FANTASY RESONANCE 1.0.1: the FMallocBinned3 object (main+0x77c6210, bss), its vtable (main+0x67df800, 32 slots), the cut constructor call (main+0x137f0)
     { "84e182f72ee1da4f477804bd05b54c15", "FINAL FANTASY RESONANCE 1.0.1", UE5_6, 0x77c6210, 0x67df800, 0x137f0 },
+    // FINAL FANTASY RESONANCE 1.0.1 HK (0100B8A026F14000): the same engine build as the JP main above through nninitStartup — the object, the vtable (18 of its 32 slots in the allocator
+    // code range, the base FMalloc vtable at main+0x67dff48 with pure slots 6/8/10 zero) and the cut site byte-identical (dm/games/0100B8A026F14000/patches.py)
+    { "b7f965b9d7227db8e29f04e84ea7331b", "FINAL FANTASY RESONANCE 1.0.1 HK", UE5_6, 0x77c6210, 0x67df800, 0x137f0 },
 };
 enum { NSLOT = 32 };
 

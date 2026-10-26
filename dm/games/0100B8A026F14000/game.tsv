@@ -1,0 +1,56 @@
+# FINAL FANTASY RESONANCE, the Hong Kong release (0100B8A026F14000): the region variant of the JP release's build ([0100606026F12000](../0100606026F12000/game.tsv)) — the same engine
+# (SDK MW+EpicGames+UnrealEngine-5_6_1 in main, UE 5.6.1, the desktop renderer, SF_GLSL_SWITCH shaders), the same sdk and subsdk0 builds (STEINS;GATE RE:BOOT's), the same shader libraries
+# (73,496 shaders, every table of the JP profile's included here from this build's own files), and a main whose code through nninitStartup is byte-identical at every site that matters
+# (the 62 GB default at main+0x137c0, the FMallocBinned3 constructor call at main+0x137f0, the object at main+0x77c6210, the pool base at main+0x7c148a0; its build ID differs, so every
+# build-keyed registration needs this profile of its own: the cut, the allocator takeover in dm/host/hle_uemalloc.c, this memory layout).
+# Format: see dm/games/README.md
+
+# ---- Identity ----
+title_id	0100B8A026F14000
+program_id	0100B8A026F14000
+
+# ---- App ----
+# Game name: only a label for profile listings and the Mac window title; the iOS app name is the game name in the base NSP, and the bundle ID comes from the base game title ID (build_ipa.sh / NSP script)
+name	FINAL FANTASY RESONANCE (HK)
+ipa	FinalFantasyResonanceHK.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v1	1.0.1	main=b7f965b9d7227db8e29f04e84ea7331b	subsdk0=ab62fe8edd07a6a293f885d54359e559	sdk=0023a1b06130cd795f7bc4613772af0a
+package	v1
+shader_versions	v1
+
+# ---- Files ----
+# load order as on Horizon: main, subsdk*, sdk (subsdk0 = NintendoSDK_movie, which main imports from; the sdk is STEINS;GATE RE:BOOT's build)
+modules	main subsdk0 sdk
+romfs_marker	FFRS/Content/Paks/FFRS-Switch.ucas
+zip_store	.pak:.ttf:.txt:.ucas:.utoc:.metallib
+
+# ---- Graphics ----
+# The JP release's setting (same engine build and shader libraries): 60 fps (30 on the Switch) by the host's write of rhi.SyncInterval (hle_fpslock.c); DM_FPS_TARGET=30 keeps the game's 30
+fps_target	60
+
+# ---- Memory ----
+# The JP release's layout, verified on this build: the engine's page allocator never returns address space, so the region is capped at 4064 MB (game_args) in Engage's 5 GB block
+# (256 MB in front + 4.375 GB alias region + 256 MB stack region + 128 MB heap region), and FMallocBinned3 runs on a host malloc zone (the constructor call cut, hle_uemalloc.c layout UE5_6).
+# The NSP script's provisional profile kept the engine's raw 62 GB request, which a Mac reserves but the iPhone cannot (FATAL reserve guest AS at nnosInitialize)
+game_args	-SwitchVirtualAddressSpaceSize=4064
+mem_reserve	0x140000000
+mem_alias	0x118000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 20 MB of system resource
+sys_resource	0x1400000
+
+# ---- Input ----
+# A 3D field whose camera the right stick tilts and turns: the 3D pad layout. It plays docked (1920x1080)
+pad_layout	full
+
+# ---- NVN ----
+# 2,077 vertex shaders (Unreal's particle vertex factories) pick one of several c2 table slots at run time, as the JP release's (the same shader libraries)
+tex_dyn_slots	on
+
+# ---- Shader split ----
+# The two shader libraries of the IoStore container FFRS-Switch.utoc / .ucas: the engine's global shaders and the game's material shaders, as the JP release's
+shader_groups	ShaderArchive-Global-=global ShaderArchive-=game
+shader_note	FINAL FANTASY RESONANCE (HK) shaders
